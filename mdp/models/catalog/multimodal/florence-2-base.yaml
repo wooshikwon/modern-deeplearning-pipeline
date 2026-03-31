@@ -1,0 +1,45 @@
+# Microsoft Florence-2 Base — 통합 비전-언어 모델 (프롬프트 기반 멀티태스크)
+# 단일 모델로 캡셔닝, 객체 탐지, 세그멘테이션, OCR 등 다양한 비전 태스크를 텍스트 프롬프트로 수행
+name: florence-2-base
+family: florence
+class_path: transformers.AutoModelForCausalLM
+
+pretrained_sources:
+  - "hf://microsoft/Florence-2-base"
+  - "hf://microsoft/Florence-2-base-ft"
+
+supported_tasks:
+  - vision_language
+  - object_detection
+  - image_classification
+
+default_head:
+  task: vision_language
+  _component_: CausalLMHead
+  hidden_dim: 768
+
+input_spec:
+  image:
+    channels: 3
+    height: 768
+    width: 768
+    dtype: float32
+  text:
+    max_length: 1024
+    dtype: long
+
+init_args_schema:
+  pretrained_model_name_or_path: {type: str, default: "microsoft/Florence-2-base"}
+  trust_remote_code: {type: bool, default: true}  # Florence-2는 커스텀 코드 필요
+
+adapter_defaults:
+  lora:
+    # 인코더-디코더 양쪽의 어텐션 레이어에 적용
+    target_modules: ["q_proj", "v_proj", "k_proj"]
+    r: 8
+    alpha: 16
+
+memory:
+  params_m: 232
+  fp32_gb: 0.88
+  fp16_gb: 0.44

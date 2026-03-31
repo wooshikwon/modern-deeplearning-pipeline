@@ -1,0 +1,46 @@
+name: mistral-7b
+family: mistral
+class_path: transformers.AutoModelForCausalLM
+
+pretrained_sources:
+  - "hf://mistralai/Mistral-7B-v0.3"
+  - "hf://mistralai/Mistral-7B-Instruct-v0.3"
+
+supported_tasks:
+  - causal_lm
+  - text_generation
+
+default_head:
+  task: causal_lm
+  _component_: CausalLMHead
+  hidden_dim: 4096
+  vocab_size: 32768
+
+input_spec:
+  max_length: 32768
+  vocab_size: 32768
+  dtype: long
+
+init_args_schema:
+  rope_theta: {type: float, default: 1000000}
+  attention_dropout: {type: float, default: 0.0}
+  max_position_embeddings: {type: int, default: 32768}
+  sliding_window: {type: int, default: 4096}
+
+adapter_defaults:
+  lora:
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    r: 16
+    alpha: 32
+    task_type: "CAUSAL_LM"
+  qlora:
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    r: 16
+    alpha: 32
+    task_type: "CAUSAL_LM"
+    bits: 4
+
+memory:
+  params_m: 7248
+  fp32_gb: 29.0
+  fp16_gb: 14.5

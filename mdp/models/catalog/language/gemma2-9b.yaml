@@ -1,0 +1,44 @@
+name: gemma2-9b
+family: gemma
+class_path: transformers.AutoModelForCausalLM
+
+pretrained_sources:
+  - "hf://google/gemma-2-9b"
+  - "hf://google/gemma-2-9b-it"
+
+supported_tasks:
+  - causal_lm
+  - text_generation
+
+default_head:
+  task: causal_lm
+  _component_: CausalLMHead
+  hidden_dim: 3584
+  vocab_size: 256000
+
+input_spec:
+  max_length: 8192
+  vocab_size: 256000
+  dtype: long
+
+init_args_schema:
+  attention_dropout: {type: float, default: 0.0}
+  max_position_embeddings: {type: int, default: 8192}
+
+adapter_defaults:
+  lora:
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
+    r: 16
+    alpha: 32
+    task_type: "CAUSAL_LM"
+  qlora:
+    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    r: 16
+    alpha: 32
+    task_type: "CAUSAL_LM"
+    bits: 4
+
+memory:
+  params_m: 9242
+  fp32_gb: 37.0
+  fp16_gb: 18.5

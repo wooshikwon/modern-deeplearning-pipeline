@@ -1,0 +1,40 @@
+name: roberta-base
+family: roberta
+class_path: transformers.AutoModel
+
+pretrained_sources:
+  - "hf://roberta-base"
+  - "hf://FacebookAI/roberta-base"
+
+supported_tasks:
+  - text_classification
+  - token_classification
+  - feature_extraction
+
+default_head:
+  task: text_classification
+  _component_: SequenceClassificationHead
+  hidden_dim: 768
+  vocab_size: 50265
+
+input_spec:
+  max_length: 512
+  vocab_size: 50265
+  dtype: long
+
+init_args_schema:
+  attention_probs_dropout_prob: {type: float, default: 0.1}
+  hidden_dropout_prob: {type: float, default: 0.1}
+  max_position_embeddings: {type: int, default: 514}
+
+adapter_defaults:
+  lora:
+    target_modules: ["query", "value"]
+    r: 8
+    alpha: 16
+    task_type: "SEQ_CLS"
+
+memory:
+  params_m: 124.6
+  fp32_gb: 0.47
+  fp16_gb: 0.24

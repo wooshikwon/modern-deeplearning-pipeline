@@ -1,0 +1,44 @@
+# Swin Transformer Base — 윈도우 기반 계층적 비전 트랜스포머
+name: swin-base-patch4-window7-224
+family: swin
+class_path: timm.create_model
+
+pretrained_sources:
+  - "timm://swin_base_patch4_window7_224"
+  - "hf://microsoft/swin-base-patch4-window7-224"
+
+supported_tasks:
+  - image_classification
+  - feature_extraction
+  - semantic_segmentation
+
+default_head:
+  task: image_classification
+  _component_: ClassificationHead
+  hidden_dim: 1024
+  dropout: 0.1
+
+input_spec:
+  channels: 3
+  height: 224
+  width: 224
+  dtype: float32
+
+init_args_schema:
+  num_classes:
+    type: int
+    default: 1000
+  pretrained:
+    type: bool
+    default: true
+
+adapter_defaults:
+  lora:
+    target_modules: ["qkv", "proj"]
+    r: 16
+    alpha: 32
+
+memory:
+  params_m: 87.8
+  fp32_gb: 0.34
+  fp16_gb: 0.17

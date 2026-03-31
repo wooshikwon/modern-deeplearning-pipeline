@@ -1,0 +1,45 @@
+# BLIP-2 OPT-2.7B — Q-Former 브릿지로 비전 인코더와 LLM을 연결하는 멀티모달 모델
+# 이미지 이해, 캡셔닝, 시각적 질의응답 등 다양한 비전-언어 태스크 지원
+name: blip2-opt-2.7b
+family: blip2
+class_path: transformers.Blip2ForConditionalGeneration
+
+pretrained_sources:
+  - "hf://Salesforce/blip2-opt-2.7b"
+
+supported_tasks:
+  - vision_language
+  - text_generation
+
+default_head:
+  task: text_generation
+  _component_: CausalLMHead
+  hidden_dim: 2560  # OPT-2.7B의 히든 차원
+  vocab_size: 50272
+
+input_spec:
+  image:
+    channels: 3
+    height: 224
+    width: 224
+    dtype: float32
+  text:
+    max_length: 512
+    dtype: long
+
+init_args_schema:
+  pretrained_model_name_or_path: {type: str, default: "Salesforce/blip2-opt-2.7b"}
+  num_query_tokens: {type: int, default: 32}
+
+adapter_defaults:
+  lora:
+    # OPT LLM 부분의 어텐션 레이어에 적용
+    target_modules: ["q_proj", "v_proj"]
+    r: 8
+    alpha: 16
+    task_type: "CAUSAL_LM"
+
+memory:
+  params_m: 3770
+  fp32_gb: 15.0
+  fp16_gb: 7.5

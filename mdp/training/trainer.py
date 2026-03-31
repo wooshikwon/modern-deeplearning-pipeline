@@ -1,0 +1,496 @@
+"""Trainer — MDP 학습 루프.
+
+에폭/스텝 기반 학습, AMP, gradient accumulation, gradient clipping,
+콜백 호출, MLflow 로깅을 담당한다.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from pathlib import Path
+from typing import Any
+
+import torch
+import torch.nn as nn
+from torch.amp import GradScaler, autocast
+from torch.nn.utils import clip_grad_norm_
+from torch.utils.data import DataLoader
+
+from mdp.settings.resolver import ComponentResolver
+from mdp.settings.schema import Settings
+from mdp.training.callbacks.base import BaseCallback
+
+logger = logging.getLogger(__name__)
+
+STRATEGY_MAP: dict[str, str] = {
+    "ddp": "mdp.training.strategies.ddp.DDPStrategy",
+    "fsdp": "mdp.training.strategies.fsdp.FSDPStrategy",
+    "deepspeed": "mdp.training.strategies.deepspeed.DeepSpeedStrategy",
+    "deepspeed_zero3": "mdp.training.strategies.deepspeed.DeepSpeedStrategy",
+}
+
+
+class Trainer:
+    """MDP 학습 루프."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        model: nn.Module,
+        train_loader: DataLoader,
+        val_loader: DataLoader | None = None,
+    ) -> None:
+        self.settings = settings
+        self.model = model
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.resolver = ComponentResolver()
+
+        recipe = settings.recipe
+        training = recipe.training
+
+        # Device
+        self.device = self._detect_device()
+
+        # Training config
+        self.epochs = training.epochs
+        self.max_steps = training.max_steps
+        self.grad_accum_steps = training.gradient_accumulation_steps
+        self.grad_clip_norm = training.gradient_clip_max_norm
+        self.gradient_checkpointing = training.gradient_checkpointing
+        self.compile_mode = training.compile
+        self.val_check_interval = training.val_check_interval
+
+        # AMP setup
+        precision = training.precision
+        if precision == "fp16":
+            self.amp_enabled = True
+            self.amp_dtype = torch.float16
+            self.scaler = GradScaler("cuda", enabled=True)
+        elif precision == "bf16":
+            self.amp_enabled = True
+            self.amp_dtype = torch.bfloat16
+            self.scaler = GradScaler("cuda", enabled=False)
+        else:  # fp32
+            self.amp_enabled = False
+            self.amp_dtype = torch.float32
+            self.scaler = GradScaler("cuda", enabled=False)
+
+        # Components
+        self.optimizer = self._create_optimizer(recipe.optimizer)
+        self.scheduler, self.scheduler_interval = self._create_scheduler(
+            recipe.scheduler
+        )
+        self.loss_fn = self._create_loss(recipe.loss)
+        self.callbacks = self._create_callbacks(recipe.callbacks)
+        self.strategy = self._create_strategy(settings)
+
+        # State
+        self.global_step = 0
+        self.start_epoch = 0
+        self.best_metrics: dict[str, float] = {}
+
+    @staticmethod
+    def _detect_device() -> torch.device:
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+
+    # ── Component creation ──
+
+    def _create_optimizer(self, config: dict[str, Any]) -> torch.optim.Optimizer:
+        # Model-defined optimizer takes priority
+        custom = self.model.configure_optimizers() if hasattr(self.model, "configure_optimizers") else None
+        if custom and isinstance(custom, dict) and "optimizer" in custom:
+            return custom["optimizer"]
+
+        klass, kwargs = self.resolver.resolve_partial(config)
+        return klass(self.model.parameters(), **kwargs)
+
+    def _create_scheduler(
+        self, config: dict[str, Any] | None
+    ) -> tuple[Any, str] | tuple[None, str]:
+        if config is None:
+            return None, "step"
+
+        config = dict(config)  # don't mutate original
+        interval = config.pop("interval", "step")
+        warmup_steps = config.pop("warmup_steps", 0)
+        warmup_ratio = config.pop("warmup_ratio", 0.0)
+
+        # Calculate warmup_steps from ratio if needed
+        if warmup_steps == 0 and warmup_ratio > 0:
+            total_steps = self._estimate_total_steps()
+            warmup_steps = int(total_steps * warmup_ratio)
+
+        klass, kwargs = self.resolver.resolve_partial(config)
+        base_scheduler = klass(self.optimizer, **kwargs)
+
+        if warmup_steps > 0:
+            base_scheduler = self._wrap_with_warmup(
+                base_scheduler, warmup_steps
+            )
+
+        return base_scheduler, interval
+
+    def _wrap_with_warmup(self, scheduler: Any, warmup_steps: int) -> Any:
+        """LinearLR warmup → base scheduler via SequentialLR."""
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer,
+            start_factor=1e-8,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        return torch.optim.lr_scheduler.SequentialLR(
+            self.optimizer,
+            schedulers=[warmup, scheduler],
+            milestones=[warmup_steps],
+        )
+
+    def _create_loss(self, config: dict[str, Any] | None) -> nn.Module | None:
+        if config is None:
+            return None
+        return self.resolver.resolve(config)
+
+    def _create_callbacks(
+        self, configs: list[dict[str, Any]]
+    ) -> list[BaseCallback]:
+        callbacks = []
+        for cfg in configs:
+            try:
+                cb = self.resolver.resolve(cfg)
+                callbacks.append(cb)
+            except Exception as e:
+                logger.warning(f"콜백 생성 실패: {e}")
+        return callbacks
+
+    def _create_strategy(self, settings: Settings) -> Any:
+        dist_config = settings.config.compute.distributed
+        if dist_config is None:
+            return None
+
+        strategy_name = dist_config.get("strategy", "auto") if isinstance(dist_config, dict) else "auto"
+
+        if strategy_name == "none":
+            return None
+        if strategy_name == "auto":
+            if not torch.cuda.is_available() or torch.cuda.device_count() <= 1:
+                return None
+            strategy_name = "ddp"
+
+        class_path = STRATEGY_MAP.get(strategy_name)
+        if class_path is None:
+            raise ValueError(f"알 수 없는 분산 전략: {strategy_name}")
+
+        strategy_kwargs = {
+            k: v for k, v in (dist_config if isinstance(dist_config, dict) else {}).items()
+            if k != "strategy"
+        }
+        return self.resolver.resolve(
+            {"_component_": class_path, **strategy_kwargs}
+        )
+
+    def _estimate_total_steps(self) -> int:
+        if self.max_steps:
+            return self.max_steps
+        steps_per_epoch = len(self.train_loader) // self.grad_accum_steps
+        return steps_per_epoch * (self.epochs or 1)
+
+    # ── Callback dispatch ──
+
+    def _fire(self, hook_name: str, **extra_kwargs: Any) -> None:
+        kwargs = {
+            "trainer": self,
+            "model": self.model,
+            "optimizer": self.optimizer,
+            "scheduler": self.scheduler,
+            "global_step": self.global_step,
+        }
+        kwargs.update(extra_kwargs)
+        for cb in self.callbacks:
+            method = getattr(cb, hook_name, None)
+            if method:
+                try:
+                    method(**kwargs)
+                except Exception as e:
+                    logger.warning(f"콜백 {type(cb).__name__}.{hook_name} 실패: {e}")
+
+    def _should_stop(self) -> bool:
+        return any(
+            getattr(cb, "should_stop", False) for cb in self.callbacks
+        )
+
+    # ── Training loop ──
+
+    def train(self) -> dict[str, float]:
+        """학습을 실행하고 최종 메트릭을 반환한다."""
+        # Strategy setup (DDP/FSDP wrapping)
+        if self.strategy is not None:
+            self.model = self.strategy.setup(self.model, self.device)
+        else:
+            self.model = self.model.to(self.device)
+
+        # Gradient checkpointing
+        if self.gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
+            self.model.gradient_checkpointing_enable()
+
+        # torch.compile — must be AFTER distributed wrapping
+        if self.compile_mode:
+            mode = self.compile_mode if isinstance(self.compile_mode, str) else "default"
+            self.model = torch.compile(self.model, mode=mode)
+
+        # Resume
+        self._maybe_resume()
+
+        total_steps = self._estimate_total_steps()
+        self._fire("on_train_start", total_steps=total_steps)
+        start_time = time.time()
+
+        max_epochs = self.epochs or 10_000  # large default for max_steps mode
+        for epoch in range(self.start_epoch, max_epochs):
+            if self._should_stop():
+                break
+            if self.max_steps and self.global_step >= self.max_steps:
+                break
+
+            self._fire("on_epoch_start", epoch=epoch)
+            train_loss = self._train_one_epoch(epoch)
+            self._fire(
+                "on_epoch_end", epoch=epoch, metrics={"train_loss": train_loss}
+            )
+
+            # Validation
+            if self.val_loader is not None:
+                should_validate = self._should_validate(epoch)
+                if should_validate:
+                    self._fire("on_validation_start", epoch=epoch)
+                    val_metrics = self._validate(epoch)
+                    self._fire(
+                        "on_validation_end", epoch=epoch, metrics=val_metrics
+                    )
+                    self.best_metrics.update(val_metrics)
+
+            # Epoch-level scheduler
+            if self.scheduler is not None and self.scheduler_interval == "epoch":
+                self.scheduler.step()
+
+        training_duration = time.time() - start_time
+        self._fire("on_train_end", metrics=self.best_metrics)
+        self._log_to_mlflow(training_duration)
+
+        # Strategy cleanup
+        if self.strategy is not None:
+            self.strategy.cleanup()
+
+        return self.best_metrics
+
+    def _should_validate(self, epoch: int) -> bool:
+        interval = self.val_check_interval
+        if isinstance(interval, float) and interval <= 1.0:
+            return True  # validate every epoch
+        if isinstance(interval, int) and interval > 1:
+            return (epoch + 1) % interval == 0
+        return True
+
+    def _train_one_epoch(self, epoch: int) -> float:
+        self.model.train()
+        total_loss = 0.0
+        num_batches = 0
+        device_type = self.device.type if self.device.type != "mps" else "cpu"
+
+        for step, batch in enumerate(self.train_loader):
+            if self.max_steps and self.global_step >= self.max_steps:
+                break
+
+            batch = self._move_to_device(batch)
+            self._fire("on_batch_start", step=step)
+
+            with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
+                loss = self._compute_loss(batch)
+                loss = loss / self.grad_accum_steps
+
+            self.scaler.scale(loss).backward()
+
+            if (step + 1) % self.grad_accum_steps == 0:
+                self.scaler.unscale_(self.optimizer)
+                if self.grad_clip_norm is not None:
+                    clip_grad_norm_(
+                        self.model.parameters(), self.grad_clip_norm
+                    )
+                self.scaler.step(self.optimizer)
+                self.scaler.update()
+                self.optimizer.zero_grad()
+
+                if (
+                    self.scheduler is not None
+                    and self.scheduler_interval == "step"
+                ):
+                    self.scheduler.step()
+
+            actual_loss = loss.item() * self.grad_accum_steps
+            total_loss += actual_loss
+            num_batches += 1
+            self.global_step += 1
+
+            self._fire(
+                "on_batch_end", step=step, metrics={"loss": actual_loss}
+            )
+
+            # MLflow step logging (non-blocking)
+            self._mlflow_log_metric("train_loss", actual_loss, self.global_step)
+
+        return total_loss / max(num_batches, 1)
+
+    def _compute_loss(self, batch: dict[str, Any]) -> torch.Tensor:
+        if self.loss_fn is not None:
+            outputs = self.model.forward(batch)
+            logits = outputs.get("logits", outputs.get("output"))
+            labels = batch.get("labels", batch.get("label"))
+            if logits is None:
+                raise ValueError("model.forward()가 'logits' 키를 반환하지 않았습니다")
+            if labels is None:
+                raise ValueError("배치에 'labels' 키가 없습니다")
+            return self.loss_fn(logits, labels)
+        else:
+            return self.model.training_step(batch)
+
+    @torch.no_grad()
+    def _validate(self, epoch: int) -> dict[str, float]:
+        self.model.eval()
+        all_metrics: dict[str, list[float]] = {}
+
+        for batch in self.val_loader:
+            batch = self._move_to_device(batch)
+            metrics = self.model.validation_step(batch)
+            for k, v in metrics.items():
+                all_metrics.setdefault(k, []).append(v)
+
+        avg_metrics = {k: sum(v) / len(v) for k, v in all_metrics.items()}
+
+        # MLflow epoch logging
+        for k, v in avg_metrics.items():
+            self._mlflow_log_metric(f"val_{k}" if not k.startswith("val_") else k, v, epoch)
+
+        self.model.train()
+        return avg_metrics
+
+    def _move_to_device(self, batch: dict[str, Any]) -> dict[str, Any]:
+        return {
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+            for k, v in batch.items()
+        }
+
+    # ── Resume ──
+
+    def _maybe_resume(self) -> None:
+        resume = self.settings.config.job.resume
+        if resume == "disabled":
+            return
+
+        checkpoint_dir = Path(self.settings.config.storage.checkpoint_dir)
+
+        if resume == "auto":
+            latest = checkpoint_dir / "latest"
+            if not latest.exists():
+                return
+            ckpt_path = latest.resolve()
+        else:
+            ckpt_path = Path(resume)
+
+        if not ckpt_path.exists():
+            logger.warning(f"체크포인트를 찾을 수 없습니다: {ckpt_path}")
+            return
+
+        logger.info(f"체크포인트에서 재개: {ckpt_path}")
+
+        # Model weights: adapter_model.safetensors → model.safetensors → model.pt
+        adapter_path = ckpt_path / "adapter_model.safetensors"
+        safetensors_path = ckpt_path / "model.safetensors"
+        model_pt_path = ckpt_path / "model.pt"
+
+        target = getattr(self.model, "module", self.model)
+
+        if adapter_path.exists():
+            # LoRA / PEFT adapter
+            if hasattr(target, "load_adapter"):
+                target.load_adapter(str(ckpt_path))
+                logger.info("LoRA adapter loaded from %s", ckpt_path)
+            else:
+                logger.warning(
+                    "adapter_model.safetensors found but model has no load_adapter method"
+                )
+        elif safetensors_path.exists():
+            try:
+                from safetensors.torch import load_file
+
+                state_dict = load_file(safetensors_path)
+                target.load_state_dict(state_dict)
+            except ImportError:
+                logger.warning("safetensors not installed, cannot load model.safetensors")
+        elif model_pt_path.exists():
+            state_dict = torch.load(model_pt_path, map_location="cpu", weights_only=True)
+            target.load_state_dict(state_dict)
+
+        # Optimizer
+        opt_path = ckpt_path / "optimizer.pt"
+        if opt_path.exists():
+            self.optimizer.load_state_dict(
+                torch.load(opt_path, map_location="cpu", weights_only=True)
+            )
+
+        # Scheduler
+        sched_path = ckpt_path / "scheduler.pt"
+        if sched_path.exists() and self.scheduler is not None:
+            self.scheduler.load_state_dict(
+                torch.load(sched_path, map_location="cpu", weights_only=True)
+            )
+
+        # Trainer state
+        state_path = ckpt_path / "trainer_state.json"
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            self.start_epoch = state.get("epoch", 0)
+            self.global_step = state.get("global_step", 0)
+
+    # ── MLflow ──
+
+    def _mlflow_log_metric(self, key: str, value: float, step: int) -> None:
+        try:
+            import mlflow
+
+            mlflow.log_metric(key, value, step=step)
+        except Exception:
+            pass
+
+    def _log_to_mlflow(self, training_duration: float) -> None:
+        try:
+            import mlflow
+            from mdp.utils.core.sanitize import sanitize_config
+
+            mlflow.log_params(
+                {
+                    "model_class": self.settings.recipe.model.class_path,
+                    "task": self.settings.recipe.task,
+                    "epochs": self.epochs or 0,
+                    "precision": self.settings.recipe.training.precision,
+                }
+            )
+
+            mlflow.log_metrics(
+                {
+                    "training_duration_seconds": training_duration,
+                    "total_steps": self.global_step,
+                    **{f"best_{k}": v for k, v in self.best_metrics.items()},
+                }
+            )
+
+            # Sanitized config snapshot
+            config_dict = sanitize_config(self.settings.model_dump())
+            mlflow.log_dict(config_dict, "config/settings.json")
+
+        except Exception as e:
+            logger.warning(f"MLflow 로깅 실패 (학습 결과는 유효합니다): {e}")

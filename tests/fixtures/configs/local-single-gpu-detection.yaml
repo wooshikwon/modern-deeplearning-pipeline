@@ -1,0 +1,18 @@
+environment:
+  name: local
+
+compute:
+  target: local
+  gpus: 1
+
+mlflow:
+  tracking_uri: ./mlruns
+  experiment_name: yolo-detection
+
+storage:
+  checkpoint_dir: ./checkpoints/yolov8-voc
+  output_dir: ./outputs/yolov8-voc
+
+job:
+  resume: auto
+  max_retries: 0

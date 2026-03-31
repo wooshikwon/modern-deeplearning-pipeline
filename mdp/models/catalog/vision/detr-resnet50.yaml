@@ -1,0 +1,35 @@
+# DETR (DEtection TRansformer) — 트랜스포머 기반 종단간 객체 탐지
+name: detr-resnet50
+family: detr
+class_path: transformers.AutoModelForObjectDetection
+
+pretrained_sources:
+  - "hf://facebook/detr-resnet-50"
+
+supported_tasks:
+  - object_detection
+
+# HuggingFace 모델에 탐지 헤드가 내장되어 있어 별도 헤드 불필요
+
+input_spec:
+  channels: 3
+  height: 800
+  width: 800
+  dtype: float32
+
+init_args_schema:
+  pretrained:
+    type: bool
+    default: true
+
+adapter_defaults:
+  lora:
+    # 트랜스포머 디코더의 어텐션 레이어
+    target_modules: ["q_proj", "v_proj"]
+    r: 8
+    alpha: 16
+
+memory:
+  params_m: 41.3
+  fp32_gb: 0.16
+  fp16_gb: 0.08

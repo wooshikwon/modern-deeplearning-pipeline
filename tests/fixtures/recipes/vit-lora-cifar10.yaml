@@ -1,0 +1,109 @@
+name: vit-lora-cifar10
+task: image_classification
+
+model:
+  class_path: mdp.models.vision.ViTClassifier
+  pretrained: hf://google/vit-base-patch16-224
+  init_args:
+    image_size: 224
+    patch_size: 16
+
+head:
+  _component_: ClassificationHead
+  num_classes: 10
+  pooling: cls_token
+  dropout: 0.1
+
+adapter:
+  method: lora
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+
+data:
+  dataset:
+    _component_: mdp.data.HuggingFace
+    name: cifar10
+    split:
+      train: "train"
+      val: "test"
+  augmentation:
+    train:
+      backend: torchvision
+      steps:
+        - type: RandomResizedCrop
+          params:
+            size: 224
+            scale: [0.8, 1.0]
+        - type: RandomHorizontalFlip
+          params:
+            p: 0.5
+        - type: ToTensor
+        - type: Normalize
+          params:
+            mean: [0.485, 0.456, 0.406]
+            std: [0.229, 0.224, 0.225]
+    eval:
+      backend: torchvision
+      steps:
+        - type: Resize
+          params:
+            size: 256
+        - type: CenterCrop
+          params:
+            size: 224
+        - type: ToTensor
+        - type: Normalize
+          params:
+            mean: [0.485, 0.456, 0.406]
+            std: [0.229, 0.224, 0.225]
+  dataloader:
+    batch_size: 64
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+    drop_last: true
+
+training:
+  epochs: 30
+  precision: fp16
+  gradient_accumulation_steps: 1
+  gradient_clip_max_norm: 1.0
+  val_check_interval: 1.0
+
+optimizer:
+  _component_: torch.optim.AdamW
+  lr: 3e-4
+  weight_decay: 0.01
+
+scheduler:
+  _component_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: 30
+  eta_min: 1e-6
+
+loss:
+  _component_: torch.nn.CrossEntropyLoss
+  label_smoothing: 0.1
+
+evaluation:
+  metrics:
+    - accuracy
+    - f1
+
+callbacks:
+  - _component_: mdp.callbacks.EarlyStopping
+    monitor: val_loss
+    patience: 5
+    mode: min
+  - _component_: mdp.callbacks.ModelCheckpoint
+    monitor: val_accuracy
+    save_top_k: 3
+    mode: max
+
+metadata:
+  author: wesley
+  description: "ViT-Base LoRA fine-tuning on CIFAR-10"

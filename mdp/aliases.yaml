@@ -1,0 +1,27 @@
+optimizer: {}
+scheduler: {}
+loss: {}
+dataset:
+  ImageFolder: mdp.data.image_folder.ImageFolderDataset
+  HuggingFace: mdp.data.huggingface.HuggingFaceDataset
+  CsvDataset: mdp.data.csv_dataset.CSVDataset
+head:
+  ClassificationHead: mdp.models.heads.classification.ClassificationHead
+  DetectionHead: mdp.models.heads.detection.DetectionHead
+  CausalLMHead: mdp.models.heads.causal_lm.CausalLMHead
+  SegmentationHead: mdp.models.heads.segmentation.SegmentationHead
+  TokenClassificationHead: mdp.models.heads.token_classification.TokenClassificationHead
+  Seq2SeqLMHead: mdp.models.heads.seq2seq_lm.Seq2SeqLMHead
+  DualEncoderHead: mdp.models.heads.dual_encoder.DualEncoderHead
+  SequenceClassificationHead: mdp.models.heads.classification.ClassificationHead
+callback:
+  EarlyStopping: mdp.training.callbacks.early_stopping.EarlyStopping
+  ModelCheckpoint: mdp.training.callbacks.checkpoint.ModelCheckpoint
+  LRMonitor: mdp.training.callbacks.lr_monitor.LearningRateMonitor
+  ProgressBar: mdp.training.callbacks.progress.ProgressBar
+  EMACallback: mdp.training.callbacks.ema.EMACallback
+evaluator: {}
+strategy:
+  DDPStrategy: mdp.training.strategies.ddp.DDPStrategy
+  FSDPStrategy: mdp.training.strategies.fsdp.FSDPStrategy
+  DeepSpeedStrategy: mdp.training.strategies.deepspeed.DeepSpeedStrategy

@@ -1,0 +1,39 @@
+name: t5-large
+family: t5
+class_path: transformers.AutoModelForSeq2SeqLM
+
+pretrained_sources:
+  - "hf://t5-large"
+  - "hf://google-t5/t5-large"
+
+supported_tasks:
+  - seq2seq
+  - text_classification
+
+default_head:
+  task: seq2seq
+  _component_: Seq2SeqLMHead
+  hidden_dim: 1024
+  vocab_size: 32128
+
+input_spec:
+  max_length: 512
+  vocab_size: 32128
+  dtype: long
+
+init_args_schema:
+  dropout_rate: {type: float, default: 0.1}
+  d_model: {type: int, default: 1024}
+  num_heads: {type: int, default: 16}
+
+adapter_defaults:
+  lora:
+    target_modules: ["q", "v"]
+    r: 16
+    alpha: 32
+    task_type: "SEQ_2_SEQ_LM"
+
+memory:
+  params_m: 737.7
+  fp32_gb: 2.80
+  fp16_gb: 1.40

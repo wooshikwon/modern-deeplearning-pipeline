@@ -1,0 +1,107 @@
+name: yolov8-custom-detection
+task: object_detection
+
+model:
+  class_path: mdp.models.vision.YOLODetector
+  pretrained: ultralytics://yolov8n
+  init_args:
+    conf_threshold: 0.25
+    iou_threshold: 0.45
+
+head:
+  _component_: mdp.heads.DetectionHead
+  num_classes: 20
+
+data:
+  dataset:
+    _component_: mdp.data.ImageFolder
+    path: /data/voc2012
+    columns:
+      image: "images"
+      bbox: "labels"
+    split:
+      train: 0.8
+      val: 0.2
+  augmentation:
+    train:
+      backend: torchvision
+      steps:
+        - type: RandomHorizontalFlip
+          params:
+            p: 0.5
+        - type: ColorJitter
+          params:
+            brightness: 0.3
+            contrast: 0.3
+            saturation: 0.3
+            hue: 0.1
+        - type: RandomAffine
+          params:
+            degrees: 10
+            translate: [0.1, 0.1]
+            scale: [0.9, 1.1]
+        - type: Resize
+          params:
+            size: [640, 640]
+        - type: ToTensor
+        - type: Normalize
+          params:
+            mean: [0.485, 0.456, 0.406]
+            std: [0.229, 0.224, 0.225]
+    eval:
+      backend: torchvision
+      steps:
+        - type: Resize
+          params:
+            size: [640, 640]
+        - type: ToTensor
+        - type: Normalize
+          params:
+            mean: [0.485, 0.456, 0.406]
+            std: [0.229, 0.224, 0.225]
+  dataloader:
+    batch_size: 16
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+    drop_last: true
+
+training:
+  epochs: 100
+  precision: fp16
+  gradient_accumulation_steps: 1
+  gradient_clip_max_norm: 10.0
+  val_check_interval: 1.0
+
+optimizer:
+  _component_: torch.optim.SGD
+  lr: 0.01
+  weight_decay: 5e-4
+  momentum: 0.937
+  nesterov: true
+
+scheduler:
+  _component_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: 100
+  eta_min: 1e-4
+  warmup_steps: 1000
+
+evaluation:
+  metrics:
+    - mAP
+    - mAP@50
+
+callbacks:
+  - _component_: mdp.callbacks.ModelCheckpoint
+    monitor: val_mAP
+    save_top_k: 3
+    mode: max
+  - _component_: mdp.callbacks.EarlyStopping
+    monitor: val_mAP
+    patience: 20
+    mode: max
+
+metadata:
+  author: wesley
+  description: "YOLOv8-nano full fine-tuning on VOC 2012. SGD, 100 epochs."

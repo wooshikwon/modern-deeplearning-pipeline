@@ -1,0 +1,79 @@
+name: qwen25-7b-qlora-instruct
+task: text_generation
+
+model:
+  class_path: mdp.models.language.CausalLM
+  pretrained: hf://Qwen/Qwen2.5-7B
+
+head:
+  _component_: mdp.heads.CausalLMHead
+
+adapter:
+  method: qlora
+  r: 64
+  alpha: 128
+  dropout: 0.1
+  target_modules: "all_linear"
+  quantization:
+    bits: 4
+    type: nf4
+  modules_to_save:
+    - lm_head
+    - embed_tokens
+
+data:
+  dataset:
+    _component_: mdp.data.HuggingFace
+    name: HuggingFaceH4/ultrachat_200k
+    columns:
+      text: "messages"
+    split:
+      train: "train_sft"
+      val: "test_sft"
+  tokenizer:
+    pretrained: Qwen/Qwen2.5-7B
+    max_length: 2048
+    padding: max_length
+    truncation: true
+  dataloader:
+    batch_size: 2
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+    drop_last: true
+
+training:
+  epochs: 3
+  precision: bf16
+  gradient_accumulation_steps: 8
+  gradient_clip_max_norm: 1.0
+  gradient_checkpointing: true
+  val_check_interval: 200
+
+optimizer:
+  _component_: bitsandbytes.optim.AdamW8bit
+  lr: 2e-4
+  weight_decay: 0.01
+
+scheduler:
+  _component_: torch.optim.lr_scheduler.CosineAnnealingLR
+  T_max: 3
+  eta_min: 0
+  warmup_ratio: 0.03
+
+evaluation:
+  metrics:
+    - perplexity
+
+callbacks:
+  - _component_: mdp.callbacks.ModelCheckpoint
+    monitor: val_perplexity
+    save_top_k: 2
+    mode: min
+  - _component_: mdp.callbacks.GradientNormLogger
+  - _component_: mdp.callbacks.ThroughputMonitor
+
+metadata:
+  author: wesley
+  description: "Qwen-2.5 7B QLoRA SFT on UltraChat 200K. 2-node DeepSpeed ZeRO-3, 4-bit NF4."

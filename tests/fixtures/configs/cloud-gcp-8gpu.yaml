@@ -1,0 +1,40 @@
+environment:
+  name: prod
+
+compute:
+  target: cloud
+  provider: gcp
+  accelerators: "A100:8"
+  spot: true
+  region: us-central1
+  disk_size: 1024
+  distributed:
+    strategy: fsdp
+    sharding_strategy: SHARD_GRAD_OP
+
+environment_setup:
+  container: "nvcr.io/nvidia/pytorch:24.03-py3"
+  dependencies: requirements.txt
+  setup_commands:
+    - pip install webdataset
+    - pip install open_clip_torch
+    - gcloud auth activate-service-account --key-file=/secrets/gcp-key.json
+
+mlflow:
+  tracking_uri: http://mlflow.prod.com:5000
+  experiment_name: clip-custom-finetune
+
+storage:
+  checkpoint_dir: gs://my-bucket/checkpoints/clip-custom
+  output_dir: gs://my-bucket/outputs/clip-custom
+
+serving:
+  backend: triton
+  model_repository: gs://my-bucket/model_repository/clip
+  max_batch_size: 32
+  instance_count: 2
+
+job:
+  name: clip-finetune-gcp-run-01
+  resume: auto
+  max_retries: 5

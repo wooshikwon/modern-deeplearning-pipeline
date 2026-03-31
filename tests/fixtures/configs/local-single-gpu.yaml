@@ -1,0 +1,18 @@
+environment:
+  name: local
+
+compute:
+  target: local
+  gpus: 1
+
+mlflow:
+  tracking_uri: ./mlruns
+  experiment_name: vit-cifar10
+
+storage:
+  checkpoint_dir: ./checkpoints/vit-lora-cifar10
+  output_dir: ./outputs/vit-lora-cifar10
+
+job:
+  resume: auto
+  max_retries: 0

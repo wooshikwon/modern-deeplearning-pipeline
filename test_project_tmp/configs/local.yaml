@@ -1,0 +1,19 @@
+# MDP Config -- 인프라 설정
+environment:
+  name: local
+
+compute:
+  target: local
+  gpus: auto
+
+mlflow:
+  tracking_uri: ./mlruns
+  experiment_name: default
+
+storage:
+  checkpoint_dir: ./checkpoints
+  output_dir: ./outputs
+
+job:
+  resume: auto
+  max_retries: 0

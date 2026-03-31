@@ -1,0 +1,47 @@
+name: llama3-8b
+family: llama
+class_path: transformers.AutoModelForCausalLM
+
+pretrained_sources:
+  - "hf://meta-llama/Meta-Llama-3-8B"
+  - "hf://meta-llama/Meta-Llama-3-8B-Instruct"
+
+supported_tasks:
+  - causal_lm
+  - text_generation
+  - text_classification
+
+default_head:
+  task: causal_lm
+  _component_: CausalLMHead
+  hidden_dim: 4096
+  vocab_size: 128256
+
+input_spec:
+  max_length: 8192
+  vocab_size: 128256
+  dtype: long
+
+init_args_schema:
+  rope_theta: {type: float, default: 500000}
+  attention_dropout: {type: float, default: 0.0}
+  max_position_embeddings: {type: int, default: 8192}
+
+adapter_defaults:
+  lora:
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj"]
+    r: 16
+    alpha: 32
+    task_type: "CAUSAL_LM"
+  qlora:
+    target_modules: ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    r: 16
+    alpha: 32
+    task_type: "CAUSAL_LM"
+    bits: 4
+
+memory:
+  params_m: 8030
+  fp32_gb: 32.2
+  fp16_gb: 16.1
+  qlora_4bit_gb: 5.5
