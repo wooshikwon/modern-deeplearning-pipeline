@@ -220,13 +220,20 @@ def _default_recipe_yaml() -> str:
             num_classes: 10
 
         data:
-          dataset:
-            _component_: ImageFolder
-            root: ./data/cifar10
-            split: train
+          source: ./data/cifar10
           fields:
             image: image
             label: label
+          augmentation:
+            train:
+              steps:
+                - type: RandomResizedCrop
+                  params: {size: [224, 224]}
+                - type: RandomHorizontalFlip
+                - type: ToDtype
+                  params: {dtype: float32, scale: true}
+                - type: Normalize
+                  params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
           dataloader:
             batch_size: 32
             num_workers: 4
@@ -237,7 +244,7 @@ def _default_recipe_yaml() -> str:
           gradient_accumulation_steps: 1
 
         optimizer:
-          _component_: torch.optim.AdamW
+          _component_: AdamW
           lr: 3.0e-4
           weight_decay: 0.01
 
