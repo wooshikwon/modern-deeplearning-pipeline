@@ -88,7 +88,7 @@ def build_tokenizer(
     pretrained = config["pretrained"]
     max_length = config.get("max_length", 512)
     max_target_length = config.get("max_target_length", max_length)
-    padding = config.get("padding", "max_length")
+    padding = config.get("padding", False)  # DataCollator가 동적 패딩 담당
     truncation = config.get("truncation", True)
     chat_template = config.get("chat_template")
     is_split_into_words = config.get("is_split_into_words", False)

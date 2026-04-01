@@ -162,10 +162,7 @@ class Factory:
             recipe = self.settings.recipe
             distributed = self.settings.config.compute.distributed is not None
             return create_dataloaders(
-                dataset_config=recipe.data.dataset,
-                aug_config=recipe.data.augmentation,
-                tokenizer_config=recipe.data.tokenizer,
-                loader_config=recipe.data.dataloader.model_dump(),
+                data_spec=recipe.data,
                 fields=recipe.data.fields,
                 distributed=distributed,
             )
@@ -201,14 +198,3 @@ class Factory:
                 logger.warning("콜백 생성 실패: %s", e)
         return callbacks
 
-    # ── Phase 5: 실행 레이어 ──
-
-    def create_executor(self) -> Any:
-        """config.compute.target에 맞는 Executor를 생성한다."""
-        def _create() -> Any:
-            from mdp.compute import get_executor
-
-            target = self.settings.config.compute.target
-            return get_executor(target)
-
-        return self._get_or_create("executor", _create)

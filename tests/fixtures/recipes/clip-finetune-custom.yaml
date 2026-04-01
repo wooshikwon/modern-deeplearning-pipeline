@@ -12,16 +12,17 @@ head:
   _target_attr: head
 
 data:
-  dataset:
-    _component_: mdp.data.WebDataset
-    path: "gs://my-bucket/clip-data/{00000..00099}.tar"
-    columns:
-      image: "jpg"
-      text: "txt"
-    streaming: true
-    split:
-      train: "train"
-      val: "val"
+  source: "gs://my-bucket/clip-data/{00000..00099}.tar"
+  streaming: true
+  fields:
+    image: image
+    text: text
+  column_map:
+    image: jpg
+    text: txt
+  split:
+    train: "train"
+    val: "val"
   augmentation:
     train:
       backend: torchvision

@@ -1,0 +1,29 @@
+Metadata-Version: 2.4
+Name: mdp
+Version: 0.1.0
+Requires-Python: >=3.10
+Requires-Dist: torch>=2.1
+Requires-Dist: pydantic>=2.0
+Requires-Dist: pyyaml>=6.0
+Requires-Dist: typer>=0.9
+Requires-Dist: mlflow>=2.10
+Requires-Dist: rich>=13.0
+Provides-Extra: vision
+Requires-Dist: torchvision>=0.16; extra == "vision"
+Requires-Dist: timm>=1.0; extra == "vision"
+Requires-Dist: albumentations>=1.3; extra == "vision"
+Requires-Dist: ultralytics>=8.0; extra == "vision"
+Provides-Extra: language
+Requires-Dist: transformers>=4.36; extra == "language"
+Requires-Dist: tokenizers>=0.15; extra == "language"
+Requires-Dist: datasets>=2.16; extra == "language"
+Provides-Extra: serving
+Requires-Dist: torchserve>=0.9; extra == "serving"
+Requires-Dist: onnxruntime>=1.16; extra == "serving"
+Provides-Extra: cloud
+Requires-Dist: skypilot>=0.5; extra == "cloud"
+Provides-Extra: remote
+Requires-Dist: paramiko>=3.4; extra == "remote"
+Requires-Dist: fabric>=3.2; extra == "remote"
+Provides-Extra: all
+Requires-Dist: mdp[cloud,language,remote,serving,vision]; extra == "all"

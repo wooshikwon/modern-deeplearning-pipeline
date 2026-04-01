@@ -45,16 +45,21 @@ class DataloaderSpec(BaseModel):
     persistent_workers: bool = True
     prefetch_factor: int = 2
     drop_last: bool = True
-    collate_fn: dict[str, Any] | None = None
 
 
 class DataSpec(BaseModel):
-    """데이터 파이프라인. YAML data: 하위 4개 섹션과 대응."""
+    """데이터 파이프라인. source로 데이터를 지정하고, format/column_map으로 스키마를 맞춘다."""
 
-    dataset: dict[str, Any]  # _component_ 패턴 (required)
+    source: str  # HF Hub 이름, 또는 로컬 파일/디렉토리 경로
     fields: dict[str, str] = Field(default_factory=dict)  # {role: column_name}
-    augmentation: dict[str, Any] | None = None
+    format: str = "auto"  # alpaca | sharegpt | completion | text | auto
+    split: str | dict[str, Any] = "train"
+    subset: str | None = None
+    column_map: dict[str, str] | None = None
+    streaming: bool = False
+    data_files: str | dict[str, str] | None = None
     tokenizer: dict[str, Any] | None = None
+    augmentation: dict[str, Any] | None = None
     dataloader: DataloaderSpec = Field(default_factory=DataloaderSpec)
 
 

@@ -14,15 +14,13 @@ head:
   num_classes: 20
 
 data:
-  dataset:
-    _component_: mdp.data.ImageFolder
-    path: /data/voc2012
-    columns:
-      image: "images"
-      bbox: "labels"
-    split:
-      train: 0.8
-      val: 0.2
+  source: /data/voc2012
+  fields:
+    image: image
+    label: label
+  split:
+    train: "train"
+    val: "val"
   augmentation:
     train:
       backend: torchvision

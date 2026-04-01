@@ -49,7 +49,7 @@ def _make_settings(
         name="test-experiment",
         task=task,
         model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-        data=DataSpec(dataset={"_component_": "ImageFolder", "path": "/tmp/fake"}),
+        data=DataSpec(source="/tmp/fake"),
         training=TrainingSpec(
             epochs=epochs,
             precision=precision,

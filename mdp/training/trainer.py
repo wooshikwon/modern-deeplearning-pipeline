@@ -530,16 +530,16 @@ class Trainer:
         except ImportError:
             return None
 
-        monitoring_cfg = getattr(self.settings.config, "monitoring", None)
+        monitoring_cfg = getattr(self.settings.recipe, "monitoring", None)
         if monitoring_cfg is None or not getattr(monitoring_cfg, "enabled", False):
             return None
 
         try:
             # ALL ranks must execute forward pass (FSDP all-gather requirement)
             baseline = compute_baseline(
+                train_dataloader=self.val_loader or self.train_loader,
                 model=self.model,
-                dataloader=self.val_loader or self.train_loader,
-                device=self.device,
+                config=self.settings,
             )
 
             # Only rank-0 saves the baseline
@@ -594,7 +594,7 @@ class Trainer:
     def _log_to_mlflow(self, training_duration: float) -> None:
         try:
             import mlflow
-            from mdp.utils.core.sanitize import sanitize_config
+            from mdp.utils.sanitize import sanitize_config
 
             mlflow.log_params(
                 {

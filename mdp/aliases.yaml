@@ -1,4 +1,7 @@
-optimizer: {}
+optimizer:
+  AdamW: torch.optim.AdamW
+  Adam: torch.optim.Adam
+  SGD: torch.optim.SGD
 scheduler: {}
 loss: {}
 head:

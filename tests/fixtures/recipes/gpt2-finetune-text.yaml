@@ -10,16 +10,14 @@ head:
   _target_attr: lm_head
 
 data:
-  dataset:
-    _component_: mdp.data.HuggingFace
-    name: wikitext
-    subset: wikitext-103-v1
-    columns:
-      text: "text"
-    split:
-      train: "train"
-      val: "validation"
-      test: "test"
+  source: wikitext
+  subset: wikitext-103-v1
+  format: text
+  fields:
+    text: text
+  split:
+    train: "train"
+    val: "validation"
   tokenizer:
     pretrained: gpt2
     max_length: 1024

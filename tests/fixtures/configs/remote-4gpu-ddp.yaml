@@ -2,20 +2,9 @@ environment:
   name: dev
 
 compute:
-  target: remote
   gpus: 4
-  host: gpu-server.lab.com
-  user: wesley
-  ssh_key: ~/.ssh/lab_gpu_key
-  working_dir: ~/experiments/gpt2
   distributed:
     strategy: ddp
-
-environment_setup:
-  container: "nvcr.io/nvidia/pytorch:24.03-py3"
-  dependencies: requirements.txt
-  setup_commands:
-    - pip install flash-attn --no-build-isolation
 
 mlflow:
   tracking_uri: http://mlflow.lab.com:5000

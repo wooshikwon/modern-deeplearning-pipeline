@@ -2,27 +2,11 @@ environment:
   name: prod
 
 compute:
-  target: multi-node
-  nodes:
-    - host: node1.cluster.com
-      gpus: 4
-    - host: node2.cluster.com
-      gpus: 4
-  user: wesley
-  ssh_key: ~/.ssh/cluster_key
-  working_dir: /shared/experiments/qwen25-qlora
+  gpus: 4
   distributed:
     strategy: deepspeed_zero3
     offload_optimizer: false
     offload_params: false
-
-environment_setup:
-  container: "nvcr.io/nvidia/pytorch:24.03-py3"
-  dependencies: requirements.txt
-  setup_commands:
-    - pip install flash-attn --no-build-isolation
-    - pip install bitsandbytes
-    - pip install deepspeed
 
 mlflow:
   tracking_uri: http://mlflow.cluster.com:5000

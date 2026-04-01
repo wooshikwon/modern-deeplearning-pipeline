@@ -23,14 +23,13 @@ adapter:
     - embed_tokens
 
 data:
-  dataset:
-    _component_: mdp.data.HuggingFace
-    name: HuggingFaceH4/ultrachat_200k
-    columns:
-      text: "messages"
-    split:
-      train: "train_sft"
-      val: "test_sft"
+  source: HuggingFaceH4/ultrachat_200k
+  format: auto
+  fields:
+    text: text
+  split:
+    train: "train_sft"
+    val: "test_sft"
   tokenizer:
     pretrained: Qwen/Qwen2.5-7B
     max_length: 2048

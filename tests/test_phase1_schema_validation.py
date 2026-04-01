@@ -52,7 +52,7 @@ def main() -> None:
             print(f"[PASS] {label}")
             print(f"       name={r.name}, task={r.task}")
             print(f"       model.class_path={r.model.class_path}")
-            print(f"       compute.target={c.compute.target}")
+            print(f"       compute.gpus={c.compute.gpus}")
             if r.adapter:
                 print(f"       adapter.method={r.adapter.method}")
             print(f"       training.epochs={r.training.epochs}, precision={r.training.precision}")

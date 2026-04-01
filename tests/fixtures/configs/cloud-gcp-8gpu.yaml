@@ -2,23 +2,10 @@ environment:
   name: prod
 
 compute:
-  target: cloud
-  provider: gcp
-  accelerators: "A100:8"
-  spot: true
-  region: us-central1
-  disk_size: 1024
+  gpus: 8
   distributed:
     strategy: fsdp
     sharding_strategy: SHARD_GRAD_OP
-
-environment_setup:
-  container: "nvcr.io/nvidia/pytorch:24.03-py3"
-  dependencies: requirements.txt
-  setup_commands:
-    - pip install webdataset
-    - pip install open_clip_torch
-    - gcloud auth activate-service-account --key-file=/secrets/gcp-key.json
 
 mlflow:
   tracking_uri: http://mlflow.prod.com:5000
