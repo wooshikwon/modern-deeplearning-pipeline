@@ -101,7 +101,7 @@ def estimate(
 
 @app.command(name="list")
 def list_cmd(
-    target: str = typer.Argument("models", help="models|tasks|callbacks|strategies|jobs"),
+    target: str = typer.Argument("models", help="models|tasks|callbacks|strategies"),
     task: str = typer.Option(None, "--task", "-t", help="models 필터: 특정 task 호환 모델만 표시"),
 ):
     """카탈로그를 조회한다."""

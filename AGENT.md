@@ -1038,7 +1038,7 @@ Key fields for agent decision-making:
       "baseline_entropy_std": 0.38
     },
     "class_distribution_shift": {
-      "kl_divergence": 0.087,
+      "jsd": 0.087,
       "top_shifted_classes": [
         {"class_id": 3, "train_ratio": 0.12, "inference_ratio": 0.23},
         {"class_id": 7, "train_ratio": 0.08, "inference_ratio": 0.02}
