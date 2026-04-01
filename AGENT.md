@@ -466,7 +466,7 @@ optimizer:
 - `adapter.method: qlora` -> `quantization.bits` 필수
 - `adapter.method: qlora` -> `model.torch_dtype`는 `bfloat16` 또는 `float16`이어야 함
 - `adapter.method: lora/qlora` -> `r` 필수
-- `prefix_tuning`은 현재 미구현
+- `adapter.method: prefix_tuning` -> `r` 필수 (prefix 길이 = 가상 토큰 수로 해석)
 
 ### Precision Constraints
 

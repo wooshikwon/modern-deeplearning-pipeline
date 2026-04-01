@@ -39,5 +39,11 @@ def apply_adapter(
         if model_name is None:
             raise ValueError("QLoRA에는 model_name_or_path가 필요합니다")
         return apply_qlora(model_name, **config)
+    elif method == "prefix_tuning":
+        from mdp.models.adapters.prefix_tuning import apply_prefix_tuning
+        # r → num_virtual_tokens 매핑 (adapter 스키마 통일)
+        if "r" in config:
+            config["num_virtual_tokens"] = config.pop("r")
+        return apply_prefix_tuning(model, **config)
     else:
         raise ValueError(f"지원하지 않는 어댑터 method: {method!r}")

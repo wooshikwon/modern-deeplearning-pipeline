@@ -91,8 +91,8 @@ class BusinessValidator:
         if adapter is None:
             return
 
-        # 2a. r 필수 (lora/qlora 모두)
-        if adapter.method in ("lora", "qlora") and adapter.r is None:
+        # 2a. r 필수 (lora/qlora/prefix_tuning)
+        if adapter.method in ("lora", "qlora", "prefix_tuning") and adapter.r is None:
             result.errors.append(
                 f"adapter.method '{adapter.method}'에는 r(rank)이 필수입니다."
             )
