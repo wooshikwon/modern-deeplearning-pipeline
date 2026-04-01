@@ -11,7 +11,7 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 | `mdp inference -r recipe.yaml -c config.yaml --checkpoint <path>` | 배치 추론 | `--format json` |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 | `--format json` |
 | `mdp serve -r recipe.yaml -c config.yaml` | 실시간 서빙 시작 | (backend은 Config에서 설정) |
-| `mdp list <what>` | 등록 컴포넌트 조회 | `--task`, `models`, `tasks`, `callbacks`, `strategies`, `jobs` |
+| `mdp list <what>` | 등록 컴포넌트 조회 | `--task`, `models`, `tasks`, `callbacks`, `strategies` |
 | `mdp version` | 버전 출력 | `--format json` |
 
 `--format json` 글로벌 옵션을 지원한다. 기본값은 `text` (Rich 테이블). 단, `mdp list`는 현재 Rich 출력만 지원한다.
@@ -192,7 +192,8 @@ tokenizer:
 | `training.gradient_accumulation_steps` | int | no | `1` | 그래디언트 누적 스텝 |
 | `training.gradient_clip_max_norm` | float | no | null | 그래디언트 클리핑 |
 | `training.gradient_checkpointing` | bool | no | `false` | 활성화 체크포인팅 (메모리 절약) |
-| `training.val_check_interval` | float \| int | no | `1.0` | 검증 주기 |
+| `training.val_check_interval` | float | no | `1.0` | 검증 주기. `val_check_unit`에 따라 해석 |
+| `training.val_check_unit` | str | no | `"epoch"` | 검증 단위: `"epoch"` (0.5→에폭당 2회, 2→매 2에폭) 또는 `"step"` (500→매 500 step) |
 | `training.compile` | str \| bool | no | `false` | torch.compile 모드 |
 
 ### evaluation.*
@@ -457,7 +458,8 @@ optimizer:
 - `text_generation` -> `CausalLMHead` (또는 `AutoModelForCausalLM` 사용 시 head 생략)
 - `seq2seq` -> `Seq2SeqLMHead` (또는 `AutoModelForSeq2SeqLM` 사용 시 head 생략)
 - `image_generation` -> head 생략 권장 (모델 내장)
-- `vision_language` -> `DualEncoderHead` 또는 `CausalLMHead` (CLIP vs LLaVA에 따라. task-specific 모델 사용 시 head 생략)
+
+> `vision_language`는 별도 task가 아니다. multimodal 모델(CLIP, LLaVA, Florence-2 등)은 `text_generation` 또는 `feature_extraction` task에 `fields: {image: ..., text: ...}` 조합으로 표현한다.
 
 ### Adapter Constraints
 
@@ -807,7 +809,7 @@ storage:
 
 ```yaml
 name: clip-custom-dataset
-task: vision_language
+task: feature_extraction
 
 model:
   class_path: transformers.CLIPModel

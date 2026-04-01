@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 # ── label strategy 상수 ──
 
-LABEL_CAUSAL = "causal"  # text_generation, causal_lm, vision_language
+LABEL_CAUSAL = "causal"  # text_generation (multimodal 포함)
 LABEL_SEQ2SEQ = "seq2seq"  # seq2seq (text → target)
 LABEL_COPY = "copy"  # text_classification (labels 그대로 통과)
 LABEL_ALIGN = "align"  # token_classification (sub-word alignment)
@@ -47,7 +47,7 @@ def derive_label_strategy(fields: dict[str, str] | None) -> str:
     if "text" in roles:
         return LABEL_CAUSAL
 
-    # image + text → causal (vision_language)
+    # image + text → causal (multimodal text_generation)
     if "image" in roles and "text" in roles:
         return LABEL_CAUSAL
 

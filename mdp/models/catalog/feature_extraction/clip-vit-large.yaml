@@ -10,7 +10,6 @@ pretrained_sources:
 
 supported_tasks:
   - feature_extraction
-  - feature_extraction
 
 default_head:
   task: feature_extraction

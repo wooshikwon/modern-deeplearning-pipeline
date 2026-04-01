@@ -19,7 +19,6 @@ TASK_HEAD_COMPAT: dict[str, list[str]] = {
     "text_generation": ["CausalLMHead"],
     "seq2seq": ["Seq2SeqLMHead"],
     "image_generation": [],  # head 생략 권장
-    "vision_language": ["DualEncoderHead", "CausalLMHead"],
 }
 
 

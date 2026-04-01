@@ -15,7 +15,7 @@ supported_tasks:
   - image_classification
 
 default_head:
-  task: vision_language
+  task: text_generation
   _component_: CausalLMHead
   hidden_dim: 768
 

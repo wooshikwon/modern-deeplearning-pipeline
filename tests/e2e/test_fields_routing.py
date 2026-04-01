@@ -134,7 +134,7 @@ class TestLoaderRouting:
         assert strategy == LABEL_NONE
 
     def test_multimodal_fields_have_both(self) -> None:
-        """image + text fields should derive causal (vision_language)."""
+        """image + text fields should derive causal (multimodal text_generation)."""
         fields = {"image": "path", "text": "caption"}
         strategy = derive_label_strategy(fields)
         # image + text without label → LABEL_CAUSAL

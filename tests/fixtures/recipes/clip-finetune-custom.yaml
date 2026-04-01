@@ -1,5 +1,5 @@
 name: clip-custom-finetune
-task: vision_language
+task: feature_extraction
 
 model:
   class_path: mdp.models.multimodal.CLIPModel
@@ -78,6 +78,7 @@ training:
   gradient_clip_max_norm: 1.0
   gradient_checkpointing: false
   val_check_interval: 1000
+  val_check_unit: step
 
 optimizer:
   _component_: torch.optim.AdamW
