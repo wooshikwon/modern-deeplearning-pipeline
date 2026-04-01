@@ -8,7 +8,7 @@ model:
     projection_dim: 512
 
 head:
-  _component_: mdp.heads.DualEncoderHead
+  _component_: DualEncoderHead
   _target_attr: head
 
 data:
@@ -99,12 +99,11 @@ evaluation:
     - clip_score
 
 callbacks:
-  - _component_: mdp.callbacks.ModelCheckpoint
+  - _component_: ModelCheckpoint
     monitor: val_retrieval_accuracy
     save_top_k: 3
     mode: max
-  - _component_: mdp.callbacks.ThroughputMonitor
-  - _component_: mdp.callbacks.LRMonitor
+  - _component_: LRMonitor
     logging_interval: step
 
 metadata:

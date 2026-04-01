@@ -7,7 +7,7 @@ FSDP + QLoRA 비호환 등 Config와 Recipe 간 호환성을 검증한다.
 from __future__ import annotations
 
 from mdp.settings.schema import Settings
-from mdp.settings.validation import ValidationResult
+from mdp.settings.validation import ValidationResult, is_qlora
 
 
 def _resolve_gpu_count(gpus: int | str | list[int]) -> int | None:
@@ -88,11 +88,7 @@ class CompatValidator:
         if adapter is None:
             return
 
-        is_qlora = adapter.method == "qlora" or (
-            adapter.quantization is not None
-            and adapter.quantization.get("bits") == 4
-        )
-        if not is_qlora:
+        if not is_qlora(adapter):
             return
 
         distributed = settings.config.compute.distributed

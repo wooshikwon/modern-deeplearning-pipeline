@@ -12,15 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from mdp.settings.schema import (
-    Config,
-    DataSpec,
-    MetadataSpec,
-    ModelSpec,
-    Recipe,
-    Settings,
-    TrainingSpec,
-)
+from mdp.settings.schema import Settings
+from tests.e2e.conftest import make_test_settings
 from mdp.training.trainer import Trainer
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
 
@@ -89,19 +82,14 @@ def _make_settings(
     precision: str = "fp32",
     loss: dict | None = None,
 ) -> Settings:
-    recipe = Recipe(
+    settings = make_test_settings(
+        epochs=epochs, precision=precision,
+        model_class="tests.e2e.test_validation_fallback.ModelWithoutValidationStep",
         name="fallback-test",
-        task="image_classification",
-        model=ModelSpec(class_path="tests.e2e.test_validation_fallback.ModelWithoutValidationStep"),
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(epochs=epochs, precision=precision),
-        optimizer={"_component_": "torch.optim.AdamW", "lr": 1e-3},
-        loss=loss,
-        metadata=MetadataSpec(author="test", description="validation fallback e2e"),
     )
-    config = Config()
-    config.job.resume = "disabled"
-    return Settings(recipe=recipe, config=config)
+    if loss is not None:
+        settings.recipe.loss = loss
+    return settings
 
 
 class TestValidationFallback:

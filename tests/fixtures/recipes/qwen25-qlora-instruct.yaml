@@ -7,7 +7,7 @@ model:
   torch_dtype: bfloat16
 
 head:
-  _component_: mdp.heads.CausalLMHead
+  _component_: CausalLMHead
   _target_attr: lm_head
 
 adapter:
@@ -51,6 +51,7 @@ training:
   gradient_clip_max_norm: 1.0
   gradient_checkpointing: true
   val_check_interval: 200
+  val_check_unit: step
 
 optimizer:
   _component_: bitsandbytes.optim.AdamW8bit
@@ -68,12 +69,10 @@ evaluation:
     - perplexity
 
 callbacks:
-  - _component_: mdp.callbacks.ModelCheckpoint
+  - _component_: ModelCheckpoint
     monitor: val_perplexity
     save_top_k: 2
     mode: min
-  - _component_: mdp.callbacks.GradientNormLogger
-  - _component_: mdp.callbacks.ThroughputMonitor
 
 metadata:
   author: wesley

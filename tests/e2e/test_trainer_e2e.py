@@ -13,16 +13,9 @@ from typing import Any
 
 import torch
 
-from mdp.settings.schema import (
-    Config,
-    DataSpec,
-    MetadataSpec,
-    ModelSpec,
-    Recipe,
-    Settings,
-    TrainingSpec,
-)
+from mdp.settings.schema import Settings
 from mdp.training.trainer import Trainer
+from tests.e2e.conftest import make_test_settings
 from tests.e2e.datasets import (
     ListDataLoader,
     make_language_batches,
@@ -44,24 +37,10 @@ def _make_settings(
     grad_accum: int = 1,
     precision: str = "fp32",
 ) -> Settings:
-    """Create a minimal Settings object for Trainer tests."""
-    recipe = Recipe(
-        name="test-experiment",
-        task=task,
-        model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(
-            epochs=epochs,
-            precision=precision,
-            gradient_accumulation_steps=grad_accum,
-        ),
-        optimizer={"_component_": "torch.optim.AdamW", "lr": 1e-3},
-        metadata=MetadataSpec(author="test", description="test"),
+    return make_test_settings(
+        task=task, epochs=epochs,
+        gradient_accumulation_steps=grad_accum, precision=precision,
     )
-    config = Config()
-    # Force CPU and disable resume
-    config.job.resume = "disabled"
-    return Settings(recipe=recipe, config=config)
 
 
 class TestVisionTrainer:

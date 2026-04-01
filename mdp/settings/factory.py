@@ -127,14 +127,8 @@ class SettingsFactory:
         from mdp.settings.validation.business_validator import BusinessValidator
         from mdp.settings.validation.compat_validator import CompatValidator
 
-        # CatalogValidator — 경고만 반환 (list[str])
-        catalog_warnings = CatalogValidator().validate(settings)
-        for w in catalog_warnings:
-            logger.warning(w)
-
-        # BusinessValidator + CompatValidator — ValidationResult (errors + warnings)
         all_errors: list[str] = []
-        for validator_cls in (BusinessValidator, CompatValidator):
+        for validator_cls in (CatalogValidator, BusinessValidator, CompatValidator):
             result = validator_cls().validate(settings)
             for w in result.warnings:
                 logger.warning(w)

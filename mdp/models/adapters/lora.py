@@ -53,8 +53,7 @@ def apply_lora(
 
     model = get_peft_model(model, config)
 
-    trainable, total = model.get_nb_trainable_parameters()
-    pct = 100.0 * trainable / total if total > 0 else 0.0
-    logger.info(f"Trainable: {trainable:,} / {total:,} ({pct:.2f}%)")
+    from mdp.models.adapters import log_trainable_params
+    log_trainable_params(model)
 
     return model

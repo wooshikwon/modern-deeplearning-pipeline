@@ -29,17 +29,6 @@ def _apply_language_tokenization(
     return ds
 
 
-def _apply_multimodal_transform(ds: Any, transform: Callable) -> Any:
-    """Multimodal: vision transform을 토큰화된 데이터셋에 적용한다."""
-    ds.set_transform(
-        lambda examples: {
-            k: (transform(v) if k in ("image", "pixel_values") else v)
-            for k, v in examples.items()
-        }
-    )
-    return ds
-
-
 def _columns_to_remove(ds: Any) -> list[str]:
     """토큰화 후 불필요한 원본 컬럼을 식별한다."""
     keep = {
@@ -79,7 +68,7 @@ def load_data(
 
     if has_vision and has_language:
         ds = _apply_language_tokenization(ds, tokenize_fn, streaming)
-        ds = _apply_multimodal_transform(ds, transform)
+        ds = _apply_vision_transform(ds, transform)
     elif has_vision:
         ds = _apply_vision_transform(ds, transform)
     elif has_language:

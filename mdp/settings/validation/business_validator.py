@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from mdp.settings.schema import Settings
-from mdp.settings.validation import ValidationResult
+from mdp.settings.validation import ValidationResult, is_qlora
 
 # 태스크별 허용 Head 클래스명 매핑
 TASK_HEAD_COMPAT: dict[str, list[str]] = {
@@ -98,12 +98,7 @@ class BusinessValidator:
             )
 
         # 2b. QLoRA 전용 검증
-        is_qlora = adapter.method == "qlora" or (
-            adapter.quantization is not None
-            and adapter.quantization.get("bits") == 4
-        )
-
-        if is_qlora:
+        if is_qlora(adapter):
             # quantization.bits 필수
             if adapter.quantization is None or adapter.quantization.get("bits") is None:
                 result.errors.append(

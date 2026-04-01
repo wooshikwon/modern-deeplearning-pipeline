@@ -8,15 +8,8 @@ from __future__ import annotations
 
 import torch
 
-from mdp.settings.schema import (
-    Config,
-    DataSpec,
-    MetadataSpec,
-    ModelSpec,
-    Recipe,
-    Settings,
-    TrainingSpec,
-)
+from mdp.settings.schema import Settings
+from tests.e2e.conftest import make_test_settings
 from mdp.training.callbacks.early_stopping import EarlyStopping
 from mdp.training.trainer import Trainer
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
@@ -27,18 +20,7 @@ def _make_settings(
     epochs: int = 100,
     precision: str = "fp32",
 ) -> Settings:
-    recipe = Recipe(
-        name="early-stopping-test",
-        task="image_classification",
-        model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(epochs=epochs, precision=precision),
-        optimizer={"_component_": "torch.optim.AdamW", "lr": 1e-3},
-        metadata=MetadataSpec(author="test", description="early stopping e2e"),
-    )
-    config = Config()
-    config.job.resume = "disabled"
-    return Settings(recipe=recipe, config=config)
+    return make_test_settings(epochs=epochs, precision=precision, name="early-stopping-test")
 
 
 class TestEarlyStoppingIntegration:

@@ -72,7 +72,8 @@ class TrainingSpec(BaseModel):
     gradient_accumulation_steps: int = 1
     gradient_clip_max_norm: float | None = None
     gradient_checkpointing: bool = False
-    val_check_interval: float | int = 1.0
+    val_check_interval: float = 1.0
+    val_check_unit: str = "epoch"  # "epoch" or "step"
     compile: str | bool = False
 
 

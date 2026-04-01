@@ -9,7 +9,7 @@ model:
     iou_threshold: 0.45
 
 head:
-  _component_: mdp.heads.DetectionHead
+  _component_: DetectionHead
   _target_attr: heads
   num_classes: 20
 
@@ -92,11 +92,11 @@ evaluation:
     - mAP@50
 
 callbacks:
-  - _component_: mdp.callbacks.ModelCheckpoint
+  - _component_: ModelCheckpoint
     monitor: val_mAP
     save_top_k: 3
     mode: max
-  - _component_: mdp.callbacks.EarlyStopping
+  - _component_: EarlyStopping
     monitor: val_mAP
     patience: 20
     mode: max

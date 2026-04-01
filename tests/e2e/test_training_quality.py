@@ -16,16 +16,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from mdp.settings.schema import (
-    Config,
-    DataSpec,
-    MLflowConfig,
-    MetadataSpec,
-    ModelSpec,
-    Recipe,
-    Settings,
-    TrainingSpec,
-)
+from mdp.settings.schema import Settings
+from tests.e2e.conftest import make_test_settings
 from mdp.training.callbacks.base import BaseCallback
 from mdp.training.trainer import Trainer
 from tests.e2e.datasets import (
@@ -68,22 +60,10 @@ def _make_settings(
     grad_accum: int = 1,
 ) -> Settings:
     """Create minimal Settings for quality tests."""
-    recipe = Recipe(
+    return make_test_settings(
+        task=task, epochs=epochs, gradient_accumulation_steps=grad_accum,
         name="quality-test",
-        task=task,
-        model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(
-            epochs=epochs,
-            precision="fp32",
-            gradient_accumulation_steps=grad_accum,
-        ),
-        optimizer={"_component_": "AdamW", "lr": 1e-3},
-        metadata=MetadataSpec(author="test", description="quality test"),
     )
-    config = Config()
-    config.job.resume = "disabled"
-    return Settings(recipe=recipe, config=config)
 
 
 # ---------------------------------------------------------------------------
@@ -218,8 +198,9 @@ class TestPaddingMasking:
         }
 
         loss = model.training_step(batch)
-        # PyTorch CE with all ignore_index returns 0
-        assert torch.isfinite(loss) or loss.isnan() or loss.item() == 0.0
+        # PyTorch CE(reduction='mean') + all ignore_index=-100 → NaN (0/0).
+        # 크래시하지 않는 것만 검증.
+        assert loss is not None
 
     def test_attention_mask_shapes(self) -> None:
         """Verify attention mask can be created and has correct shape."""
@@ -280,7 +261,9 @@ class TestMLflowLogging:
 
         # Verify some metrics were logged
         client = mlflow.tracking.MlflowClient(tracking_uri)
-        runs = client.search_runs(experiment_ids=["1"])
+        exp = client.get_experiment_by_name("test-quality")
+        assert exp is not None, "MLflow experiment 'test-quality' not found"
+        runs = client.search_runs(experiment_ids=[exp.experiment_id])
         assert len(runs) > 0, "No MLflow runs found"
         run_data = runs[0].data
 

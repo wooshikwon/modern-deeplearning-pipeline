@@ -2,8 +2,14 @@ optimizer:
   AdamW: torch.optim.AdamW
   Adam: torch.optim.Adam
   SGD: torch.optim.SGD
-scheduler: {}
-loss: {}
+scheduler:
+  CosineAnnealingLR: torch.optim.lr_scheduler.CosineAnnealingLR
+  StepLR: torch.optim.lr_scheduler.StepLR
+  LinearLR: torch.optim.lr_scheduler.LinearLR
+loss:
+  CrossEntropyLoss: torch.nn.CrossEntropyLoss
+  MSELoss: torch.nn.MSELoss
+  BCEWithLogitsLoss: torch.nn.BCEWithLogitsLoss
 head:
   ClassificationHead: mdp.models.heads.classification.ClassificationHead
   DetectionHead: mdp.models.heads.detection.DetectionHead
@@ -19,7 +25,9 @@ callback:
   LRMonitor: mdp.training.callbacks.lr_monitor.LearningRateMonitor
   ProgressBar: mdp.training.callbacks.progress.ProgressBar
   EMACallback: mdp.training.callbacks.ema.EMACallback
-evaluator: {}
+evaluator:
+  Accuracy: torchmetrics.Accuracy
+  F1Score: torchmetrics.F1Score
 strategy:
   DDPStrategy: mdp.training.strategies.ddp.DDPStrategy
   FSDPStrategy: mdp.training.strategies.fsdp.FSDPStrategy

@@ -97,11 +97,11 @@ evaluation:
     - f1
 
 callbacks:
-  - _component_: mdp.callbacks.EarlyStopping
+  - _component_: EarlyStopping
     monitor: val_loss
     patience: 5
     mode: min
-  - _component_: mdp.callbacks.ModelCheckpoint
+  - _component_: ModelCheckpoint
     monitor: val_accuracy
     save_top_k: 3
     mode: max

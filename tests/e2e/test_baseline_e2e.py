@@ -8,16 +8,8 @@ from __future__ import annotations
 
 import torch
 
-from mdp.settings.schema import (
-    Config,
-    DataSpec,
-    MetadataSpec,
-    ModelSpec,
-    MonitoringSpec,
-    Recipe,
-    Settings,
-    TrainingSpec,
-)
+from mdp.settings.schema import Settings
+from tests.e2e.conftest import make_test_settings
 from mdp.training.trainer import Trainer
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
 from tests.e2e.models import TinyVisionModel
@@ -29,25 +21,10 @@ def _make_settings(
     monitoring_enabled: bool = True,
     checkpoint_dir: str = "./checkpoints",
 ) -> Settings:
-    monitoring = MonitoringSpec(
-        enabled=monitoring_enabled,
-        baseline={},
-        drift={},
+    return make_test_settings(
+        epochs=epochs, precision=precision, monitoring_enabled=monitoring_enabled,
+        checkpoint_dir=checkpoint_dir, name="baseline-test",
     )
-    recipe = Recipe(
-        name="baseline-test",
-        task="image_classification",
-        model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(epochs=epochs, precision=precision),
-        optimizer={"_component_": "torch.optim.AdamW", "lr": 1e-3},
-        monitoring=monitoring,
-        metadata=MetadataSpec(author="test", description="baseline e2e"),
-    )
-    config = Config()
-    config.job.resume = "disabled"
-    config.storage.checkpoint_dir = checkpoint_dir
-    return Settings(recipe=recipe, config=config)
 
 
 class TestBaselineIntegration:

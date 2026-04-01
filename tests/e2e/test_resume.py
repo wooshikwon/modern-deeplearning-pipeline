@@ -10,15 +10,8 @@ import json
 
 import torch
 
-from mdp.settings.schema import (
-    Config,
-    DataSpec,
-    MetadataSpec,
-    ModelSpec,
-    Recipe,
-    Settings,
-    TrainingSpec,
-)
+from mdp.settings.schema import Settings
+from tests.e2e.conftest import make_test_settings
 from mdp.training.callbacks.checkpoint import ModelCheckpoint
 from mdp.training.trainer import Trainer
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
@@ -31,19 +24,12 @@ def _make_settings(
     resume: str = "disabled",
     checkpoint_dir: str = "./checkpoints",
 ) -> Settings:
-    recipe = Recipe(
+    settings = make_test_settings(
+        epochs=epochs, precision=precision, checkpoint_dir=checkpoint_dir,
         name="resume-test",
-        task="image_classification",
-        model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(epochs=epochs, precision=precision),
-        optimizer={"_component_": "torch.optim.AdamW", "lr": 1e-3},
-        metadata=MetadataSpec(author="test", description="resume e2e"),
     )
-    config = Config()
-    config.job.resume = resume
-    config.storage.checkpoint_dir = checkpoint_dir
-    return Settings(recipe=recipe, config=config)
+    settings.config.job.resume = resume
+    return settings
 
 
 class TestResume:

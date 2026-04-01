@@ -10,15 +10,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from mdp.settings.schema import (
-    Config,
-    DataSpec,
-    MetadataSpec,
-    ModelSpec,
-    Recipe,
-    Settings,
-    TrainingSpec,
-)
+from mdp.settings.schema import Settings
+from tests.e2e.conftest import make_test_settings
 from mdp.training.trainer import Trainer
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
 from tests.e2e.models import TinyVisionModel
@@ -30,18 +23,7 @@ def _make_settings(
     epochs: int = 3,
     precision: str = "fp32",
 ) -> Settings:
-    recipe = Recipe(
-        name="lora-test",
-        task="image_classification",
-        model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(epochs=epochs, precision=precision),
-        optimizer={"_component_": "torch.optim.AdamW", "lr": 1e-3},
-        metadata=MetadataSpec(author="test", description="lora adapter e2e"),
-    )
-    config = Config()
-    config.job.resume = "disabled"
-    return Settings(recipe=recipe, config=config)
+    return make_test_settings(epochs=epochs, precision=precision, name="lora-test")
 
 
 def _make_lora_model() -> torch.nn.Module:

@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 
 from mdp.settings.schema import Settings
+from mdp.settings.validation import ValidationResult
 
 _DEFAULT_CATALOG_DIR = Path(__file__).resolve().parents[2] / "models" / "catalog"
 
@@ -50,32 +51,32 @@ class CatalogValidator:
 
     # ── 공개 API ──
 
-    def validate(self, settings: Settings) -> list[str]:
-        """경고 메시지 목록을 반환한다. 빈 리스트면 통과."""
-        warnings: list[str] = []
+    def validate(self, settings: Settings) -> ValidationResult:
+        """ValidationResult를 반환한다."""
+        result = ValidationResult()
 
         pretrained = settings.recipe.model.pretrained
         if pretrained is None:
-            return warnings
+            return result
 
         entry = self._find_by_pretrained(pretrained)
         if entry is None:
-            warnings.append(
+            result.warnings.append(
                 f"모델 '{pretrained}'이(가) catalog에 없습니다. "
                 f"catalog 검증을 건너뜁니다."
             )
-            return warnings
+            return result
 
         task = settings.recipe.task
         supported = entry.get("supported_tasks", [])
         if task not in supported:
-            warnings.append(
+            result.warnings.append(
                 f"태스크 '{task}'은(는) 모델 '{entry['name']}'의 "
                 f"지원 태스크 목록에 없습니다. "
                 f"지원 태스크: {supported}"
             )
 
-        return warnings
+        return result
 
     def get_defaults(self, pretrained: str) -> dict[str, Any] | None:
         """pretrained URI로 catalog 항목을 찾아 전체 메타데이터를 반환한다."""

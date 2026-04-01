@@ -132,10 +132,15 @@ def build_tokenizer(
         )
 
         if label_strategy == LABEL_CAUSAL:
-            encoded["labels"] = encoded["input_ids"].copy()
+            encoded["labels"] = [row[:] for row in encoded["input_ids"]]
 
         elif label_strategy == LABEL_SEQ2SEQ:
-            targets = examples.get("target", examples.get("summary", []))
+            targets = examples.get("target")
+            if targets is None:
+                raise KeyError(
+                    "seq2seq label_strategy에 필요한 'target' 컬럼이 없습니다. "
+                    "data.fields에서 target 역할을 매핑하세요."
+                )
             target_encoded = tokenizer(
                 text_target=targets,
                 max_length=max_target_length,

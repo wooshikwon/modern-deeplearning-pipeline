@@ -146,7 +146,7 @@ def _build_recipe_from_catalog(
     recipe["data"] = data
 
     recipe["training"] = {"epochs": 3, "precision": "bf16"}
-    recipe["optimizer"] = {"_component_": "torch.optim.AdamW", "lr": 2e-5, "weight_decay": 0.01}
+    recipe["optimizer"] = {"_component_": "AdamW", "lr": 2e-5, "weight_decay": 0.01}
     recipe["callbacks"] = [
         {"_component_": "ModelCheckpoint", "save_top_k": 3, "monitor": "val_loss"},
     ]
