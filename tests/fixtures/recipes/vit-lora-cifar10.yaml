@@ -10,6 +10,7 @@ model:
 
 head:
   _component_: ClassificationHead
+  _target_attr: head
   num_classes: 10
   pooling: cls_token
   dropout: 0.1

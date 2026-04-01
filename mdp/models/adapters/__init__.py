@@ -8,7 +8,7 @@ from torch import nn
 
 
 def apply_adapter(
-    model: nn.Module,
+    model: nn.Module | None,
     adapter_config: dict[str, Any],
 ) -> nn.Module:
     """adapter_config의 method에 따라 적절한 어댑터를 적용한다.

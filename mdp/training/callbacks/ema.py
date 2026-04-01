@@ -82,6 +82,13 @@ class EMACallback(BaseCallback):
             return
 
         trainable = [p for p in self._model.parameters() if p.requires_grad]
+        if len(trainable) != len(self._shadow_params):
+            logger.warning(
+                "EMACallback: trainable parameter count changed (%d → %d), skipping update.",
+                len(self._shadow_params),
+                len(trainable),
+            )
+            return
         for shadow, param in zip(self._shadow_params, trainable):
             shadow.mul_(self.decay).add_(param.data, alpha=1.0 - self.decay)
 

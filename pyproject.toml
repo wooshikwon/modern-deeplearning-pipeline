@@ -22,6 +22,8 @@ language = [
     "transformers>=4.36",
     "tokenizers>=0.15",
     "datasets>=2.16",
+    "peft>=0.7",
+    "bitsandbytes>=0.41",
 ]
 serving = [
     "torchserve>=0.9",

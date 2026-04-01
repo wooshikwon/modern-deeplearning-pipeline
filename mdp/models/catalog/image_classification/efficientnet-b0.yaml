@@ -1,0 +1,44 @@
+# EfficientNet-B0 — 복합 스케일링 기반 경량 합성곱 모델
+name: efficientnet-b0
+family: efficientnet
+class_path: timm.create_model
+head_builtin: false
+
+pretrained_sources:
+  - "timm://efficientnet_b0.ra_in1k"
+
+supported_tasks:
+  - image_classification
+  - feature_extraction
+
+default_head:
+  task: image_classification
+  _component_: ClassificationHead
+  hidden_dim: 1280
+  dropout: 0.2
+
+input_spec:
+  channels: 3
+  height: 224
+  width: 224
+  dtype: float32
+
+init_args_schema:
+  num_classes:
+    type: int
+    default: 1000
+  pretrained:
+    type: bool
+    default: true
+
+adapter_defaults:
+  # 경량 모델이라 LoRA보다 전체 파인튜닝 권장, 기본값만 제공
+  lora:
+    target_modules: ["_fc"]
+    r: 4
+    alpha: 8
+
+memory:
+  params_m: 5.3
+  fp32_gb: 0.02
+  fp16_gb: 0.01

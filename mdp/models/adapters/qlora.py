@@ -10,6 +10,16 @@ from torch import nn
 logger = logging.getLogger(__name__)
 
 
+def _resolve_model_class(class_path: str | None) -> type:
+    if class_path is None:
+        from transformers import AutoModelForCausalLM
+        return AutoModelForCausalLM
+    import importlib
+    module_path, class_name = class_path.rsplit(".", 1)
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
 def apply_qlora(
     model_name_or_path: str,
     r: int = 8,
@@ -18,6 +28,7 @@ def apply_qlora(
     target_modules: list[str] | str = "all_linear",
     task_type: str | None = None,
     bits: int = 4,
+    class_path: str | None = None,
     **kwargs: Any,
 ) -> nn.Module:
     """양자화된 모델에 LoRA 어댑터를 적용한다.
@@ -39,7 +50,7 @@ def apply_qlora(
     """
     try:
         import torch
-        from transformers import AutoModelForCausalLM, BitsAndBytesConfig
+        from transformers import BitsAndBytesConfig
     except ImportError as e:
         raise ImportError(
             "transformers 패키지가 필요합니다: pip install transformers"
@@ -66,7 +77,8 @@ def apply_qlora(
         raise ValueError(f"bits는 4 또는 8이어야 합니다, 받은 값: {bits}")
 
     # 양자화된 모델 로딩
-    model = AutoModelForCausalLM.from_pretrained(
+    model_cls = _resolve_model_class(class_path)
+    model = model_cls.from_pretrained(
         model_name_or_path,
         quantization_config=bnb_config,
         device_map="auto",
@@ -78,6 +90,7 @@ def apply_qlora(
 
     # LoRA 설정 및 적용
     peft_task_type = getattr(TaskType, task_type) if task_type else None
+    modules_to_save = kwargs.pop("modules_to_save", None) or None
 
     lora_config = LoraConfig(
         r=r,
@@ -85,6 +98,7 @@ def apply_qlora(
         lora_dropout=lora_dropout,
         target_modules=target_modules,
         task_type=peft_task_type,
+        modules_to_save=modules_to_save,
     )
 
     model = get_peft_model(model, lora_config)

@@ -75,7 +75,7 @@ class CompatValidator:
         backend = serving.backend
         task = settings.recipe.task
 
-        if backend == "vllm" and task not in ("text_generation", "seq2seq"):
+        if backend == "vllm" and task not in ("text_generation", "causal_lm", "seq2seq"):
             result.errors.append(
                 f"vLLM backend은 text_generation 또는 seq2seq 태스크만 "
                 f"지원합니다. 현재 태스크: '{task}'"

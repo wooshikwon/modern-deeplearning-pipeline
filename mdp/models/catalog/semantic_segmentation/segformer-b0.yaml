@@ -1,0 +1,42 @@
+# SegFormer-B0 — 경량 트랜스포머 기반 시맨틱 세그멘테이션
+name: segformer-b0
+family: segformer
+class_path: transformers.AutoModelForSemanticSegmentation
+head_builtin: true
+
+pretrained_sources:
+  - "hf://nvidia/segformer-b0-finetuned-ade-512-512"
+
+supported_tasks:
+  - semantic_segmentation
+
+default_head:
+  task: semantic_segmentation
+  _component_: SegmentationHead
+  hidden_dim: 256
+  dropout: 0.1
+
+input_spec:
+  channels: 3
+  height: 512
+  width: 512
+  dtype: float32
+
+init_args_schema:
+  num_labels:
+    type: int
+    default: 150
+  pretrained:
+    type: bool
+    default: true
+
+adapter_defaults:
+  lora:
+    target_modules: ["q", "v"]
+    r: 8
+    alpha: 16
+
+memory:
+  params_m: 3.7
+  fp32_gb: 0.02
+  fp16_gb: 0.01

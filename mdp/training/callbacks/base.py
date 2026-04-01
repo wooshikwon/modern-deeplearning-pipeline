@@ -12,6 +12,8 @@ class BaseCallback:
     breaking existing callbacks.
     """
 
+    should_stop: bool = False
+
     def on_train_start(self, **kwargs) -> None:  # noqa: ARG002
         pass
 

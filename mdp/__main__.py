@@ -78,11 +78,15 @@ def serve(
 
 
 @app.command()
-def init(name: str = typer.Argument(..., help="프로젝트 이름")):
+def init(
+    name: str = typer.Argument(..., help="프로젝트 이름"),
+    task: str = typer.Option(None, "--task", help="태스크 (예: image_classification)"),
+    model: str = typer.Option(None, "--model", help="모델 이름 (예: resnet50)"),
+):
     """새 MDP 프로젝트를 생성한다."""
     from mdp.cli.init import init_project
 
-    init_project(name)
+    init_project(name, task=task, model=model)
 
 
 @app.command()
@@ -96,11 +100,14 @@ def estimate(
 
 
 @app.command(name="list")
-def list_cmd(target: str = typer.Argument("models", help="models|tasks|callbacks|strategies|jobs")):
+def list_cmd(
+    target: str = typer.Argument("models", help="models|tasks|callbacks|strategies|jobs"),
+    task: str = typer.Option(None, "--task", help="models 조회 시 task 필터"),
+):
     """카탈로그를 조회한다."""
     from mdp.cli.list_cmd import run_list
 
-    run_list(target)
+    run_list(target, task_filter=task)
 
 
 if __name__ == "__main__":

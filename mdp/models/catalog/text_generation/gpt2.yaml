@@ -1,0 +1,46 @@
+name: gpt2
+family: gpt
+class_path: transformers.AutoModelForCausalLM
+head_builtin: true
+
+pretrained_sources:
+  - "hf://gpt2"
+
+supported_tasks:
+  - text_generation
+  - text_generation
+
+default_head:
+  task: text_generation
+  _component_: CausalLMHead
+  hidden_dim: 768
+  vocab_size: 50257
+
+input_spec:
+  max_length: 1024
+  vocab_size: 50257
+  dtype: long
+
+init_args_schema:
+  attn_pdrop: {type: float, default: 0.1}
+  resid_pdrop: {type: float, default: 0.1}
+  embd_pdrop: {type: float, default: 0.1}
+  n_positions: {type: int, default: 1024}
+
+adapter_defaults:
+  lora:
+    target_modules: ["c_attn", "c_proj"]
+    r: 8
+    alpha: 16
+    task_type: "CAUSAL_LM"
+  qlora:
+    target_modules: ["c_attn", "c_proj"]
+    r: 8
+    alpha: 16
+    task_type: "CAUSAL_LM"
+    bits: 4
+
+memory:
+  params_m: 124.4
+  fp32_gb: 0.47
+  fp16_gb: 0.24

@@ -1,4 +1,4 @@
-"""mdp serve — 모델 서빙을 시작한다.
+"""mdp serve -- 모델 서빙을 시작한다.
 
 Config의 serving.backend에 따라 적절한 서빙 백엔드를 선택하고 서버를 시작한다.
 지원 백엔드: torchserve, vllm, onnx.
@@ -8,7 +8,18 @@ from __future__ import annotations
 
 import typer
 
+from mdp.cli.output import build_result, emit_result, is_json_mode
 from mdp.settings.factory import SettingsFactory
+
+
+def _wait_process(process, backend_name: str) -> None:
+    """프로세스 종료를 대기한다. KeyboardInterrupt 시 graceful shutdown."""
+    try:
+        process.wait()
+    except KeyboardInterrupt:
+        typer.echo(f"\n{backend_name} 종료 중...")
+        process.terminate()
+        process.wait()
 
 
 def run_serve(recipe_path: str, config_path: str) -> None:
@@ -21,6 +32,13 @@ def run_serve(recipe_path: str, config_path: str) -> None:
         raise typer.Exit(code=1)
 
     backend = serving.backend
+
+    if is_json_mode():
+        emit_result(build_result(
+            command="serve",
+            status="starting",
+            backend=backend,
+        ))
 
     if backend == "torchserve":
         _serve_torchserve(settings)
@@ -41,11 +59,12 @@ def _serve_torchserve(settings) -> None:
     serving = settings.config.serving
     model_store = serving.model_repository or "model_store"
     typer.echo(f"TorchServe 시작: model_store={model_store}")
-    start_torchserve(
+    process = start_torchserve(
         model_store=model_store,
         port=8080,
         workers=serving.instance_count,
     )
+    _wait_process(process, "TorchServe")
 
 
 def _serve_vllm(settings) -> None:
@@ -62,11 +81,12 @@ def _serve_vllm(settings) -> None:
 
     serving = settings.config.serving
     typer.echo(f"vLLM 서버 시작: model={model_name}")
-    start_vllm_server(
+    process = start_vllm_server(
         model_name=model_name,
         port=8000,
         tensor_parallel_size=serving.instance_count,
     )
+    _wait_process(process, "vLLM")
 
 
 def _serve_onnx(settings) -> None:

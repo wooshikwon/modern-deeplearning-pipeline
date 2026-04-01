@@ -41,7 +41,11 @@ class DeepSpeedStrategy(BaseStrategy):
     def setup(self, model: nn.Module, device: torch.device) -> nn.Module:  # noqa: ARG002
         import deepspeed  # lazy import
 
-        model_engine, *_ = deepspeed.initialize(model=model, config=self.ds_config)
+        model_engine, *_ = deepspeed.initialize(
+            model=model,
+            model_parameters=model.parameters(),
+            config=self.ds_config,
+        )
         return model_engine
 
     def save_checkpoint(self, model: nn.Module, path: str) -> None:
@@ -50,3 +54,9 @@ class DeepSpeedStrategy(BaseStrategy):
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
         model.load_checkpoint(path)  # type: ignore[attr-defined]
         return model
+
+    def cleanup(self) -> None:
+        import torch.distributed as dist
+
+        if dist.is_initialized():
+            dist.destroy_process_group()

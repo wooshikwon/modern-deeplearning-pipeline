@@ -6,9 +6,43 @@ from typing import Any
 
 from torch.utils.data import DataLoader
 
+from mdp.data.tokenizer import (
+    LABEL_CAUSAL,
+    LABEL_COPY,
+    LABEL_SEQ2SEQ,
+    build_tokenizer,
+    derive_label_strategy,
+)
 from mdp.data.transforms import build_transforms
-from mdp.data.tokenizer import build_tokenizer
 from mdp.settings.resolver import ComponentResolver
+
+
+def _select_collator(
+    label_strategy: str,
+    tokenizer_config: dict[str, Any] | None,
+) -> Any | None:
+    """label_strategy에 따라 적절한 collator를 선택한다."""
+    if tokenizer_config is None:
+        return None
+
+    from transformers import DataCollatorForLanguageModeling, DataCollatorWithPadding
+
+    from transformers import AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["pretrained"])
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    if label_strategy == LABEL_CAUSAL:
+        return DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+    elif label_strategy == LABEL_SEQ2SEQ:
+        from transformers import DataCollatorForSeq2Seq
+
+        return DataCollatorForSeq2Seq(tokenizer=tokenizer)
+    elif label_strategy == LABEL_COPY:
+        return DataCollatorWithPadding(tokenizer=tokenizer)
+    else:
+        return DataCollatorWithPadding(tokenizer=tokenizer)
 
 
 def create_dataloaders(
@@ -16,7 +50,7 @@ def create_dataloaders(
     aug_config: dict[str, Any] | None,
     tokenizer_config: dict[str, Any] | None,
     loader_config: dict[str, Any],
-    recipe_task: str,
+    fields: dict[str, str] | None = None,
     distributed: bool = False,
 ) -> dict[str, DataLoader]:
     """Dataset과 DataLoader를 조립하여 ``{"train": ..., "val": ...}`` 딕셔너리를 반환한다.
@@ -26,7 +60,7 @@ def create_dataloaders(
         aug_config: augmentation 설정 (``train``/``val`` 키 포함 가능).
         tokenizer_config: tokenizer 설정.
         loader_config: DataLoader 설정 (batch_size, num_workers 등).
-        recipe_task: Recipe의 task 문자열. tokenizer label 전략 결정.
+        fields: ``{role: column_name}`` 매핑. label 전략 파생에 사용.
         distributed: ``True``이면 ``DistributedSampler`` 사용.
 
     Returns:
@@ -34,6 +68,9 @@ def create_dataloaders(
         val split이 없으면 ``"val"`` 키가 빠진다.
     """
     resolver = ComponentResolver()
+
+    # label strategy 파생
+    label_strategy = derive_label_strategy(fields)
 
     # augmentation
     train_transform = None
@@ -43,7 +80,7 @@ def create_dataloaders(
         val_transform = build_transforms(aug_config.get("val"))
 
     # tokenizer
-    tokenize_fn = build_tokenizer(tokenizer_config, task=recipe_task)
+    tokenize_fn = build_tokenizer(tokenizer_config, label_strategy=label_strategy)
 
     # Dataset 클래스 + kwargs 추출
     dataset_cls, dataset_kwargs = resolver.resolve_partial(dataset_config)
@@ -54,6 +91,8 @@ def create_dataloaders(
     collate_cfg = loader_kwargs.pop("collate_fn", None)
     if collate_cfg is not None:
         collate_fn = resolver.resolve(collate_cfg)
+    else:
+        collate_fn = _select_collator(label_strategy, tokenizer_config)
 
     # ── DataLoader 공통 설정 ──
     def _make_loader(

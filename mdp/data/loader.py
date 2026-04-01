@@ -1,0 +1,88 @@
+"""load_data — 데이터셋 로드 + transform/tokenization 적용."""
+
+from __future__ import annotations
+
+from typing import Any, Callable
+
+
+def _apply_vision_transform(ds: Any, transform: Callable) -> Any:
+    """Vision transform을 데이터셋에 적용한다."""
+    ds.set_transform(
+        lambda examples: {
+            k: (transform(v) if k in ("image", "pixel_values") else v)
+            for k, v in examples.items()
+        }
+    )
+    return ds
+
+
+def _apply_language_tokenization(
+    ds: Any, tokenize_fn: Callable, streaming: bool,
+) -> Any:
+    """Language tokenization을 데이터셋에 적용한다."""
+    ds = ds.map(tokenize_fn, batched=True)
+    if not streaming:
+        remove_cols = _columns_to_remove(ds)
+        if remove_cols:
+            ds = ds.remove_columns(remove_cols)
+        ds.set_format("torch")
+    return ds
+
+
+def _apply_multimodal_transform(ds: Any, transform: Callable) -> Any:
+    """Multimodal: vision transform을 토큰화된 데이터셋에 적용한다."""
+    ds.set_transform(
+        lambda examples: {
+            k: (transform(v) if k in ("image", "pixel_values") else v)
+            for k, v in examples.items()
+        }
+    )
+    return ds
+
+
+def _columns_to_remove(ds: Any) -> list[str]:
+    """토큰화 후 불필요한 원본 컬럼을 식별한다."""
+    keep = {
+        "input_ids", "attention_mask", "token_type_ids", "labels",
+        "pixel_values", "image",
+    }
+    if hasattr(ds, "column_names"):
+        return [c for c in ds.column_names if c not in keep]
+    return []
+
+
+def load_data(
+    ds: Any,
+    *,
+    transform: Callable | None = None,
+    tokenize_fn: Callable | None = None,
+    streaming: bool = False,
+) -> Any:
+    """데이터셋에 transform과 tokenization을 적용한다.
+
+    분기는 transform/tokenize_fn 존재 여부로 결정된다:
+    - vision + language → multimodal
+    - vision only → vision transform
+    - language only → language tokenization
+
+    Args:
+        ds: 원본 데이터셋.
+        transform: Vision transform 함수.
+        tokenize_fn: Language tokenization 함수.
+        streaming: 스트리밍 모드 여부.
+
+    Returns:
+        전처리가 적용된 데이터셋.
+    """
+    has_vision = transform is not None
+    has_language = tokenize_fn is not None
+
+    if has_vision and has_language:
+        ds = _apply_language_tokenization(ds, tokenize_fn, streaming)
+        ds = _apply_multimodal_transform(ds, transform)
+    elif has_vision:
+        ds = _apply_vision_transform(ds, transform)
+    elif has_language:
+        ds = _apply_language_tokenization(ds, tokenize_fn, streaming)
+
+    return ds

@@ -1,13 +1,62 @@
-"""build_tokenizer — tokenizer YAML 설정을 토큰화 함수로 변환."""
+"""build_tokenizer — tokenizer YAML 설정을 토큰화 함수로 변환.
+
+label 생성 전략은 fields(역할→컬럼 매핑)로부터 파생된다.
+task 문자열이 아닌 label_strategy 상수로 분기한다.
+"""
 
 from __future__ import annotations
 
 from typing import Any, Callable
 
+# ── label strategy 상수 ──
+
+LABEL_CAUSAL = "causal"  # text_generation, causal_lm, vision_language
+LABEL_SEQ2SEQ = "seq2seq"  # seq2seq (text → target)
+LABEL_COPY = "copy"  # text_classification (labels 그대로 통과)
+LABEL_ALIGN = "align"  # token_classification (sub-word alignment)
+LABEL_NONE = "none"  # feature_extraction, image-only 등
+
+
+def derive_label_strategy(fields: dict[str, str] | None) -> str:
+    """fields 딕셔너리로부터 label_strategy를 파생한다.
+
+    Args:
+        fields: ``{role: column_name}`` 매핑. ``None``이면 ``LABEL_NONE``.
+
+    Returns:
+        label strategy 상수 문자열.
+    """
+    if not fields:
+        return LABEL_NONE
+
+    roles = set(fields.keys())
+
+    # target 역할이 있으면 seq2seq
+    if "target" in roles:
+        return LABEL_SEQ2SEQ
+
+    # token_labels 역할이 있으면 alignment
+    if "token_labels" in roles:
+        return LABEL_ALIGN
+
+    # text + label → classification (labels 복사)
+    if "text" in roles and "label" in roles:
+        return LABEL_COPY
+
+    # text만 있으면 causal (text_generation)
+    if "text" in roles:
+        return LABEL_CAUSAL
+
+    # image + text → causal (vision_language)
+    if "image" in roles and "text" in roles:
+        return LABEL_CAUSAL
+
+    return LABEL_NONE
+
 
 def build_tokenizer(
     config: dict[str, Any] | None,
-    task: str = "text_generation",
+    label_strategy: str = LABEL_CAUSAL,
 ) -> Callable | None:
     """tokenizer YAML 설정 → 토큰화 함수.
 
@@ -21,11 +70,12 @@ def build_tokenizer(
 
     Args:
         config: tokenizer 설정 딕셔너리. ``None``이면 ``None`` 반환.
-        task: 태스크 유형. label 생성 전략을 결정한다.
-            - ``text_generation``: labels = input_ids 복사.
-            - ``seq2seq``: labels = tokenizer(text_target=...).
-            - ``text_classification``: labels 그대로 통과.
-            - ``token_classification``: sub-word label alignment.
+        label_strategy: label 생성 전략 상수.
+            - ``"causal"``: labels = input_ids 복사.
+            - ``"seq2seq"``: labels = tokenizer(text_target=...).
+            - ``"copy"``: labels 그대로 통과.
+            - ``"align"``: sub-word label alignment.
+            - ``"none"``: label 생성 안 함.
 
     Returns:
         ``tokenize_fn(examples: dict) -> dict`` 또는 ``None``.
@@ -43,8 +93,8 @@ def build_tokenizer(
     chat_template = config.get("chat_template")
     is_split_into_words = config.get("is_split_into_words", False)
 
-    # token_classification은 word-level 입력이므로 강제 True
-    if task == "token_classification":
+    # align(token_classification)은 word-level 입력이므로 강제 True
+    if label_strategy == LABEL_ALIGN:
         is_split_into_words = True
 
     tokenizer = AutoTokenizer.from_pretrained(pretrained)
@@ -81,10 +131,10 @@ def build_tokenizer(
             is_split_into_words=is_split_into_words,
         )
 
-        if task == "text_generation":
+        if label_strategy == LABEL_CAUSAL:
             encoded["labels"] = encoded["input_ids"].copy()
 
-        elif task == "seq2seq":
+        elif label_strategy == LABEL_SEQ2SEQ:
             targets = examples.get("target", examples.get("summary", []))
             target_encoded = tokenizer(
                 text_target=targets,
@@ -94,13 +144,13 @@ def build_tokenizer(
             )
             encoded["labels"] = target_encoded["input_ids"]
 
-        elif task == "text_classification":
+        elif label_strategy == LABEL_COPY:
             if "labels" in examples:
                 encoded["labels"] = examples["labels"]
             elif "label" in examples:
                 encoded["labels"] = examples["label"]
 
-        elif task == "token_classification":
+        elif label_strategy == LABEL_ALIGN:
             all_labels = examples.get("labels", examples.get("ner_tags", []))
             aligned_labels = []
             for i, label_seq in enumerate(all_labels):

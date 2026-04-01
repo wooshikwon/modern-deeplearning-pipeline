@@ -10,6 +10,7 @@ model:
 
 head:
   _component_: mdp.heads.DetectionHead
+  _target_attr: heads
   num_classes: 20
 
 data:

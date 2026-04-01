@@ -91,13 +91,16 @@ class ModelCheckpoint(BaseCallback):
         epoch: int,
         global_step: int,
         metrics: dict[str, float] | None = None,
+        strategy: Any | None = None,
     ) -> Path:
         """Persist a checkpoint to disk and return its path."""
         ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # Model weights: prefer save_pretrained (HF/PEFT), then safetensors, fallback to .pt
-        if hasattr(model, "save_pretrained"):
+        # Model weights: prefer strategy, then save_pretrained (HF/PEFT), then safetensors, fallback to .pt
+        if strategy is not None:
+            strategy.save_checkpoint(model, str(ckpt_dir / "model.safetensors"))
+        elif hasattr(model, "save_pretrained"):
             model.save_pretrained(ckpt_dir)
         else:
             try:
@@ -172,8 +175,9 @@ class ModelCheckpoint(BaseCallback):
             optimizer = kwargs.get("optimizer")
             if model is not None and optimizer is not None:
                 scheduler = kwargs.get("scheduler")
+                strategy = kwargs.get("strategy")
                 epoch = kwargs.get("epoch", 0)
-                self.save_checkpoint(model, optimizer, scheduler, epoch, step, metrics)
+                self.save_checkpoint(model, optimizer, scheduler, epoch, step, metrics, strategy=strategy)
 
     def on_validation_end(
         self,
@@ -197,10 +201,11 @@ class ModelCheckpoint(BaseCallback):
             return
 
         scheduler = kwargs.get("scheduler")
+        strategy = kwargs.get("strategy")
         global_step = kwargs.get("global_step", 0)
 
         ckpt_path = self.save_checkpoint(
-            model, optimizer, scheduler, epoch, global_step, metrics,
+            model, optimizer, scheduler, epoch + 1, global_step, metrics, strategy=strategy,
         )
 
         metric_value = metrics[self.monitor]

@@ -12,15 +12,6 @@ from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
 
-# head를 부착할 수 있는 일반적인 속성명 (우선순위 순)
-_HEAD_ATTR_CANDIDATES = [
-    "classifier",  # HuggingFace 분류 모델
-    "lm_head",     # HuggingFace 언어 모델
-    "head",        # timm 모델
-    "fc",          # torchvision ResNet 등
-    "heads",       # 일부 검출 모델
-]
-
 
 class Factory:
     """컴포넌트 생성 중앙 파사드.
@@ -68,8 +59,10 @@ class Factory:
 
         # 단계 2: head 교체 (설정이 있을 때만)
         if recipe.head is not None:
-            head = self.resolver.resolve(recipe.head)
-            self._attach_head(model, head)
+            head_config = dict(recipe.head)
+            target_attr = head_config.pop("_target_attr", None)
+            head = self.resolver.resolve(head_config)
+            self._attach_head(model, head, target_attr)
 
         # 단계 3: adapter 적용 (설정이 있을 때만)
         if adapter_spec is not None and adapter_spec.method == "lora":
@@ -103,7 +96,7 @@ class Factory:
             )
         else:
             # pretrained 없음 → class_path에서 직접 인스턴스화 (랜덤 초기화)
-            klass = self.resolver._import_class(model_spec.class_path)
+            klass = self.resolver.import_class(model_spec.class_path)
             return klass(**kwargs)
 
     def _build_qlora_model(self, model_spec: Any, adapter_spec: Any) -> nn.Module:
@@ -123,6 +116,7 @@ class Factory:
 
         adapter_config = adapter_spec.model_dump(exclude_none=True)
         adapter_config["model_name_or_path"] = model_name
+        adapter_config["class_path"] = model_spec.class_path
 
         # torch_dtype, attn_implementation 전달
         if model_spec.torch_dtype is not None:
@@ -134,34 +128,29 @@ class Factory:
         return apply_adapter(None, adapter_config)
 
     @staticmethod
-    def _attach_head(model: nn.Module, head: nn.Module) -> None:
+    def _attach_head(
+        model: nn.Module, head: nn.Module, target_attr: str | None = None
+    ) -> None:
         """모델에 새 head를 부착한다.
 
-        모델 아키텍처별로 head가 붙는 위치가 다르므로,
-        일반적인 속성명을 순회하며 교체할 위치를 찾는다.
+        Args:
+            model: 기반 모델.
+            head: 부착할 head 모듈.
+            target_attr: head를 부착할 모델 속성명. None이면 ValueError.
         """
-        for attr in _HEAD_ATTR_CANDIDATES:
-            if hasattr(model, attr):
-                setattr(model, attr, head)
-                logger.info("Head 교체: model.%s → %s", attr, type(head).__name__)
-                return
-
-        # 후보에 없는 경우 — 모델의 named_children을 출력하여 디버깅 지원
-        children = [name for name, _ in model.named_children()]
-        raise AttributeError(
-            f"모델에서 head를 교체할 위치를 찾을 수 없습니다. "
-            f"model의 children: {children}. "
-            f"모델 클래스에 맞는 head 속성명을 확인하세요."
-        )
-
-    def create_head(self) -> nn.Module | None:
-        """Recipe의 head 설정에서 head를 생성한다."""
-        head_config = self.settings.recipe.head
-        if head_config is None:
-            return None
-        return self._get_or_create(
-            "head", lambda: self.resolver.resolve(head_config)
-        )
+        if target_attr is None:
+            raise ValueError(
+                "head 설정에 '_target_attr'이 지정되지 않았습니다. "
+                "recipe의 head 섹션에 '_target_attr'을 추가하세요."
+            )
+        if not hasattr(model, target_attr):
+            children = [name for name, _ in model.named_children()]
+            raise AttributeError(
+                f"모델에 '{target_attr}' 속성이 없습니다. "
+                f"model의 children: {children}."
+            )
+        setattr(model, target_attr, head)
+        logger.info("Head 교체: model.%s → %s", target_attr, type(head).__name__)
 
     # ── Phase 3: 데이터 ──
 
@@ -177,7 +166,7 @@ class Factory:
                 aug_config=recipe.data.augmentation,
                 tokenizer_config=recipe.data.tokenizer,
                 loader_config=recipe.data.dataloader.model_dump(),
-                recipe_task=recipe.task,
+                fields=recipe.data.fields,
                 distributed=distributed,
             )
 
@@ -211,24 +200,6 @@ class Factory:
             except Exception as e:
                 logger.warning("콜백 생성 실패: %s", e)
         return callbacks
-
-    def create_strategy(self) -> Any:
-        """Config의 distributed 설정에서 전략을 생성한다."""
-        dist = self.settings.config.compute.distributed
-        if dist is None:
-            return None
-        strategy_name = dist.get("strategy") if isinstance(dist, dict) else None
-        if strategy_name is None:
-            return None
-
-        from mdp.training.trainer import STRATEGY_MAP
-
-        class_path = STRATEGY_MAP.get(strategy_name)
-        if class_path is None:
-            raise ValueError(f"알 수 없는 분산 전략: {strategy_name}")
-
-        kwargs = {k: v for k, v in dist.items() if k != "strategy"}
-        return self.resolver.resolve({"_component_": class_path, **kwargs})
 
     # ── Phase 5: 실행 레이어 ──
 

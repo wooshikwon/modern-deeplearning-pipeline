@@ -26,21 +26,27 @@ def _detect_device(device: str | torch.device | None) -> torch.device:
 
 
 def _postprocess(outputs: dict[str, torch.Tensor], task: str) -> dict[str, Any]:
-    """태스크별 모델 출력 후처리.
+    """출력 키 기반 모델 출력 후처리.
 
     Parameters
     ----------
     outputs:
-        모델이 반환한 텐서 딕셔너리. ``logits`` 키를 기본으로 사용.
+        모델이 반환한 텐서 딕셔너리.
     task:
-        ``classification`` | ``detection`` | ``text_generation`` | 기타.
+        태스크명 (현재는 사용하지 않으나 시그니처 유지).
 
     Returns
     -------
     dict:
         후처리된 numpy 배열 딕셔너리.
     """
-    if task == "classification":
+    if "generated_ids" in outputs:
+        return {"generated_ids": outputs["generated_ids"].cpu().numpy()}
+
+    if "boxes" in outputs:
+        return {"boxes": outputs["boxes"].cpu().numpy()}
+
+    if "logits" in outputs:
         logits = outputs["logits"]
         probs = torch.softmax(logits, dim=-1)
         preds = torch.argmax(logits, dim=-1)
@@ -49,18 +55,9 @@ def _postprocess(outputs: dict[str, torch.Tensor], task: str) -> dict[str, Any]:
             "probabilities": probs.cpu().numpy(),
         }
 
-    if task == "detection":
-        boxes = outputs["boxes"]
-        return {"boxes": boxes.cpu().numpy()}
-
-    if task == "text_generation":
-        logits = outputs["logits"]
-        generated = torch.argmax(logits, dim=-1)
-        return {"generated_ids": generated.cpu().numpy()}
-
-    # fallback: logits 그대로
-    logits = outputs["logits"]
-    return {"logits": logits.cpu().numpy()}
+    # fallback: 첫 번째 키
+    first_key = next(iter(outputs))
+    return {first_key: outputs[first_key].cpu().numpy()}
 
 
 def _save_results(

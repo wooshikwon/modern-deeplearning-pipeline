@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from typing import Any
@@ -9,6 +10,8 @@ from typing import Any
 import yaml
 
 from mdp.settings.schema import Config, Recipe, Settings
+
+logger = logging.getLogger(__name__)
 
 ENV_PATTERN = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
 
@@ -26,11 +29,30 @@ class SettingsFactory:
 
         recipe = Recipe(**recipe_dict)
         config = Config(**config_dict)
+        settings = Settings(recipe=recipe, config=config)
+        self._validate(settings)
+        return settings
+
+    def for_estimation(self, recipe_path: str) -> Settings:
+        """추정용 Settings를 조립한다. Recipe만 로딩하고 기본 Config를 사용한다."""
+        recipe_dict = self._load_yaml(recipe_path)
+        recipe_dict = self._substitute_env_vars(recipe_dict)
+
+        recipe = Recipe(**recipe_dict)
+        config = Config()
         return Settings(recipe=recipe, config=config)
 
     def for_inference(self, recipe_path: str, config_path: str) -> Settings:
-        """추론용 Settings를 조립한다."""
-        return self.for_training(recipe_path, config_path)
+        """추론용 Settings를 조립한다. 학습 전용 검증은 수행하지 않는다."""
+        recipe_dict = self._load_yaml(recipe_path)
+        config_dict = self._load_yaml(config_path)
+
+        recipe_dict = self._substitute_env_vars(recipe_dict)
+        config_dict = self._substitute_env_vars(config_dict)
+
+        recipe = Recipe(**recipe_dict)
+        config = Config(**config_dict)
+        return Settings(recipe=recipe, config=config)
 
     @staticmethod
     def _load_yaml(path: str) -> dict:
@@ -95,3 +117,30 @@ class SettingsFactory:
         except ValueError:
             pass
         return value
+
+    def _validate(self, settings: Settings) -> None:
+        """CatalogValidator, BusinessValidator, CompatValidator를 순서대로 실행한다.
+
+        warnings는 로깅하고, errors가 있으면 ValueError를 발생시킨다.
+        """
+        from mdp.settings.validation.catalog_validator import CatalogValidator
+        from mdp.settings.validation.business_validator import BusinessValidator
+        from mdp.settings.validation.compat_validator import CompatValidator
+
+        # CatalogValidator — 경고만 반환 (list[str])
+        catalog_warnings = CatalogValidator().validate(settings)
+        for w in catalog_warnings:
+            logger.warning(w)
+
+        # BusinessValidator + CompatValidator — ValidationResult (errors + warnings)
+        all_errors: list[str] = []
+        for validator_cls in (BusinessValidator, CompatValidator):
+            result = validator_cls().validate(settings)
+            for w in result.warnings:
+                logger.warning(w)
+            all_errors.extend(result.errors)
+
+        if all_errors:
+            raise ValueError(
+                "Settings 검증 실패:\n" + "\n".join(f"  - {e}" for e in all_errors)
+            )

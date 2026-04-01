@@ -1,0 +1,41 @@
+name: bert-base
+family: bert
+class_path: transformers.AutoModel
+head_builtin: false
+
+pretrained_sources:
+  - "hf://bert-base-uncased"
+  - "hf://google-bert/bert-base-uncased"
+
+supported_tasks:
+  - text_classification
+  - token_classification
+  - feature_extraction
+
+default_head:
+  task: text_classification
+  _component_: SequenceClassificationHead
+  hidden_dim: 768
+  vocab_size: 30522
+
+input_spec:
+  max_length: 512
+  vocab_size: 30522
+  dtype: long
+
+init_args_schema:
+  attention_probs_dropout_prob: {type: float, default: 0.1}
+  hidden_dropout_prob: {type: float, default: 0.1}
+  max_position_embeddings: {type: int, default: 512}
+
+adapter_defaults:
+  lora:
+    target_modules: ["query", "value"]
+    r: 8
+    alpha: 16
+    task_type: "SEQ_CLS"
+
+memory:
+  params_m: 110.0
+  fp32_gb: 0.42
+  fp16_gb: 0.21

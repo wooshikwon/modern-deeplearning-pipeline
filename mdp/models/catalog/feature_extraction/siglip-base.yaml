@@ -1,0 +1,44 @@
+# Google SigLIP Base — 시그모이드 손실 기반 이미지-텍스트 대조 학습 모델
+# CLIP의 softmax 대조 손실 대신 시그모이드 손실을 사용하여 배치 크기에 덜 민감
+name: siglip-base-patch16-224
+family: siglip
+class_path: transformers.AutoModel
+head_builtin: true
+
+pretrained_sources:
+  - "hf://google/siglip-base-patch16-224"
+
+supported_tasks:
+  - feature_extraction
+  - feature_extraction
+
+default_head:
+  task: feature_extraction
+  _component_: DualEncoderHead
+  hidden_dim: 768
+
+input_spec:
+  image:
+    channels: 3
+    height: 224
+    width: 224
+    dtype: float32
+  text:
+    max_length: 64
+    dtype: long
+
+init_args_schema:
+  pretrained_model_name_or_path: {type: str, default: "google/siglip-base-patch16-224"}
+  attention_dropout: {type: float, default: 0.0}
+
+adapter_defaults:
+  lora:
+    # vision encoder + text encoder 양쪽의 어텐션 레이어에 적용
+    target_modules: ["q_proj", "v_proj"]
+    r: 8
+    alpha: 16
+
+memory:
+  params_m: 203
+  fp32_gb: 0.78
+  fp16_gb: 0.39

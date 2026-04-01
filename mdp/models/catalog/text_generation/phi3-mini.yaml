@@ -1,0 +1,39 @@
+name: phi3-mini
+family: phi
+class_path: transformers.AutoModelForCausalLM
+head_builtin: true
+
+pretrained_sources:
+  - "hf://microsoft/Phi-3-mini-4k-instruct"
+  - "hf://microsoft/Phi-3-mini-128k-instruct"
+
+supported_tasks:
+  - text_generation
+  - text_generation
+
+default_head:
+  task: text_generation
+  _component_: CausalLMHead
+  hidden_dim: 3072
+  vocab_size: 32064
+
+input_spec:
+  max_length: 4096
+  vocab_size: 32064
+  dtype: long
+
+init_args_schema:
+  max_position_embeddings: {type: int, default: 4096}
+  rope_theta: {type: float, default: 10000}
+
+adapter_defaults:
+  lora:
+    target_modules: ["qkv_proj", "o_proj"]
+    r: 16
+    alpha: 32
+    task_type: "CAUSAL_LM"
+
+memory:
+  params_m: 3821
+  fp32_gb: 15.2
+  fp16_gb: 7.6

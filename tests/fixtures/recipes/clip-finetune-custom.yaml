@@ -9,6 +9,7 @@ model:
 
 head:
   _component_: mdp.heads.DualEncoderHead
+  _target_attr: head
 
 data:
   dataset:

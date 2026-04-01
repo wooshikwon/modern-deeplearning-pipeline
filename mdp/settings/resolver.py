@@ -73,7 +73,7 @@ class ComponentResolver:
 
         kwargs.update(extra_kwargs)
 
-        klass = self._import_class(class_path)
+        klass = self.import_class(class_path)
         return klass(*args, **kwargs)
 
     def resolve_partial(
@@ -87,7 +87,7 @@ class ComponentResolver:
 
         class_path = self._resolve_alias(config[self.COMPONENT_KEY])
         kwargs = {k: v for k, v in config.items() if k != self.COMPONENT_KEY}
-        klass = self._import_class(class_path)
+        klass = self.import_class(class_path)
         return klass, kwargs
 
     def _resolve_alias(self, name: str) -> str:
@@ -103,7 +103,7 @@ class ComponentResolver:
         return name
 
     @staticmethod
-    def _import_class(class_path: str) -> type:
+    def import_class(class_path: str) -> type:
         """점(.)으로 구분된 경로에서 클래스를 임포트한다."""
         module_path, _, class_name = class_path.rpartition(".")
         if not module_path:

@@ -3,45 +3,43 @@
 from __future__ import annotations
 
 import logging
-import tempfile
-from pathlib import Path
-
-import yaml
 
 logger = logging.getLogger(__name__)
 
 
 def run_estimate(recipe_path: str) -> None:
-    """Recipe YAML을 파싱하여 GPU 메모리 사용량을 추정, Rich Table로 출력한다.
+    """Recipe YAML을 파싱하여 GPU 메모리 사용량을 추정한다.
 
-    MemoryEstimator는 Settings 객체를 요구하므로, 최소한의 Config를 임시 생성하여
-    SettingsFactory.for_training()으로 Settings를 조립한다.
+    SettingsFactory.for_estimation()으로 Recipe만 로딩하여 Settings를 조립한다.
+    JSON 모드와 Rich Table 출력을 모두 지원한다.
     """
     from rich.console import Console
     from rich.table import Table
 
     import typer
 
-    from mdp.compute.estimator import MemoryEstimator
+    from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+    from mdp.utils.estimator import MemoryEstimator
     from mdp.settings.factory import SettingsFactory
 
-    # 최소한의 Config 생성 (estimate에는 compute target만 필요)
-    minimal_config = {"compute": {"target": "local"}}
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yaml", delete=False
-        ) as tmp:
-            yaml.dump(minimal_config, tmp)
-            tmp_config_path = tmp.name
-
-        settings = SettingsFactory().for_training(recipe_path, tmp_config_path)
+        settings = SettingsFactory().for_estimation(recipe_path)
     except Exception as e:
+        if is_json_mode():
+            emit_result(build_error(
+                command="estimate",
+                error_type="settings_error",
+                message=str(e),
+            ))
+            raise typer.Exit(code=1)
         typer.echo(f"[error] Settings 로딩 실패: {e}", err=True)
         raise typer.Exit(code=1)
-    finally:
-        Path(tmp_config_path).unlink(missing_ok=True)
 
     result = MemoryEstimator().estimate(settings)
+
+    if is_json_mode():
+        emit_result(build_result(command="estimate", **result))
+        return
 
     # Rich Table 출력
     console = Console()

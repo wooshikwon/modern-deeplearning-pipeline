@@ -6,15 +6,36 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
-| `mdp init <name>` | 프로젝트 스켈레톤 생성 | - |
+| `mdp init <name> --task <task> --model <model>` | 프로젝트 스켈레톤 생성 | `--task, --model` |
 | `mdp train -r recipe.yaml -c config.yaml` | 학습 실행 | `--format json` |
 | `mdp inference -r recipe.yaml -c config.yaml --checkpoint <path>` | 배치 추론 | `--format json` |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 | `--format json` |
 | `mdp serve -r recipe.yaml -c config.yaml` | 실시간 서빙 시작 | `--backend` |
-| `mdp list <what>` | 등록 컴포넌트 조회 | `models`, `tasks`, `callbacks`, `strategies`, `jobs` |
+| `mdp list <what>` | 등록 컴포넌트 조회 | `--task`, `models`, `tasks`, `callbacks`, `strategies`, `jobs` |
 | `mdp version` | 버전 출력 | `--format json` |
 
 모든 명령은 `--format json` 글로벌 옵션을 지원한다. 기본값은 `text` (Rich 테이블).
+
+## Agent Discovery Flow
+
+에이전트가 MDP를 처음 사용할 때의 표준 플로우:
+
+```bash
+# Step 1: task + 호환 모델 조회
+mdp list tasks --format json
+
+# Step 2: 특정 task 모델 상세
+mdp list models --task text_generation --format json
+
+# Step 3: 프로젝트 생성
+mdp init --task text_generation --model llama3-8b my_project
+
+# Step 4: Recipe의 ??? 채운 후 학습
+mdp train -r my_project/recipes/llama3-8b.yaml -c my_project/configs/local.yaml --format json
+```
+
+Recipe에서 `???`로 표시된 필드는 에이전트가 채워야 하는 부분:
+- `data.source`, `data.fields.*`, `head.num_classes`, `metadata.*`
 
 ## Two-File System
 
@@ -299,7 +320,6 @@ optimizer:
 | Swin-Base | `timm.create_model` | `timm://swin_base_patch4_window7_224` | 87.8 | 0.17 |
 | ConvNeXt-Base | `timm.create_model` | `timm://convnext_base.fb_in22k_ft_in1k` | 88.6 | 0.17 |
 | EfficientNet-B0 | `timm.create_model` | `timm://efficientnet_b0.ra_in1k` | 5.3 | 0.01 |
-| DINOv2-Base | `transformers.AutoModel` | `hf://facebook/dinov2-base` | 86.6 | 0.17 |
 
 ### object_detection
 
@@ -307,7 +327,6 @@ optimizer:
 |-------|-----------|----------------------|--------|-------------|
 | DETR-ResNet50 | `transformers.AutoModelForObjectDetection` | `hf://facebook/detr-resnet-50` | 41.3 | 0.08 |
 | YOLOv8n | `ultralytics.YOLO` | `ultralytics://yolov8n.pt` | 3.2 | 0.01 |
-| Florence-2-Base | `transformers.AutoModelForCausalLM` | `hf://microsoft/Florence-2-base` | 232 | 0.44 |
 
 ### semantic_segmentation
 
@@ -345,6 +364,9 @@ optimizer:
 | Gemma-2-9B | `transformers.AutoModelForCausalLM` | `hf://google/gemma-2-9b` | 9242 | 18.5 |
 | Llama-3-70B | `transformers.AutoModelForCausalLM` | `hf://meta-llama/Meta-Llama-3-70B` | 70554 | 141.1 |
 | Qwen2.5-72B | `transformers.AutoModelForCausalLM` | `hf://Qwen/Qwen2.5-72B` | 72710 | 145.4 |
+| Florence-2-Base | `transformers.AutoModelForCausalLM` | `hf://microsoft/Florence-2-base` | 232 | 0.44 |
+| BLIP-2-OPT-2.7B | `transformers.Blip2ForConditionalGeneration` | `hf://Salesforce/blip2-opt-2.7b` | 3770 | 7.5 |
+| LLaVA-1.5-7B | `transformers.LlavaForConditionalGeneration` | `hf://llava-hf/llava-1.5-7b-hf` | 7063 | 14.1 |
 
 ### seq2seq
 
@@ -353,16 +375,14 @@ optimizer:
 | T5-Base | `transformers.AutoModelForSeq2SeqLM` | `hf://t5-base` | 222.9 | 0.42 |
 | T5-Large | `transformers.AutoModelForSeq2SeqLM` | `hf://t5-large` | 737.7 | 1.40 |
 
-### vision_language
+### feature_extraction
 
 | Model | class_path | Recommended pretrained | Params (M) | Memory (bf16 GB) |
 |-------|-----------|----------------------|--------|-------------|
 | CLIP-ViT-B/32 | `transformers.CLIPModel` | `hf://openai/clip-vit-base-patch32` | 151.3 | 0.29 |
 | CLIP-ViT-L/14 | `transformers.CLIPModel` | `hf://openai/clip-vit-large-patch14` | 427.6 | 0.81 |
 | SigLIP-Base | `transformers.AutoModel` | `hf://google/siglip-base-patch16-224` | 203 | 0.39 |
-| Florence-2-Base | `transformers.AutoModelForCausalLM` | `hf://microsoft/Florence-2-base` | 232 | 0.44 |
-| BLIP-2-OPT-2.7B | `transformers.Blip2ForConditionalGeneration` | `hf://Salesforce/blip2-opt-2.7b` | 3770 | 7.5 |
-| LLaVA-1.5-7B | `transformers.LlavaForConditionalGeneration` | `hf://llava-hf/llava-1.5-7b-hf` | 7063 | 14.1 |
+| DINOv2-Base | `transformers.AutoModel` | `hf://facebook/dinov2-base` | 86.6 | 0.17 |
 
 ---
 

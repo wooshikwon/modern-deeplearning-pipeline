@@ -52,6 +52,7 @@ class DataSpec(BaseModel):
     """데이터 파이프라인. YAML data: 하위 4개 섹션과 대응."""
 
     dataset: dict[str, Any]  # _component_ 패턴 (required)
+    fields: dict[str, str] = Field(default_factory=dict)  # {role: column_name}
     augmentation: dict[str, Any] | None = None
     tokenizer: dict[str, Any] | None = None
     dataloader: DataloaderSpec = Field(default_factory=DataloaderSpec)

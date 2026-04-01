@@ -7,6 +7,8 @@ from pathlib import Path
 
 import typer
 
+from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+
 logger = logging.getLogger(__name__)
 
 
@@ -80,9 +82,59 @@ def run_inference(
         )
         typer.echo(f"추론 완료. 결과: {result_path}")
 
+        # Drift detection
+        monitoring = _detect_drift(settings, model, test_loader)
+
+        if is_json_mode():
+            emit_result(build_result(
+                command="inference",
+                result_path=str(result_path),
+                monitoring=monitoring,
+            ))
+
     except typer.Exit:
         raise
     except Exception as e:
+        if is_json_mode():
+            emit_result(build_error(
+                command="inference",
+                error_type="inference_error",
+                message=str(e),
+            ))
+            raise typer.Exit(code=1)
         typer.echo(f"[error] 추론 실패: {e}", err=True)
         logger.exception("추론 실패 상세")
         raise typer.Exit(code=1)
+
+
+def _detect_drift(settings, model, test_loader) -> dict | None:
+    """체크포인트 디렉토리의 baseline.json과 현재 측정치를 비교하여 drift를 감지한다."""
+    import json
+
+    from mdp.monitoring.baseline import compare_baselines, compute_baseline
+
+    try:
+        checkpoint_dir = Path(settings.config.storage.checkpoint_dir)
+        baseline_path = checkpoint_dir / "baseline.json"
+
+        if not baseline_path.exists():
+            logger.info("baseline.json이 없어 drift 감지를 건너뜁니다: %s", baseline_path)
+            return None
+
+        with open(baseline_path) as f:
+            baseline = json.load(f)
+
+        current = compute_baseline(model=model, dataloader=test_loader)
+        result = compare_baselines(baseline, current)
+
+        if result.get("drift_detected"):
+            typer.echo(f"[warning] Drift 감지됨: score={result.get('drift_score', 'N/A')}")
+            for alert in result.get("alerts", []):
+                typer.echo(f"  - {alert}")
+        else:
+            typer.echo("Drift 감지 결과: 정상")
+
+        return result
+    except Exception as e:
+        logger.warning("Drift 감지 실패 (무시): %s", e)
+        return None

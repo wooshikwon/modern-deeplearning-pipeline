@@ -1,0 +1,32 @@
+# YOLOv8 Nano — 실시간 객체 탐지 경량 모델
+name: yolov8n
+family: yolo
+class_path: ultralytics.YOLO
+head_builtin: true
+
+pretrained_sources:
+  - "ultralytics://yolov8n.pt"
+
+supported_tasks:
+  - object_detection
+
+# YOLO는 탐지 헤드가 모델에 내장되어 있어 별도 헤드 불필요
+
+input_spec:
+  channels: 3
+  height: 640
+  width: 640
+  dtype: float32
+
+init_args_schema:
+  pretrained:
+    type: bool
+    default: true
+
+# YOLO는 보통 전체 파인튜닝을 사용하므로 어댑터 기본값 없음
+adapter_defaults: {}
+
+memory:
+  params_m: 3.2
+  fp32_gb: 0.02
+  fp16_gb: 0.01

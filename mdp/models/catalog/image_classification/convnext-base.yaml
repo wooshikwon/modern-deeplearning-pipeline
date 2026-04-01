@@ -1,0 +1,45 @@
+# ConvNeXt Base — 현대적 순수 합성곱 아키텍처
+name: convnext-base
+family: convnext
+class_path: timm.create_model
+head_builtin: false
+
+pretrained_sources:
+  - "timm://convnext_base.fb_in22k_ft_in1k"
+  - "hf://facebook/convnext-base-224"
+
+supported_tasks:
+  - image_classification
+  - feature_extraction
+
+default_head:
+  task: image_classification
+  _component_: ClassificationHead
+  hidden_dim: 1024
+  dropout: 0.1
+
+input_spec:
+  channels: 3
+  height: 224
+  width: 224
+  dtype: float32
+
+init_args_schema:
+  num_classes:
+    type: int
+    default: 1000
+  pretrained:
+    type: bool
+    default: true
+
+adapter_defaults:
+  lora:
+    # ConvNeXt 블록 내 핵심 레이어: 깊이별 합성곱 + 포인트별 합성곱 2개
+    target_modules: ["dwconv", "pwconv1", "pwconv2"]
+    r: 8
+    alpha: 16
+
+memory:
+  params_m: 88.6
+  fp32_gb: 0.34
+  fp16_gb: 0.17

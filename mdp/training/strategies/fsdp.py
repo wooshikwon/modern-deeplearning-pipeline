@@ -29,10 +29,12 @@ class FSDPStrategy(BaseStrategy):
         sharding_strategy: str = "FULL_SHARD",
         mixed_precision: bool = True,
         backend: str = "nccl",
+        cpu_offload: bool = False,
     ) -> None:
         self.sharding_strategy_name = sharding_strategy
         self.mixed_precision = mixed_precision
         self.backend = backend
+        self.cpu_offload = cpu_offload
         self._local_rank: int | None = None
 
     # ------------------------------------------------------------------
@@ -66,6 +68,10 @@ class FSDPStrategy(BaseStrategy):
                 buffer_dtype=torch.bfloat16,
                 cast_forward_inputs=True,
             )
+
+        if self.cpu_offload:
+            from torch.distributed.fsdp import CPUOffload
+            fsdp_kwargs["cpu_offload"] = CPUOffload(offload_params=True)
 
         return FSDP(model, **fsdp_kwargs)
 

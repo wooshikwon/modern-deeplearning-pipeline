@@ -76,7 +76,7 @@ class BusinessValidator:
 
         # 1b. head 교체 + adapter 사용 시 modules_to_save 경고
         adapter = recipe.adapter
-        if adapter is not None and not adapter.modules_to_save:
+        if head is not None and adapter is not None and not adapter.modules_to_save:
             result.warnings.append(
                 "head와 adapter를 함께 사용하지만 modules_to_save가 "
                 "비어 있습니다. head 파라미터가 학습되지 않을 수 있습니다."

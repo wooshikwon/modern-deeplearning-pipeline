@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -64,19 +66,20 @@ class Trainer:
         self.val_check_interval = training.val_check_interval
 
         # AMP setup
+        scaler_device = self.device.type
         precision = training.precision
         if precision == "fp16":
             self.amp_enabled = True
             self.amp_dtype = torch.float16
-            self.scaler = GradScaler("cuda", enabled=True)
+            self.scaler = GradScaler(scaler_device, enabled=True)
         elif precision == "bf16":
             self.amp_enabled = True
             self.amp_dtype = torch.bfloat16
-            self.scaler = GradScaler("cuda", enabled=False)
+            self.scaler = GradScaler(scaler_device, enabled=False)
         else:  # fp32
             self.amp_enabled = False
             self.amp_dtype = torch.float32
-            self.scaler = GradScaler("cuda", enabled=False)
+            self.scaler = GradScaler(scaler_device, enabled=False)
 
         # Components
         self.optimizer = self._create_optimizer(recipe.optimizer)
@@ -86,6 +89,7 @@ class Trainer:
         self.loss_fn = self._create_loss(recipe.loss)
         self.callbacks = self._create_callbacks(recipe.callbacks)
         self.strategy = self._create_strategy(settings)
+        self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # State
         self.global_step = 0
@@ -204,11 +208,11 @@ class Trainer:
 
     def _fire(self, hook_name: str, **extra_kwargs: Any) -> None:
         kwargs = {
-            "trainer": self,
             "model": self.model,
             "optimizer": self.optimizer,
             "scheduler": self.scheduler,
             "global_step": self.global_step,
+            "strategy": self.strategy,
         }
         kwargs.update(extra_kwargs)
         for cb in self.callbacks:
@@ -226,7 +230,7 @@ class Trainer:
 
     # ── Training loop ──
 
-    def train(self) -> dict[str, float]:
+    def train(self) -> dict[str, Any]:
         """학습을 실행하고 최종 메트릭을 반환한다."""
         # Strategy setup (DDP/FSDP wrapping)
         if self.strategy is not None:
@@ -250,43 +254,70 @@ class Trainer:
         self._fire("on_train_start", total_steps=total_steps)
         start_time = time.time()
 
+        stopped_reason = "completed"
+        last_epoch = self.start_epoch
+        mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
+
         max_epochs = self.epochs or 10_000  # large default for max_steps mode
-        for epoch in range(self.start_epoch, max_epochs):
-            if self._should_stop():
-                break
-            if self.max_steps and self.global_step >= self.max_steps:
-                break
+        with mlflow_ctx:
+            try:
+                for epoch in range(self.start_epoch, max_epochs):
+                    if self._should_stop():
+                        stopped_reason = "early_stopped"
+                        break
+                    if self.max_steps and self.global_step >= self.max_steps:
+                        stopped_reason = "max_steps_reached"
+                        break
 
-            self._fire("on_epoch_start", epoch=epoch)
-            train_loss = self._train_one_epoch(epoch)
-            self._fire(
-                "on_epoch_end", epoch=epoch, metrics={"train_loss": train_loss}
-            )
-
-            # Validation
-            if self.val_loader is not None:
-                should_validate = self._should_validate(epoch)
-                if should_validate:
-                    self._fire("on_validation_start", epoch=epoch)
-                    val_metrics = self._validate(epoch)
+                    self._fire("on_epoch_start", epoch=epoch)
+                    train_loss = self._train_one_epoch(epoch)
                     self._fire(
-                        "on_validation_end", epoch=epoch, metrics=val_metrics
+                        "on_epoch_end", epoch=epoch, metrics={"train_loss": train_loss}
                     )
-                    self.best_metrics.update(val_metrics)
 
-            # Epoch-level scheduler
-            if self.scheduler is not None and self.scheduler_interval == "epoch":
-                self.scheduler.step()
+                    # Validation
+                    if self.val_loader is not None:
+                        should_validate = self._should_validate(epoch)
+                        if should_validate:
+                            self._fire("on_validation_start", epoch=epoch)
+                            val_metrics = self._validate(epoch)
+                            self._fire(
+                                "on_validation_end", epoch=epoch, metrics=val_metrics
+                            )
+                            self.best_metrics.update(val_metrics)
+
+                    # Epoch-level scheduler
+                    if self.scheduler is not None and self.scheduler_interval == "epoch":
+                        self.scheduler.step()
+
+                    last_epoch = epoch
+
+                baseline_info = self._maybe_compute_baseline()
+
+            finally:
+                # Strategy cleanup
+                if self.strategy is not None:
+                    try:
+                        self.strategy.cleanup()
+                    except Exception as e:
+                        logger.warning(f"Strategy cleanup 실패: {e}")
 
         training_duration = time.time() - start_time
         self._fire("on_train_end", metrics=self.best_metrics)
-        self._log_to_mlflow(training_duration)
+        if self._is_main_process:
+            self._log_to_mlflow(training_duration)
 
-        # Strategy cleanup
-        if self.strategy is not None:
-            self.strategy.cleanup()
+        result: dict[str, Any] = {
+            "metrics": self.best_metrics,
+            "training_duration_seconds": training_duration,
+            "total_epochs": last_epoch - self.start_epoch + 1,
+            "total_steps": self.global_step,
+            "stopped_reason": stopped_reason,
+        }
+        if baseline_info is not None:
+            result["monitoring"] = baseline_info
 
-        return self.best_metrics
+        return result
 
     def _should_validate(self, epoch: int) -> bool:
         interval = self.val_check_interval
@@ -331,13 +362,14 @@ class Trainer:
                 ):
                     self.scheduler.step()
 
+                self.global_step += 1
+
             actual_loss = loss.item() * self.grad_accum_steps
             total_loss += actual_loss
             num_batches += 1
-            self.global_step += 1
 
             self._fire(
-                "on_batch_end", step=step, metrics={"loss": actual_loss}
+                "on_batch_end", step=step, epoch=epoch, metrics={"loss": actual_loss}
             )
 
             # MLflow step logging (non-blocking)
@@ -362,10 +394,18 @@ class Trainer:
     def _validate(self, epoch: int) -> dict[str, float]:
         self.model.eval()
         all_metrics: dict[str, list[float]] = {}
+        use_fallback = not hasattr(self.model, "validation_step")
 
         for batch in self.val_loader:
             batch = self._move_to_device(batch)
-            metrics = self.model.validation_step(batch)
+            if use_fallback:
+                metrics = self._validate_fallback(batch)
+            else:
+                try:
+                    metrics = self.model.validation_step(batch)
+                except NotImplementedError:
+                    use_fallback = True
+                    metrics = self._validate_fallback(batch)
             for k, v in metrics.items():
                 all_metrics.setdefault(k, []).append(v)
 
@@ -377,6 +417,31 @@ class Trainer:
 
         self.model.train()
         return avg_metrics
+
+    def _validate_fallback(self, batch: dict[str, Any]) -> dict[str, float]:
+        """Fallback validation when model lacks validation_step."""
+        device_type = self.device.type if self.device.type != "mps" else "cpu"
+        with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
+            outputs = self.model(batch)
+
+        # Try outputs["loss"], outputs.loss, then loss_fn(logits, labels)
+        if isinstance(outputs, dict) and "loss" in outputs:
+            loss = outputs["loss"]
+        elif hasattr(outputs, "loss") and outputs.loss is not None:
+            loss = outputs.loss
+        elif self.loss_fn is not None:
+            logits = outputs.get("logits", outputs.get("output")) if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+            labels = batch.get("labels", batch.get("label"))
+            if logits is not None and labels is not None:
+                loss = self.loss_fn(logits, labels)
+            else:
+                logger.warning("_validate_fallback: logits 또는 labels를 찾을 수 없습니다")
+                return {}
+        else:
+            logger.warning("_validate_fallback: loss를 계산할 수 없습니다")
+            return {}
+
+        return {"loss": loss.item() if isinstance(loss, torch.Tensor) else float(loss)}
 
     def _move_to_device(self, batch: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -456,9 +521,69 @@ class Trainer:
             self.start_epoch = state.get("epoch", 0)
             self.global_step = state.get("global_step", 0)
 
+    # ── Monitoring baseline ──
+
+    def _maybe_compute_baseline(self) -> dict[str, Any] | None:
+        """Compute monitoring baseline after training. All ranks execute forward for FSDP all-gather."""
+        try:
+            from mdp.monitoring.baseline import compute_baseline
+        except ImportError:
+            return None
+
+        monitoring_cfg = getattr(self.settings.config, "monitoring", None)
+        if monitoring_cfg is None or not getattr(monitoring_cfg, "enabled", False):
+            return None
+
+        try:
+            # ALL ranks must execute forward pass (FSDP all-gather requirement)
+            baseline = compute_baseline(
+                model=self.model,
+                dataloader=self.val_loader or self.train_loader,
+                device=self.device,
+            )
+
+            # Only rank-0 saves the baseline
+            if self._is_main_process:
+                checkpoint_dir = Path(self.settings.config.storage.checkpoint_dir)
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                baseline_path = checkpoint_dir / "baseline.json"
+                baseline_path.write_text(json.dumps(baseline, indent=2))
+                logger.info("Monitoring baseline saved: %s", baseline_path)
+                return {"baseline_saved": True, "baseline_path": str(baseline_path)}
+
+            return None
+        except Exception as e:
+            logger.warning(f"Monitoring baseline 계산 실패: {e}")
+            return None
+
     # ── MLflow ──
 
+    def _start_mlflow_run(self) -> Any:
+        """Create an MLflow run context (rank-0 only). Returns nullcontext() on failure."""
+        try:
+            import mlflow
+
+            mlflow_cfg = self.settings.config.mlflow
+            if mlflow_cfg is None:
+                return nullcontext()
+
+            if hasattr(mlflow_cfg, "tracking_uri") and mlflow_cfg.tracking_uri:
+                mlflow.set_tracking_uri(mlflow_cfg.tracking_uri)
+            if hasattr(mlflow_cfg, "experiment") and mlflow_cfg.experiment:
+                mlflow.set_experiment(mlflow_cfg.experiment)
+
+            run_kwargs = {}
+            if hasattr(mlflow_cfg, "start_run") and isinstance(mlflow_cfg.start_run, dict):
+                run_kwargs = mlflow_cfg.start_run
+
+            return mlflow.start_run(**run_kwargs)
+        except Exception as e:
+            logger.warning(f"MLflow run 시작 실패: {e}")
+            return nullcontext()
+
     def _mlflow_log_metric(self, key: str, value: float, step: int) -> None:
+        if not self._is_main_process:
+            return
         try:
             import mlflow
 
