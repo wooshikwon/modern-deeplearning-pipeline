@@ -11,7 +11,3 @@ class ValidationResult:
 
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
-
-    @property
-    def has_errors(self) -> bool:
-        return len(self.errors) > 0

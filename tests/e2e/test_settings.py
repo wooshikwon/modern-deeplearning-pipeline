@@ -119,7 +119,7 @@ def test_business_validator_head_task_mismatch() -> None:
         head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
     )
     result = BusinessValidator().validate(settings)
-    assert result.has_errors
+    assert len(result.errors) > 0
     assert any("CausalLMHead" in e for e in result.errors)
 
 
@@ -137,5 +137,5 @@ def test_compat_validator_fsdp_qlora() -> None:
         distributed={"strategy": "fsdp"},
     )
     result = CompatValidator().validate(settings)
-    assert result.has_errors
+    assert len(result.errors) > 0
     assert any("FSDP" in e and "QLoRA" in e for e in result.errors)

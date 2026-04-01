@@ -26,7 +26,7 @@ def _detect_gpu_count() -> int:
         return 0
 
 
-def _run_single(settings) -> None:
+def _run_single(settings) -> dict:
     """단일 GPU/CPU 학습을 실행한다."""
     from mdp.cli._torchrun_entry import run_training
 
@@ -51,23 +51,17 @@ def _run_distributed(settings, nproc: int) -> None:
     ]
     logger.info("torchrun command: %s", " ".join(cmd))
 
-    result = subprocess.run(cmd, check=True)
-    return result.returncode
+    subprocess.run(cmd, check=True)
 
 
 def run_train(recipe_path: str, config_path: str) -> None:
-    """Recipe + Config YAML을 조립하여 학습을 실행한다.
-
-    1. SettingsFactory로 YAML -> Settings 변환
-    2. GPU 수 감지하여 단일/분산 학습 결정
-    3. JobManager로 작업 추적
-    4. JSON 출력 지원
-    """
+    """Recipe + Config YAML을 조립하여 학습을 실행한다."""
+    from mdp.cli.schemas import TrainResult
     from mdp.settings.factory import SettingsFactory
-    from mdp.utils.job_manager import JobManager
 
-    typer.echo(f"Recipe: {recipe_path}")
-    typer.echo(f"Config: {config_path}")
+    if not is_json_mode():
+        typer.echo(f"Recipe: {recipe_path}")
+        typer.echo(f"Config: {config_path}")
 
     try:
         settings = SettingsFactory().for_training(recipe_path, config_path)
@@ -75,7 +69,7 @@ def run_train(recipe_path: str, config_path: str) -> None:
         if is_json_mode():
             emit_result(build_error(
                 command="train",
-                error_type="settings_error",
+                error_type="ValidationError",
                 message=str(e),
             ))
             raise typer.Exit(code=1)
@@ -83,40 +77,46 @@ def run_train(recipe_path: str, config_path: str) -> None:
         raise typer.Exit(code=1)
 
     nproc = _detect_gpu_count()
-    typer.echo(f"GPU count: {nproc}")
-
-    manager = JobManager()
-    job_id = manager.create_job(executor="local")
+    if not is_json_mode():
+        typer.echo(f"GPU count: {nproc}")
 
     try:
         if nproc > 1:
-            typer.echo(f"분산 학습 시작 (nproc={nproc})...")
+            if not is_json_mode():
+                typer.echo(f"분산 학습 시작 (nproc={nproc})...")
             _run_distributed(settings, nproc)
+            train_result = {}
         else:
-            typer.echo("단일 학습 시작...")
-            _run_single(settings)
+            if not is_json_mode():
+                typer.echo("단일 학습 시작...")
+            train_result = _run_single(settings)
 
-        manager.update_status(job_id, "completed")
-        typer.echo(f"학습 완료. job_id={job_id}")
+        if not is_json_mode():
+            typer.echo("학습 완료.")
 
         if is_json_mode():
+            result = TrainResult(
+                checkpoint_dir=settings.config.storage.checkpoint_dir,
+                output_dir=settings.config.storage.output_dir,
+                metrics=train_result.get("metrics", {}),
+                total_epochs=train_result.get("total_epochs"),
+                total_steps=train_result.get("total_steps"),
+                stopped_reason=train_result.get("stopped_reason"),
+                duration_seconds=train_result.get("training_duration_seconds"),
+                monitoring=train_result.get("monitoring"),
+            )
             emit_result(build_result(
-                command="train",
-                job_id=job_id,
-                nproc=nproc,
+                command="train", **result.model_dump(exclude_none=True),
             ))
 
     except Exception as e:
-        manager.update_status(job_id, "failed", error=str(e))
         if is_json_mode():
             emit_result(build_error(
                 command="train",
-                error_type="training_error",
+                error_type="RuntimeError",
                 message=str(e),
             ))
             raise typer.Exit(code=1)
         typer.echo(f"[error] 학습 실패: {e}", err=True)
         logger.exception("학습 실패 상세")
         raise typer.Exit(code=1)
-    finally:
-        manager.close()

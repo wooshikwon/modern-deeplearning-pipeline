@@ -6,7 +6,7 @@ import argparse
 import json
 
 
-def run_training(settings) -> None:
+def run_training(settings) -> dict:
     """Settings 객체를 받아 Factory -> Trainer -> train() 파이프라인을 실행한다."""
     from mdp.factory.factory import Factory
     from mdp.training.trainer import Trainer
@@ -21,7 +21,7 @@ def run_training(settings) -> None:
         train_loader=dataloaders["train"],
         val_loader=dataloaders.get("val"),
     )
-    trainer.train()
+    return trainer.train()
 
 
 def main() -> None:
