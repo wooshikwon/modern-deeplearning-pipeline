@@ -22,6 +22,7 @@ mlruns/
 .tox/
 .coverage
 htmlcov/
+.import_linter_cache/
 
 # Jupyter
 .ipynb_checkpoints/
