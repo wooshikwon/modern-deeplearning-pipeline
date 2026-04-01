@@ -1,0 +1,105 @@
+{
+  "recipe": {
+    "name": "quality-test",
+    "task": "image_classification",
+    "model": {
+      "class_path": "tests.e2e.models.TinyVisionModel",
+      "pretrained": null,
+      "torch_dtype": null,
+      "attn_implementation": null,
+      "init_args": {}
+    },
+    "head": null,
+    "adapter": null,
+    "data": {
+      "source": "/tmp/fake",
+      "fields": {},
+      "format": "auto",
+      "split": "train",
+      "subset": null,
+      "column_map": null,
+      "streaming": false,
+      "data_files": null,
+      "tokenizer": "***REDACTED***",
+      "augmentation": null,
+      "dataloader": {
+        "batch_size": 32,
+        "num_workers": 4,
+        "pin_memory": true,
+        "persistent_workers": true,
+        "prefetch_factor": 2,
+        "drop_last": true
+      }
+    },
+    "training": {
+      "epochs": 2,
+      "max_steps": null,
+      "precision": "fp32",
+      "gradient_accumulation_steps": 1,
+      "gradient_clip_max_norm": null,
+      "gradient_checkpointing": false,
+      "val_check_interval": 1.0,
+      "compile": false
+    },
+    "optimizer": {
+      "_component_": "AdamW",
+      "lr": 0.001
+    },
+    "scheduler": null,
+    "loss": null,
+    "evaluation": {
+      "metrics": []
+    },
+    "generation": null,
+    "monitoring": {
+      "enabled": false,
+      "baseline": {},
+      "drift": {}
+    },
+    "callbacks": [],
+    "metadata": {
+      "author": "test",
+      "description": "quality test"
+    }
+  },
+  "config": {
+    "environment": {
+      "name": "local"
+    },
+    "compute": {
+      "target": "local",
+      "gpus": "auto",
+      "host": null,
+      "user": null,
+      "ssh_key": "***REDACTED***",
+      "working_dir": null,
+      "nodes": null,
+      "distributed": null,
+      "provider": null,
+      "accelerators": null,
+      "spot": false,
+      "region": null,
+      "disk_size": 256
+    },
+    "environment_setup": {
+      "container": null,
+      "dependencies": null,
+      "setup_commands": []
+    },
+    "mlflow": {
+      "tracking_uri": "sqlite:////private/var/folders/_7/qttn8kk56v78854m5z4zgvmw0000gn/T/pytest-of-wesley/pytest-70/test_mlflow_logs_metrics0/mlruns.db",
+      "experiment_name": "default"
+    },
+    "storage": {
+      "checkpoint_dir": "./checkpoints",
+      "checkpoint_every_n_steps": null,
+      "output_dir": "./outputs"
+    },
+    "serving": null,
+    "job": {
+      "name": null,
+      "resume": "disabled",
+      "max_retries": 0
+    }
+  }
+}

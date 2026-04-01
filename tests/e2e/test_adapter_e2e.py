@@ -53,7 +53,7 @@ def _make_lora_model() -> torch.nn.Module:
         r=4,
         lora_alpha=8,
         lora_dropout=0.0,
-        target_modules="all_linear",
+        target_modules=["classifier", "head"],
     )
     return model
 

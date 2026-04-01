@@ -69,7 +69,7 @@ class TestEarlyStoppingIntegration:
         trainer.amp_enabled = False
 
         # Inject EarlyStopping callback with low patience
-        early_stop = EarlyStopping(monitor="val_loss", patience=2, mode="min")
+        early_stop = EarlyStopping(monitor="val_loss", patience=2, mode="min", min_delta=0.1)
         trainer.callbacks.append(early_stop)
 
         result = trainer.train()

@@ -67,112 +67,92 @@ def _list_models_for_task(task: str) -> list[dict[str, Any]]:
 
 
 def _build_recipe_from_catalog(
-    task: str, catalog: dict[str, Any], project_name: str
+    task: str, catalog: dict[str, Any], project_name: str,
 ) -> str:
     """TASK_PRESETS + catalog 데이터를 조합하여 Recipe YAML을 생성한다."""
+    import yaml as _yaml
     from mdp.task_taxonomy import TASK_PRESETS
 
     preset = TASK_PRESETS.get(task)
+    name = catalog.get("name", "model")
+    class_path = catalog.get("class_path", "???")
+    head_builtin = catalog.get("head_builtin", False)
+    pretrained = catalog.get("pretrained_sources", [""])[0]
+    input_spec = catalog.get("input_spec", {})
 
-    # model 섹션
-    lines = [
-        f"# MDP Recipe -- {project_name}",
-        f"name: {project_name}",
-        f"task: {task}",
-        "",
-        "model:",
-        f"  class_path: {catalog.get('class_path', '???')}",
-        f"  pretrained: \"{catalog.get('pretrained', '???')}\"",
-    ]
+    # pretrained URI에서 tokenizer pretrained 파생
+    tokenizer_pretrained = pretrained.replace("hf://", "").replace("timm://", "")
 
-    # head 섹션 (head_builtin=false인 경우 TASK_PRESETS의 default_head 사용)
-    head_builtin = catalog.get("head_builtin", True)
+    recipe: dict[str, Any] = {
+        "name": f"{name}-{project_name}",
+        "task": task,
+        "model": {
+            "class_path": class_path,
+            "pretrained": pretrained,
+        },
+    }
+
+    # head: head_builtin이 아닌 경우만 추가
     if not head_builtin and preset and preset.default_head:
-        lines.extend([
-            "",
-            "head:",
-            f"  _component_: {preset.default_head}",
-        ])
+        head_config: dict[str, Any] = {"_component_": preset.default_head}
+        catalog_head = catalog.get("default_head", {})
+        if catalog_head.get("hidden_dim"):
+            head_config["hidden_dim"] = catalog_head["hidden_dim"]
+        if catalog_head.get("dropout") is not None:
+            head_config["dropout"] = catalog_head["dropout"]
+        head_config["num_classes"] = "???"
+        recipe["head"] = head_config
 
     # data 섹션
-    lines.extend([
-        "",
-        "data:",
-        "  dataset:",
-        "    _component_: ???",
-        "    root: ./data",
-        "    split: train",
-    ])
+    data: dict[str, Any] = {"source": "???"}
+    required_fields = preset.required_fields if preset else frozenset()
 
     # fields
-    if preset and preset.required_fields:
-        lines.append("  fields:")
-        for field_name, field_type in preset.required_fields.items():
-            lines.append(f"    {field_name}: {field_type}")
+    fields: dict[str, str] = {}
+    for f in sorted(required_fields):
+        fields[f] = f
+    if fields:
+        data["fields"] = fields
 
-    # augmentation (이미지 관련 task)
-    if preset and "image" in preset.required_fields:
-        lines.extend([
-            "  augmentation:",
-            "    _component_: torchvision.transforms.Compose",
-            "    transforms:",
-            "      - _component_: torchvision.transforms.Resize",
-            "        size: [224, 224]",
-            "      - _component_: torchvision.transforms.ToTensor",
-        ])
+    # augmentation (image 필요 시)
+    if "image" in required_fields:
+        height = input_spec.get("height", 224) if isinstance(input_spec, dict) else 224
+        width = input_spec.get("width", 224) if isinstance(input_spec, dict) else 224
+        data["augmentation"] = {
+            "train": {
+                "steps": [
+                    {"type": "RandomResizedCrop", "params": {"size": [height, width]}},
+                    {"type": "RandomHorizontalFlip"},
+                    {"type": "ToDtype", "params": {"dtype": "float32", "scale": True}},
+                    {"type": "Normalize", "params": {
+                        "mean": [0.485, 0.456, 0.406],
+                        "std": [0.229, 0.224, 0.225],
+                    }},
+                ],
+            },
+        }
 
-    # tokenizer (텍스트 관련 task)
-    if preset and "text" in preset.required_fields:
-        pretrained = catalog.get("pretrained", "???")
-        lines.extend([
-            "  tokenizer:",
-            f"    pretrained: \"{pretrained}\"",
-            "    max_length: 512",
-        ])
+    # tokenizer (text 필요 시)
+    if "text" in required_fields or "target" in required_fields or "token_labels" in required_fields:
+        max_length = 512
+        if isinstance(input_spec, dict):
+            max_length = input_spec.get("max_length", 512)
+        data["tokenizer"] = {
+            "pretrained": tokenizer_pretrained,
+            "max_length": max_length,
+        }
 
-    lines.extend([
-        "  dataloader:",
-        "    batch_size: 32",
-        "    num_workers: 4",
-    ])
+    data["dataloader"] = {"batch_size": 32, "num_workers": 4}
+    recipe["data"] = data
 
-    # training defaults
-    lines.extend([
-        "",
-        "training:",
-        "  epochs: 10",
-        "  precision: fp16",
-        "  gradient_accumulation_steps: 1",
-    ])
+    recipe["training"] = {"epochs": 3, "precision": "bf16"}
+    recipe["optimizer"] = {"_component_": "torch.optim.AdamW", "lr": 2e-5, "weight_decay": 0.01}
+    recipe["callbacks"] = [
+        {"_component_": "ModelCheckpoint", "save_top_k": 3, "monitor": "val_loss"},
+    ]
+    recipe["metadata"] = {"author": "???", "description": "???"}
 
-    # optimizer
-    lines.extend([
-        "",
-        "optimizer:",
-        "  _component_: torch.optim.AdamW",
-        "  lr: 3.0e-4",
-        "  weight_decay: 0.01",
-    ])
-
-    # callbacks
-    lines.extend([
-        "",
-        "callbacks:",
-        "  - _component_: ModelCheckpoint",
-        "    save_top_k: 3",
-        "    monitor: val_loss",
-    ])
-
-    # metadata
-    lines.extend([
-        "",
-        "metadata:",
-        "  author: ???",
-        "  description: ???",
-        "",
-    ])
-
-    return "\n".join(lines)
+    return _yaml.dump(recipe, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
 
 def _interactive_select(title: str, choices: list[str]) -> str:

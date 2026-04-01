@@ -196,7 +196,7 @@ class TestLoRA:
             r=4,
             lora_alpha=8,
             lora_dropout=0.0,
-            target_modules="all_linear",
+            target_modules=["classifier", "head"],
         )
         model = model.to(device)
 
