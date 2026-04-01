@@ -1,11 +1,18 @@
-"""create_dataloaders — Dataset + DataLoader 파이프라인 조립."""
+"""create_dataloaders — source 기반 Dataset + DataLoader 파이프라인 조립.
+
+datasets.load_dataset()로 통합 로딩하고, fields 매핑으로 컬럼을
+역할명(text, label, target 등)에 맞춘 뒤, task-derived 전처리를 적용한다.
+"""
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
 from typing import Any
 
 from torch.utils.data import DataLoader
 
+from mdp.data.loader import load_data
 from mdp.data.tokenizer import (
     LABEL_CAUSAL,
     LABEL_COPY,
@@ -14,7 +21,8 @@ from mdp.data.tokenizer import (
     derive_label_strategy,
 )
 from mdp.data.transforms import build_transforms
-from mdp.settings.resolver import ComponentResolver
+
+logger = logging.getLogger(__name__)
 
 
 def _select_collator(
@@ -25,9 +33,11 @@ def _select_collator(
     if tokenizer_config is None:
         return None
 
-    from transformers import DataCollatorForLanguageModeling, DataCollatorWithPadding
-
-    from transformers import AutoTokenizer
+    from transformers import (
+        AutoTokenizer,
+        DataCollatorForLanguageModeling,
+        DataCollatorWithPadding,
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["pretrained"])
     if tokenizer.pad_token is None:
@@ -45,56 +55,147 @@ def _select_collator(
         return DataCollatorWithPadding(tokenizer=tokenizer)
 
 
+# ── Source loading ──
+
+
+def _detect_format(source: str, fmt: str) -> str:
+    """source 경로와 format 힌트로 datasets 로딩 포맷을 결정한다."""
+    if fmt != "auto":
+        return fmt
+    ext = Path(source).suffix.lower()
+    return {
+        ".csv": "csv", ".tsv": "csv",
+        ".json": "json", ".jsonl": "json",
+        ".parquet": "parquet",
+    }.get(ext, "json")
+
+
+def _load_source(
+    source: str,
+    split: str | dict[str, Any],
+    *,
+    subset: str | None = None,
+    streaming: bool = False,
+    data_files: str | dict[str, str] | None = None,
+    fmt: str = "auto",
+) -> Any:
+    """source 문자열에서 HuggingFace Dataset을 로드한다.
+
+    - 로컬 디렉토리 → imagefolder
+    - 로컬 파일 (.csv, .json, .jsonl, .parquet) → 해당 포맷
+    - 그 외 → HuggingFace Hub 이름
+    """
+    from datasets import load_dataset
+
+    split_str = split if isinstance(split, str) else None
+    path = Path(source)
+
+    if path.exists():
+        if path.is_dir():
+            resolved_fmt = fmt if fmt != "auto" else "imagefolder"
+            return load_dataset(
+                resolved_fmt, data_dir=source, split=split_str,
+                streaming=streaming,
+            )
+        else:
+            resolved_fmt = _detect_format(source, fmt)
+            return load_dataset(
+                resolved_fmt,
+                data_files=data_files or source,
+                split=split_str,
+                streaming=streaming,
+            )
+    else:
+        # HuggingFace Hub
+        kwargs: dict[str, Any] = {}
+        if subset is not None:
+            kwargs["name"] = subset
+        if data_files is not None:
+            kwargs["data_files"] = data_files
+        return load_dataset(source, split=split_str, streaming=streaming, **kwargs)
+
+
+def _rename_columns(ds: Any, fields: dict[str, str] | None) -> Any:
+    """fields의 {role: column_name} 매핑으로 컬럼을 역할명으로 리네임한다.
+
+    role과 column_name이 같으면 리네임하지 않는다.
+    """
+    if not fields:
+        return ds
+    rename_map = {col: role for role, col in fields.items() if col != role}
+    if rename_map and hasattr(ds, "rename_columns"):
+        ds = ds.rename_columns(rename_map)
+    return ds
+
+
+def _infer_val_split(train_split: str) -> str:
+    """train split 이름에서 val split 이름을 추론한다."""
+    return "validation" if train_split == "train" else "test"
+
+
+# ── Public API ──
+
+
 def create_dataloaders(
-    dataset_config: dict[str, Any],
-    aug_config: dict[str, Any] | None,
-    tokenizer_config: dict[str, Any] | None,
-    loader_config: dict[str, Any],
+    source: str,
     fields: dict[str, str] | None = None,
+    *,
+    split: str | dict[str, Any] = "train",
+    subset: str | None = None,
+    streaming: bool = False,
+    data_files: str | dict[str, str] | None = None,
+    fmt: str = "auto",
+    aug_config: dict[str, Any] | None = None,
+    tokenizer_config: dict[str, Any] | None = None,
+    loader_config: dict[str, Any] | None = None,
     distributed: bool = False,
 ) -> dict[str, DataLoader]:
-    """Dataset과 DataLoader를 조립하여 ``{"train": ..., "val": ...}`` 딕셔너리를 반환한다.
+    """source에서 데이터를 로드하고 DataLoader 딕셔너리를 반환한다.
+
+    1. ``datasets.load_dataset()``로 source 로딩 (HF Hub / 로컬 파일 / 디렉토리)
+    2. fields ``{role: column_name}`` 매핑으로 컬럼 리네이밍
+    3. fields roles로부터 label_strategy 파생 → 전처리 자동 결정
+    4. ``load_data``로 transform/tokenization 적용
+    5. DataLoader 조립
 
     Args:
-        dataset_config: ``_component_`` 패턴을 포함하는 데이터셋 설정.
+        source: HF Hub 이름 또는 로컬 경로.
+        fields: ``{role: column_name}`` 매핑. role이 전처리를 결정.
+        split: 학습 split 이름. 기본 ``"train"``.
+        subset: HF 데이터셋의 config/subset 이름.
+        streaming: 스트리밍 모드 여부.
+        data_files: 로컬 파일 지정 (HF load_dataset data_files).
+        fmt: 로컬 파일 포맷. ``"auto"``이면 확장자로 추론.
         aug_config: augmentation 설정 (``train``/``val`` 키 포함 가능).
         tokenizer_config: tokenizer 설정.
         loader_config: DataLoader 설정 (batch_size, num_workers 등).
-        fields: ``{role: column_name}`` 매핑. label 전략 파생에 사용.
         distributed: ``True``이면 ``DistributedSampler`` 사용.
 
     Returns:
         ``{"train": DataLoader, "val": DataLoader}`` 딕셔너리.
-        val split이 없으면 ``"val"`` 키가 빠진다.
     """
-    resolver = ComponentResolver()
+    loader_config = loader_config or {}
 
-    # label strategy 파생
+    # ── label strategy ──
     label_strategy = derive_label_strategy(fields)
 
-    # augmentation
+    # ── transforms / tokenizer ──
     train_transform = None
     val_transform = None
     if aug_config is not None:
         train_transform = build_transforms(aug_config.get("train", aug_config))
         val_transform = build_transforms(aug_config.get("val"))
 
-    # tokenizer
     tokenize_fn = build_tokenizer(tokenizer_config, label_strategy=label_strategy)
 
-    # Dataset 클래스 + kwargs 추출
-    dataset_cls, dataset_kwargs = resolver.resolve_partial(dataset_config)
+    # ── collate_fn ──
+    collate_fn = _select_collator(label_strategy, tokenizer_config)
 
-    # collate_fn 해석
-    collate_fn = None
-    loader_kwargs = dict(loader_config)
-    collate_cfg = loader_kwargs.pop("collate_fn", None)
-    if collate_cfg is not None:
-        collate_fn = resolver.resolve(collate_cfg)
-    else:
-        collate_fn = _select_collator(label_strategy, tokenizer_config)
+    # ── DataLoader kwargs (drop_last를 분리하여 이중 전달 방지) ──
+    dl_kwargs = dict(loader_config)
+    dl_kwargs.pop("collate_fn", None)
+    train_drop_last = dl_kwargs.pop("drop_last", True)
 
-    # ── DataLoader 공통 설정 ──
     def _make_loader(
         dataset: Any,
         *,
@@ -108,73 +209,68 @@ def create_dataloaders(
             sampler=sampler,
             collate_fn=collate_fn,
             drop_last=drop_last,
-            **loader_kwargs,
+            **dl_kwargs,
         )
 
-    # ── train split ──
-    train_kwargs = dict(dataset_kwargs)
-    train_kwargs.setdefault("transform", train_transform)
-    if tokenize_fn is not None:
-        train_kwargs.setdefault("tokenize_fn", tokenize_fn)
-
-    train_dataset = dataset_cls(**train_kwargs)
+    # ── train dataset ──
+    load_kwargs = dict(
+        subset=subset, streaming=streaming, data_files=data_files, fmt=fmt,
+    )
+    train_ds = _load_source(source, split=split, **load_kwargs)
+    train_ds = _rename_columns(train_ds, fields)
+    train_ds = load_data(
+        train_ds, transform=train_transform, tokenize_fn=tokenize_fn,
+        streaming=streaming,
+    )
 
     train_sampler = None
     if distributed:
         from torch.utils.data.distributed import DistributedSampler
 
-        train_sampler = DistributedSampler(train_dataset, shuffle=True)
+        train_sampler = DistributedSampler(train_ds, shuffle=True)
 
     result: dict[str, DataLoader] = {
         "train": _make_loader(
-            train_dataset, shuffle=True, sampler=train_sampler, drop_last=True
+            train_ds, shuffle=True, sampler=train_sampler, drop_last=train_drop_last,
         ),
     }
 
-    # ── val split ──
-    val_dataset = None
-    val_split = dataset_kwargs.get("split")
-    if val_split is not None:
-        val_kwargs = dict(dataset_kwargs)
-        # split 이름 치환: train → validation (HuggingFace 규약)
-        if val_split == "train":
-            val_kwargs["split"] = "validation"
-        else:
-            val_kwargs["split"] = "test"
-        val_kwargs["transform"] = val_transform
-        if tokenize_fn is not None:
-            val_kwargs["tokenize_fn"] = tokenize_fn
+    # ── val dataset ──
+    val_ds = None
+    split_str = split if isinstance(split, str) else "train"
+    val_split = _infer_val_split(split_str)
 
-        try:
-            val_dataset = dataset_cls(**val_kwargs)
-        except Exception:
-            # val split이 존재하지 않으면 무시
-            val_dataset = None
+    try:
+        val_ds = _load_source(source, split=val_split, **load_kwargs)
+        val_ds = _rename_columns(val_ds, fields)
+        val_ds = load_data(
+            val_ds, transform=val_transform, tokenize_fn=tokenize_fn,
+            streaming=streaming,
+        )
+    except (ValueError, FileNotFoundError, KeyError):
+        val_ds = None
 
-    # split 파라미터가 없는 데이터셋 (ImageFolder, CSV): random_split fallback
-    if val_dataset is None and train_dataset is not None:
+    # split이 없는 경우 random_split fallback
+    if val_ds is None and not streaming and hasattr(train_ds, "__len__"):
         from torch.utils.data import random_split
 
-        total = len(train_dataset)
+        total = len(train_ds)
         val_size = int(total * 0.2)
         train_size = total - val_size
-        train_dataset, val_dataset = random_split(
-            train_dataset, [train_size, val_size]
-        )
-        # train DataLoader를 재생성 (split된 데이터셋으로)
+        train_ds, val_ds = random_split(train_ds, [train_size, val_size])
         result["train"] = _make_loader(
-            train_dataset, shuffle=True, sampler=train_sampler, drop_last=True
+            train_ds, shuffle=True, sampler=train_sampler, drop_last=train_drop_last,
         )
 
-    if val_dataset is not None:
+    if val_ds is not None:
         val_sampler = None
         if distributed:
             from torch.utils.data.distributed import DistributedSampler
 
-            val_sampler = DistributedSampler(val_dataset, shuffle=False)
+            val_sampler = DistributedSampler(val_ds, shuffle=False)
 
         result["val"] = _make_loader(
-            val_dataset, shuffle=False, sampler=val_sampler, drop_last=False
+            val_ds, shuffle=False, sampler=val_sampler, drop_last=False,
         )
 
     return result

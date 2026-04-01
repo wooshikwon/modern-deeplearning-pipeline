@@ -155,15 +155,28 @@ class Factory:
     # ── Phase 3: 데이터 ──
 
     def create_dataloaders(self) -> dict:
-        """train/val DataLoader를 생성한다."""
+        """train/val DataLoader를 생성한다.
+
+        DataSpec을 분해하여 create_dataloaders에 전달한다.
+        """
         def _create() -> dict:
             from mdp.data.dataloader import create_dataloaders
 
             recipe = self.settings.recipe
+            data = recipe.data
             distributed = self.settings.config.compute.distributed is not None
+
             return create_dataloaders(
-                data_spec=recipe.data,
-                fields=recipe.data.fields,
+                source=data.source,
+                fields=data.fields or None,
+                split=data.split,
+                subset=data.subset,
+                streaming=data.streaming,
+                data_files=data.data_files,
+                fmt=data.format,
+                aug_config=data.augmentation,
+                tokenizer_config=data.tokenizer,
+                loader_config=data.dataloader.model_dump(),
                 distributed=distributed,
             )
 

@@ -38,6 +38,7 @@ class BusinessValidator:
         self._check_head_task_compat(settings, result)
         self._check_adapter_precision(settings, result)
         self._check_distributed_batch(settings, result)
+        self._check_task_fields(settings, result)
 
         return result
 
@@ -119,3 +120,20 @@ class BusinessValidator:
                 "분산 학습 시 drop_last=false이면 GPU별 배치 크기가 "
                 "불균등해질 수 있습니다. drop_last=true를 권장합니다."
             )
+
+    @staticmethod
+    def _check_task_fields(
+        settings: Settings, result: ValidationResult
+    ) -> None:
+        """4. task-fields 정합성 검증."""
+        from mdp.task_taxonomy import validate_task_fields
+
+        recipe = settings.recipe
+        data = recipe.data
+
+        data_config = {
+            "tokenizer": data.tokenizer is not None,
+            "augmentation": data.augmentation is not None,
+        }
+        warnings = validate_task_fields(recipe.task, data.fields, data_config)
+        result.warnings.extend(warnings)
