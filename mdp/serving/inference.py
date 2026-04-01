@@ -131,17 +131,27 @@ def run_batch_inference(
 
     all_records: list[dict[str, Any]] = []
 
+    use_generate = hasattr(model, "generate")
+
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
             # batch를 device로 이동
             if isinstance(batch, torch.Tensor):
                 batch = batch.to(dev)
-                outputs = model(batch)
             elif isinstance(batch, dict):
                 batch = {k: v.to(dev) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
-                outputs = model(**batch)
             elif isinstance(batch, (list, tuple)):
                 batch = [v.to(dev) if isinstance(v, torch.Tensor) else v for v in batch]
+
+            # generate() 메서드가 있으면 생성, 없으면 forward
+            if use_generate and isinstance(batch, dict):
+                generated_ids = model.generate(**batch)
+                outputs = {"generated_ids": generated_ids}
+            elif isinstance(batch, torch.Tensor):
+                outputs = model(batch)
+            elif isinstance(batch, dict):
+                outputs = model(**batch)
+            elif isinstance(batch, (list, tuple)):
                 outputs = model(*batch)
             else:
                 outputs = model(batch)
