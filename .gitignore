@@ -1,1 +1,31 @@
+# macOS
 *.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.eggs/
+dist/
+build/
+
+# MLflow
+mlruns/
+
+# IDE
+.idea/
+.vscode/
+
+# Testing/Linting
+.mypy_cache/
+.pytest_cache/
+.tox/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Virtual environments
+.venv/
+venv/
