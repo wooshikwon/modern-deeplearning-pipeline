@@ -13,8 +13,7 @@ supported_tasks:
 default_head:
   task: semantic_segmentation
   _component_: SegmentationHead
-  hidden_dim: 256
-  dropout: 0.1
+  in_channels: 256
 
 input_spec:
   channels: 3

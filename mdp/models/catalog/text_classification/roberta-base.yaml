@@ -16,7 +16,6 @@ default_head:
   task: text_classification
   _component_: SequenceClassificationHead
   hidden_dim: 768
-  vocab_size: 50265
 
 input_spec:
   max_length: 512
