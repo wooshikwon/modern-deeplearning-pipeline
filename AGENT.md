@@ -403,9 +403,6 @@ optimizer:
 |-------|-----------|----------------------|--------|-------------|
 | BERT-Base | `transformers.AutoModel` | `hf://bert-base-uncased` | 110.0 | 0.21 |
 | RoBERTa-Base | `transformers.AutoModel` | `hf://roberta-base` | 124.6 | 0.24 |
-| Llama-3-8B | `transformers.AutoModelForCausalLM` | `hf://meta-llama/Meta-Llama-3-8B` | 8030 | 16.1 |
-| Qwen2.5-7B | `transformers.AutoModelForCausalLM` | `hf://Qwen/Qwen2.5-7B` | 7616 | 15.2 |
-| T5-Base | `transformers.AutoModelForSeq2SeqLM` | `hf://t5-base` | 222.9 | 0.42 |
 
 ### token_classification
 

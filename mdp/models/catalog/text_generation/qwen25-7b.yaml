@@ -9,8 +9,6 @@ pretrained_sources:
 
 supported_tasks:
   - text_generation
-  - text_generation
-  - text_classification
 
 default_head:
   task: text_generation
