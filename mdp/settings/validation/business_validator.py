@@ -36,7 +36,7 @@ class BusinessValidator:
         result = ValidationResult()
 
         self._check_head_task_compat(settings, result)
-        self._check_adapter_precision(settings, result)
+        self._check_adapter(settings, result)
         self._check_distributed_batch(settings, result)
         self._check_task_fields(settings, result)
 
@@ -84,26 +84,45 @@ class BusinessValidator:
             )
 
     @staticmethod
-    def _check_adapter_precision(
+    def _check_adapter(
         settings: Settings, result: ValidationResult
     ) -> None:
-        """2. adapter-precision 호환성 검증."""
+        """2. adapter 설정 검증."""
         adapter = settings.recipe.adapter
         if adapter is None:
             return
 
-        precision = settings.recipe.training.precision
+        # 2a. r 필수 (lora/qlora 모두)
+        if adapter.method in ("lora", "qlora") and adapter.r is None:
+            result.errors.append(
+                f"adapter.method '{adapter.method}'에는 r(rank)이 필수입니다."
+            )
 
-        # QLoRA(4bit) + fp32 → warning
+        # 2b. QLoRA 전용 검증
         is_qlora = adapter.method == "qlora" or (
             adapter.quantization is not None
             and adapter.quantization.get("bits") == 4
         )
-        if is_qlora and precision == "fp32":
-            result.warnings.append(
-                "QLoRA(4bit)와 fp32 precision 조합은 비효율적입니다. "
-                "bf16 사용을 권장합니다."
-            )
+
+        if is_qlora:
+            # quantization.bits 필수
+            if adapter.quantization is None or adapter.quantization.get("bits") is None:
+                result.errors.append(
+                    "QLoRA에는 adapter.quantization.bits가 필수입니다."
+                )
+
+            # torch_dtype 필수 (bf16 또는 fp16)
+            torch_dtype = settings.recipe.model.torch_dtype
+            if torch_dtype is None:
+                result.errors.append(
+                    "QLoRA에는 model.torch_dtype 지정이 필수입니다. "
+                    "bfloat16 또는 float16을 사용하세요."
+                )
+            elif torch_dtype not in ("bfloat16", "float16"):
+                result.errors.append(
+                    f"QLoRA의 model.torch_dtype은 bfloat16 또는 float16이어야 합니다. "
+                    f"현재: '{torch_dtype}'"
+                )
 
     @staticmethod
     def _check_distributed_batch(

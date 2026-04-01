@@ -4,6 +4,7 @@ task: text_generation
 model:
   class_path: mdp.models.language.CausalLM
   pretrained: hf://Qwen/Qwen2.5-7B
+  torch_dtype: bfloat16
 
 head:
   _component_: mdp.heads.CausalLMHead

@@ -76,6 +76,9 @@ def apply_qlora(
     else:
         raise ValueError(f"bits는 4 또는 8이어야 합니다, 받은 값: {bits}")
 
+    # from_pretrained에 전달하지 않을 키를 먼저 분리
+    modules_to_save = kwargs.pop("modules_to_save", None) or None
+
     # 양자화된 모델 로딩
     model_cls = _resolve_model_class(class_path)
     model = model_cls.from_pretrained(
@@ -90,7 +93,6 @@ def apply_qlora(
 
     # LoRA 설정 및 적용
     peft_task_type = getattr(TaskType, task_type) if task_type else None
-    modules_to_save = kwargs.pop("modules_to_save", None) or None
 
     lora_config = LoraConfig(
         r=r,
