@@ -170,14 +170,15 @@ class ModelCheckpoint(BaseCallback):
         metrics: dict[str, float] | None = None,
         **kwargs,
     ) -> None:
-        if self.every_n_steps is not None and step > 0 and step % self.every_n_steps == 0:
+        global_step = kwargs.get("global_step", step)
+        if self.every_n_steps is not None and global_step > 0 and global_step % self.every_n_steps == 0:
             model = kwargs.get("model")
             optimizer = kwargs.get("optimizer")
             if model is not None and optimizer is not None:
                 scheduler = kwargs.get("scheduler")
                 strategy = kwargs.get("strategy")
                 epoch = kwargs.get("epoch", 0)
-                self.save_checkpoint(model, optimizer, scheduler, epoch, step, metrics, strategy=strategy)
+                self.save_checkpoint(model, optimizer, scheduler, epoch, global_step, metrics, strategy=strategy)
 
     def on_validation_end(
         self,

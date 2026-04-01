@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -64,6 +65,7 @@ class Trainer:
         self.gradient_checkpointing = training.gradient_checkpointing
         self.compile_mode = training.compile
         self.val_check_interval = training.val_check_interval
+        self.val_check_unit = training.val_check_unit
 
         # AMP setup
         scaler_device = self.device.type
@@ -94,7 +96,7 @@ class Trainer:
         # State
         self.global_step = 0
         self.start_epoch = 0
-        self.best_metrics: dict[str, float] = {}
+        self.last_metrics: dict[str, float] = {}
 
     @staticmethod
     def _detect_device() -> torch.device:
@@ -126,7 +128,12 @@ class Trainer:
         warmup_steps = config.pop("warmup_steps", 0)
         warmup_ratio = config.pop("warmup_ratio", 0.0)
 
-        # Calculate warmup_steps from ratio if needed
+        if warmup_steps > 0 and warmup_ratio > 0:
+            raise ValueError(
+                "warmup_steps와 warmup_ratio를 동시에 지정할 수 없습니다. "
+                f"warmup_steps={warmup_steps}, warmup_ratio={warmup_ratio}"
+            )
+
         if warmup_steps == 0 and warmup_ratio > 0:
             total_steps = self._estimate_total_steps()
             warmup_steps = int(total_steps * warmup_ratio)
@@ -258,8 +265,11 @@ class Trainer:
         last_epoch = self.start_epoch
         mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
 
-        max_epochs = self.epochs or 10_000  # large default for max_steps mode
+        max_epochs = self.epochs or sys.maxsize
         with mlflow_ctx:
+            if self._is_main_process:
+                self._log_mlflow_params()
+
             try:
                 for epoch in range(self.start_epoch, max_epochs):
                     if self._should_stop():
@@ -275,16 +285,22 @@ class Trainer:
                         "on_epoch_end", epoch=epoch, metrics={"train_loss": train_loss}
                     )
 
-                    # Validation
-                    if self.val_loader is not None:
-                        should_validate = self._should_validate(epoch)
-                        if should_validate:
-                            self._fire("on_validation_start", epoch=epoch)
-                            val_metrics = self._validate(epoch)
-                            self._fire(
-                                "on_validation_end", epoch=epoch, metrics=val_metrics
-                            )
-                            self.best_metrics.update(val_metrics)
+                    # Epoch-level metrics
+                    self._mlflow_log_metric("epoch_train_loss", train_loss, epoch)
+                    self._mlflow_log_metric(
+                        "learning_rate",
+                        self.optimizer.param_groups[0]["lr"],
+                        epoch,
+                    )
+
+                    # Epoch-end validation (step/fractional은 _train_one_epoch 내부에서 처리)
+                    if (
+                        self.val_loader is not None
+                        and self.val_check_unit == "epoch"
+                        and self.val_check_interval >= 1.0
+                        and (epoch + 1) % int(self.val_check_interval) == 0
+                    ):
+                        self._run_validation(epoch)
 
                     # Epoch-level scheduler
                     if self.scheduler is not None and self.scheduler_interval == "epoch":
@@ -302,13 +318,14 @@ class Trainer:
                     except Exception as e:
                         logger.warning(f"Strategy cleanup 실패: {e}")
 
-        training_duration = time.time() - start_time
-        self._fire("on_train_end", metrics=self.best_metrics)
-        if self._is_main_process:
-            self._log_to_mlflow(training_duration)
+                training_duration = time.time() - start_time
+                if self._is_main_process:
+                    self._log_mlflow_summary(training_duration, stopped_reason)
+
+        self._fire("on_train_end", metrics=self.last_metrics)
 
         result: dict[str, Any] = {
-            "metrics": self.best_metrics,
+            "metrics": self.last_metrics,
             "training_duration_seconds": training_duration,
             "total_epochs": last_epoch - self.start_epoch + 1,
             "total_steps": self.global_step,
@@ -319,19 +336,31 @@ class Trainer:
 
         return result
 
-    def _should_validate(self, epoch: int) -> bool:
-        interval = self.val_check_interval
-        if isinstance(interval, float) and interval <= 1.0:
-            return True  # validate every epoch
-        if isinstance(interval, int) and interval > 1:
-            return (epoch + 1) % interval == 0
-        return True
+    def _run_validation(self, epoch: int) -> None:
+        """검증을 실행하고 콜백을 발화한다."""
+        self._fire("on_validation_start", epoch=epoch)
+        val_metrics = self._validate(epoch)
+        self._fire("on_validation_end", epoch=epoch, metrics=val_metrics)
+        self.last_metrics.update(val_metrics)
 
     def _train_one_epoch(self, epoch: int) -> float:
         self.model.train()
         total_loss = 0.0
         num_batches = 0
         device_type = self.device.type if self.device.type != "mps" else "cpu"
+
+        # Mid-epoch validation 설정
+        steps_in_epoch = len(self.train_loader)
+        interval = self.val_check_interval
+        unit = self.val_check_unit
+
+        if unit == "step":
+            val_every_n = max(1, int(interval))
+        elif interval < 1.0:
+            # epoch 단위 소수: 에폭의 비율마다 검증
+            val_every_n = max(1, int(steps_in_epoch * interval))
+        else:
+            val_every_n = 0  # 정수 에폭 단위 → train() 메서드에서 처리
 
         for step, batch in enumerate(self.train_loader):
             if self.max_steps and self.global_step >= self.max_steps:
@@ -374,6 +403,21 @@ class Trainer:
 
             # MLflow step logging (non-blocking)
             self._mlflow_log_metric("train_loss", actual_loss, self.global_step)
+
+            # Mid-epoch validation (step 단위 또는 소수 에폭)
+            if (
+                val_every_n > 0
+                and self.val_loader is not None
+                and (step + 1) % val_every_n == 0
+                and (step + 1) < steps_in_epoch  # 에폭 마지막 step은 아래에서 처리
+            ):
+                self._run_validation(epoch)
+                self.model.train()
+
+        # mid-epoch 모드: 에폭 끝에서도 1회 검증 (마지막 구간 커버)
+        if val_every_n > 0 and self.val_loader is not None:
+            self._run_validation(epoch)
+            self.model.train()
 
         return total_loss / max(num_batches, 1)
 
@@ -591,31 +635,58 @@ class Trainer:
         except Exception:
             pass
 
-    def _log_to_mlflow(self, training_duration: float) -> None:
+    def _log_mlflow_params(self) -> None:
+        """Run 시작 시 실험 재현에 필요한 하이퍼파라미터를 기록한다."""
+        try:
+            import mlflow
+
+            recipe = self.settings.recipe
+            params: dict[str, Any] = {
+                "task": recipe.task,
+                "model_class": recipe.model.class_path,
+                "pretrained": recipe.model.pretrained or "none",
+                "dataset_source": recipe.data.source,
+                "batch_size": recipe.data.dataloader.batch_size,
+                "epochs": self.epochs or 0,
+                "max_steps": self.max_steps or 0,
+                "precision": recipe.training.precision,
+                "gradient_accumulation_steps": self.grad_accum_steps,
+                "learning_rate": self.optimizer.param_groups[0]["lr"],
+            }
+
+            # Adapter
+            if recipe.adapter is not None:
+                params["adapter_method"] = recipe.adapter.method
+                if recipe.adapter.r is not None:
+                    params["adapter_r"] = recipe.adapter.r
+
+            # Strategy
+            dist = self.settings.config.compute.distributed
+            if isinstance(dist, dict) and dist.get("strategy"):
+                params["strategy"] = dist["strategy"]
+
+            mlflow.log_params(params)
+        except Exception as e:
+            logger.warning(f"MLflow params 로깅 실패: {e}")
+
+    def _log_mlflow_summary(
+        self, training_duration: float, stopped_reason: str,
+    ) -> None:
+        """Run 종료 시 최종 메트릭과 config snapshot을 기록한다."""
         try:
             import mlflow
             from mdp.utils.sanitize import sanitize_config
-
-            mlflow.log_params(
-                {
-                    "model_class": self.settings.recipe.model.class_path,
-                    "task": self.settings.recipe.task,
-                    "epochs": self.epochs or 0,
-                    "precision": self.settings.recipe.training.precision,
-                }
-            )
 
             mlflow.log_metrics(
                 {
                     "training_duration_seconds": training_duration,
                     "total_steps": self.global_step,
-                    **{f"best_{k}": v for k, v in self.best_metrics.items()},
+                    **{f"final_{k}": v for k, v in self.last_metrics.items()},
                 }
             )
+            mlflow.set_tag("stopped_reason", stopped_reason)
 
-            # Sanitized config snapshot
             config_dict = sanitize_config(self.settings.model_dump())
             mlflow.log_dict(config_dict, "config/settings.json")
-
         except Exception as e:
-            logger.warning(f"MLflow 로깅 실패 (학습 결과는 유효합니다): {e}")
+            logger.warning(f"MLflow summary 로깅 실패 (학습 결과는 유효합니다): {e}")
