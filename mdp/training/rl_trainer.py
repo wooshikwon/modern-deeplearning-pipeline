@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import logging
 import os
-import sys
 import time
 from contextlib import nullcontext
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -174,6 +174,131 @@ class RLTrainer:
             for k, v in batch.items()
         }
 
+    def _should_stop(self) -> bool:
+        return any(getattr(cb, "should_stop", False) for cb in self.callbacks)
+
+    # ── MLflow ──
+
+    def _start_mlflow_run(self) -> Any:
+        try:
+            import mlflow
+
+            mlflow_cfg = self.settings.config.mlflow
+            if mlflow_cfg is None:
+                return nullcontext()
+            if hasattr(mlflow_cfg, "tracking_uri") and mlflow_cfg.tracking_uri:
+                mlflow.set_tracking_uri(mlflow_cfg.tracking_uri)
+            experiment_name = getattr(mlflow_cfg, "experiment_name", None) or getattr(mlflow_cfg, "experiment", None)
+            if experiment_name:
+                mlflow.set_experiment(experiment_name)
+            return mlflow.start_run()
+        except Exception as e:
+            logger.warning(f"MLflow run 시작 실패: {e}")
+            return nullcontext()
+
+    def _mlflow_log_metric(self, key: str, value: float, step: int) -> None:
+        if not self._is_main_process:
+            return
+        try:
+            import mlflow
+            mlflow.log_metric(key, value, step=step)
+        except Exception:
+            pass
+
+    def _log_mlflow_params(self) -> None:
+        try:
+            import mlflow
+
+            recipe = self.settings.recipe
+            policy_spec = recipe.models["policy"]
+            params = {
+                "task": recipe.task,
+                "algorithm": type(self.algorithm).__name__,
+                "policy_class": policy_spec.class_path,
+                "policy_pretrained": policy_spec.pretrained or "none",
+                "dataset_source": recipe.data.source,
+                "batch_size": recipe.data.dataloader.batch_size,
+                "max_steps": self.max_steps or 0,
+                "precision": recipe.training.precision,
+                "policy_lr": self.optimizers["policy"].param_groups[0]["lr"],
+            }
+            if policy_spec.adapter is not None:
+                params["adapter_method"] = policy_spec.adapter.method
+                if policy_spec.adapter.r is not None:
+                    params["adapter_r"] = policy_spec.adapter.r
+            mlflow.log_params(params)
+        except Exception as e:
+            logger.warning(f"MLflow params 로깅 실패: {e}")
+
+    def _log_mlflow_summary(self, training_duration: float) -> None:
+        try:
+            import mlflow
+            from mdp.utils.sanitize import sanitize_config
+
+            mlflow.log_metrics({
+                "training_duration_seconds": training_duration,
+                "total_steps": self.global_step,
+            })
+            config_dict = sanitize_config(self.settings.model_dump())
+            mlflow.log_dict(config_dict, "config/settings.json")
+
+            # policy adapter를 MLflow artifact로 저장
+            self._export_policy_artifact()
+        except Exception as e:
+            logger.warning(f"MLflow summary 로깅 실패: {e}")
+
+    def _export_policy_artifact(self) -> None:
+        """Policy 모델을 MLflow artifact로 저장한다. LoRA면 adapter만."""
+        import json
+        import shutil
+        import tempfile
+
+        import mlflow
+
+        try:
+            target = getattr(self.policy, "module", self.policy)
+            has_adapter = hasattr(target, "peft_config")
+
+            with tempfile.TemporaryDirectory() as tmp:
+                output_dir = Path(tmp)
+                if has_adapter:
+                    target.save_pretrained(output_dir)
+                elif hasattr(target, "save_pretrained"):
+                    target.save_pretrained(output_dir)
+                else:
+                    from safetensors.torch import save_file
+                    save_file(target.state_dict(), output_dir / "model.safetensors")
+
+                # tokenizer
+                recipe = self.settings.recipe
+                tokenizer_config = recipe.data.tokenizer
+                if tokenizer_config:
+                    pretrained = tokenizer_config.get("pretrained") if isinstance(tokenizer_config, dict) else getattr(tokenizer_config, "pretrained", None)
+                    if pretrained:
+                        try:
+                            from transformers import AutoTokenizer
+                            AutoTokenizer.from_pretrained(pretrained).save_pretrained(output_dir)
+                        except Exception:
+                            pass
+
+                # recipe.yaml
+                import yaml
+                recipe_dict = recipe.model_dump(mode="json")
+                (output_dir / "recipe.yaml").write_text(yaml.dump(recipe_dict, allow_unicode=True))
+
+                # serving_meta.json
+                meta = {
+                    "model_class": type(target).__name__,
+                    "has_adapter": has_adapter,
+                    "algorithm": type(self.algorithm).__name__,
+                }
+                (output_dir / "serving_meta.json").write_text(json.dumps(meta, indent=2))
+
+                mlflow.log_artifacts(tmp, "model")
+                logger.info("Policy 모델을 MLflow artifact로 등록: model/")
+        except Exception as e:
+            logger.warning(f"Policy artifact 저장 실패: {e}")
+
     # ── 학습 루프 ──
 
     def train(self) -> dict[str, Any]:
@@ -206,6 +331,8 @@ class RLTrainer:
         self._fire("on_train_start", total_steps=total_steps)
         start_time = time.time()
 
+        mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
+
         device_type = self.device.type if self.device.type != "mps" else "cpu"
         train_iter = iter(self.train_loader)
         total_loss = 0.0
@@ -214,50 +341,61 @@ class RLTrainer:
 
         needs_gen = getattr(self.algorithm, "needs_generation", False)
 
-        # generation kwargs (Recipe의 generation 섹션에서)
         gen_config = self.settings.recipe.generation
         self._generation_kwargs = {}
         if gen_config is not None:
             self._generation_kwargs = gen_config.model_dump(exclude_none=True) if hasattr(gen_config, "model_dump") else dict(gen_config)
 
-        try:
-            while self.global_step < max_steps:
-                try:
-                    batch = next(train_iter)
-                except StopIteration:
-                    train_iter = iter(self.train_loader)
-                    batch = next(train_iter)
+        with mlflow_ctx:
+            if self._is_main_process:
+                self._log_mlflow_params()
 
-                batch = self._move_to_device(batch)
+            try:
+                while self.global_step < max_steps:
+                    if self._should_stop():
+                        break
 
-                if needs_gen:
-                    step_loss = self._train_step_generation(batch, device_type)
-                else:
-                    step_loss = self._train_step_offline(batch, device_type)
+                    try:
+                        batch = next(train_iter)
+                    except StopIteration:
+                        train_iter = iter(self.train_loader)
+                        batch = next(train_iter)
 
-                total_loss += step_loss
-                num_steps += 1
+                    batch = self._move_to_device(batch)
 
-                if (self.global_step) % self.grad_accum_steps == 0:
-                    self._fire(
-                        "on_batch_end", step=self.global_step,
-                        global_step=self.global_step,
-                        metrics={"loss": step_loss},
-                        model=self.policy,
-                        optimizer=self.optimizers["policy"],
-                        scheduler=self.schedulers.get("policy"),
-                    )
+                    if needs_gen:
+                        step_loss = self._train_step_generation(batch, device_type)
+                    else:
+                        step_loss = self._train_step_offline(batch, device_type)
 
-        finally:
-            if self.strategy is not None:
-                try:
-                    self.strategy.cleanup()
-                except Exception as e:
-                    logger.warning(f"Strategy cleanup 실패: {e}")
+                    total_loss += step_loss
+                    num_steps += 1
 
-        training_duration = time.time() - start_time
+                    # step-level logging
+                    self._mlflow_log_metric("loss", step_loss, self.global_step)
+
+                    if (self.global_step) % self.grad_accum_steps == 0:
+                        self._fire(
+                            "on_batch_end", step=self.global_step,
+                            global_step=self.global_step,
+                            metrics={"loss": step_loss},
+                            model=self.policy,
+                            optimizer=self.optimizers["policy"],
+                            scheduler=self.schedulers.get("policy"),
+                        )
+
+            finally:
+                if self.strategy is not None:
+                    try:
+                        self.strategy.cleanup()
+                    except Exception as e:
+                        logger.warning(f"Strategy cleanup 실패: {e}")
+
+                training_duration = time.time() - start_time
+                if self._is_main_process:
+                    self._log_mlflow_summary(training_duration)
+
         avg_loss = total_loss / max(num_steps, 1)
-
         self._fire("on_train_end", metrics={"loss": avg_loss})
 
         return {
