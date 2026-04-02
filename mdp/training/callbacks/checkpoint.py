@@ -92,10 +92,20 @@ class ModelCheckpoint(BaseCallback):
         global_step: int,
         metrics: dict[str, float] | None = None,
         strategy: Any | None = None,
+        recipe_dict: dict[str, Any] | None = None,
     ) -> Path:
         """Persist a checkpoint to disk and return its path."""
         ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
         ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        # Recipe를 체크포인트에 내장 (최초 1회)
+        recipe_path = ckpt_dir / "recipe.yaml"
+        if recipe_dict is not None and not recipe_path.exists():
+            import yaml
+
+            recipe_path.write_text(
+                yaml.dump(recipe_dict, allow_unicode=True, default_flow_style=False),
+            )
 
         # Model weights: prefer strategy, then save_pretrained (HF/PEFT), then safetensors, fallback to .pt
         if strategy is not None:
@@ -178,7 +188,11 @@ class ModelCheckpoint(BaseCallback):
                 scheduler = kwargs.get("scheduler")
                 strategy = kwargs.get("strategy")
                 epoch = kwargs.get("epoch", 0)
-                self.save_checkpoint(model, optimizer, scheduler, epoch, global_step, metrics, strategy=strategy)
+                recipe_dict = kwargs.get("recipe_dict")
+                self.save_checkpoint(
+                    model, optimizer, scheduler, epoch, global_step, metrics,
+                    strategy=strategy, recipe_dict=recipe_dict,
+                )
 
     def on_validation_end(
         self,
@@ -204,9 +218,11 @@ class ModelCheckpoint(BaseCallback):
         scheduler = kwargs.get("scheduler")
         strategy = kwargs.get("strategy")
         global_step = kwargs.get("global_step", 0)
+        recipe_dict = kwargs.get("recipe_dict")
 
         ckpt_path = self.save_checkpoint(
-            model, optimizer, scheduler, epoch + 1, global_step, metrics, strategy=strategy,
+            model, optimizer, scheduler, epoch + 1, global_step, metrics,
+            strategy=strategy, recipe_dict=recipe_dict,
         )
 
         metric_value = metrics[self.monitor]

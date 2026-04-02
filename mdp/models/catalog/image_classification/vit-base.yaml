@@ -13,6 +13,7 @@ supported_tasks:
 
 default_head:
   task: image_classification
+  _target_attr: head
   _component_: ClassificationHead
   hidden_dim: 768
   dropout: 0.1

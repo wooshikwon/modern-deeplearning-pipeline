@@ -54,6 +54,27 @@ class SettingsFactory:
         config = Config(**config_dict)
         return Settings(recipe=recipe, config=config)
 
+    def from_artifact(self, artifact_dir: str) -> Settings:
+        """artifact 디렉토리의 recipe.yaml에서 Settings를 조립한다.
+
+        model/ artifact와 checkpoint/ artifact 모두 사용 가능.
+        학습 전용 검증은 수행하지 않는다. 기본 Config를 사용한다.
+        """
+        from pathlib import Path
+
+        recipe_path = Path(artifact_dir) / "recipe.yaml"
+        if not recipe_path.exists():
+            raise FileNotFoundError(
+                f"artifact에 recipe.yaml이 없습니다: {artifact_dir}\n"
+                "이 artifact는 recipe 내장 이전에 생성되었을 수 있습니다."
+            )
+        recipe_dict = self._load_yaml(str(recipe_path))
+        recipe_dict = self._substitute_env_vars(recipe_dict)
+
+        recipe = Recipe(**recipe_dict)
+        config = Config()
+        return Settings(recipe=recipe, config=config)
+
     @staticmethod
     def _load_yaml(path: str) -> dict:
         """YAML 파일을 딕셔너리로 로딩한다."""

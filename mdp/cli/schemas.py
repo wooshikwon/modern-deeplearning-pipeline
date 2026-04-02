@@ -43,13 +43,26 @@ class InferenceResult(BaseModel):
 
     데이터 출처:
     - output_path → run_batch_inference() 반환값
-    - task → Settings.recipe.task
+    - task → checkpoint recipe.task
     - monitoring → _detect_drift() → compare_baselines() 반환 dict
+    - evaluation_metrics → metric.compute() 결과 집계
     """
 
     output_path: str | None = None
     task: str | None = None
     monitoring: dict[str, Any] | None = None
+    evaluation_metrics: dict[str, Any] | None = None
+
+
+# ── mdp serve ──
+
+
+class ServeResult(BaseModel):
+    """mdp serve --format json 출력 스키마."""
+
+    run_id: str | None = None
+    port: int | None = None
+    status: str = "starting"
 
 
 # ── mdp estimate ──

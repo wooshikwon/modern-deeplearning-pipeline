@@ -87,10 +87,14 @@ class FSDPStrategy(BaseStrategy):
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
             state_dict = model.state_dict()
             if dist.get_rank() == 0:
-                torch.save(state_dict, path)
+                from safetensors.torch import save_file
+
+                save_file(state_dict, path)
 
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
-        state_dict = torch.load(path, map_location="cpu", weights_only=True)
+        from safetensors.torch import load_file
+
+        state_dict = load_file(path)
         model.load_state_dict(state_dict)
         return model
 

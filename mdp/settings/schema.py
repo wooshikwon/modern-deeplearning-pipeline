@@ -98,9 +98,12 @@ class GenerationSpec(BaseModel):
 
 
 class EvaluationSpec(BaseModel):
-    """평가 설정."""
+    """평가 설정.
 
-    metrics: list[str] = Field(default_factory=list)
+    metrics 항목은 str(alias 이름) 또는 dict(_component_ 패턴) 형태.
+    """
+
+    metrics: list[dict[str, Any] | str] = Field(default_factory=list)
 
 
 class MetadataSpec(BaseModel):

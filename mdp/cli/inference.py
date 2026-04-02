@@ -1,9 +1,10 @@
-"""mdp inference -- 배치 추론을 실행한다."""
+"""mdp inference -- MLflow run_id 기반 배치 추론 + (선택) 평가."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import typer
 
@@ -12,135 +13,190 @@ from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
 logger = logging.getLogger(__name__)
 
 
-def run_inference(
-    recipe_path: str,
-    config_path: str,
-    checkpoint_path: str | None = None,
-) -> None:
-    """Recipe + Config + (선택) 체크포인트로 배치 추론을 실행한다."""
-    import torch
+# ── 데이터 인터페이스 검증 ──
 
+
+def _resolve_fields(
+    checkpoint_fields: dict[str, str] | None,
+    cli_fields: list[str] | None,
+) -> dict[str, str] | None:
+    """CLI --fields 오버라이드를 체크포인트 fields에 병합한다."""
+    fields = dict(checkpoint_fields) if checkpoint_fields else {}
+    if cli_fields:
+        for pair in cli_fields:
+            if "=" not in pair:
+                raise ValueError(f"--fields 형식 오류: '{pair}' (올바른 형식: role=column)")
+            role, col = pair.split("=", 1)
+            fields[role] = col
+    return fields or None
+
+
+def _validate_data_interface(
+    fields: dict[str, str] | None,
+    dataset_columns: list[str],
+) -> None:
+    """fields 매핑과 test 데이터 컬럼을 비교한다."""
+    if not fields:
+        return
+    label_roles = {"label", "target", "token_labels"}
+    input_roles = {role for role in fields if role not in label_roles}
+    input_columns = {fields[role] for role in input_roles}
+    missing = input_columns - set(dataset_columns)
+    if missing:
+        hint_parts = [f"{role}={fields[role]}" for role in input_roles]
+        raise ValueError(
+            f"모델이 기대하는 입력 컬럼 {missing}이 데이터에 없습니다.\n"
+            f"  체크포인트 fields: {fields}\n"
+            f"  데이터 컬럼: {dataset_columns}\n"
+            f"  해결: --fields {' '.join(hint_parts)} 으로 매핑을 지정하세요."
+        )
+
+
+# ── MLflow artifact 조회 ──
+
+
+def _download_model(run_id: str) -> Path:
+    """MLflow run에서 model artifact를 다운로드한다."""
+    import mlflow
+
+    path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model")
+    return Path(path)
+
+
+# ── Metric 생성 ──
+
+
+def _create_metrics(
+    metric_names: list[str] | None,
+    recipe_eval: dict | None,
+) -> list[Any]:
+    """CLI --metrics 또는 recipe.evaluation.metrics에서 metric 인스턴스를 생성한다."""
+    from mdp.settings.resolver import ComponentResolver
+
+    resolver = ComponentResolver()
+    raw_list: list[dict[str, Any] | str] = []
+
+    if metric_names:
+        raw_list = [{"_component_": name} for name in metric_names]
+    elif recipe_eval and recipe_eval.get("metrics"):
+        raw_list = recipe_eval["metrics"]
+
+    metrics = []
+    for spec in raw_list:
+        if isinstance(spec, str):
+            spec = {"_component_": spec}
+        try:
+            metrics.append(resolver.resolve(spec))
+        except Exception as e:
+            logger.warning("Metric 생성 실패: %s — %s", spec, e)
+    return metrics
+
+
+# ── Public API ──
+
+
+def run_inference(
+    run_id: str,
+    data_source: str,
+    cli_fields: list[str] | None = None,
+    metric_names: list[str] | None = None,
+    output_format: str = "parquet",
+    output_dir: str = "./output",
+) -> None:
+    """MLflow run_id 기반 배치 추론 + (선택) 평가.
+
+    1. MLflow에서 checkpoint artifact 다운로드
+    2. recipe.yaml로 모델 재구성 + 가중치 로드
+    3. 데이터 로드 + 인터페이스 검증
+    4. 배치 추론 + (선택) metric 평가
+    """
     from mdp.cli.schemas import InferenceResult
-    from mdp.factory.factory import Factory
+    from mdp.data.dataloader import _load_source, _rename_columns
+    from mdp.data.loader import load_data
+    from mdp.data.tokenizer import build_tokenizer, derive_label_strategy
+    from mdp.data.transforms import build_transforms
     from mdp.serving.inference import run_batch_inference
-    from mdp.settings.factory import SettingsFactory
+    from mdp.serving.model_loader import reconstruct_model
+    from torch.utils.data import DataLoader
 
     if not is_json_mode():
-        typer.echo(f"Recipe: {recipe_path}")
-        typer.echo(f"Config: {config_path}")
+        typer.echo(f"MLflow run: {run_id}")
+        typer.echo(f"데이터: {data_source}")
 
     try:
-        settings = SettingsFactory().for_inference(recipe_path, config_path)
-    except Exception as e:
-        if is_json_mode():
-            emit_result(build_error(
-                command="inference",
-                error_type="ValidationError",
-                message=str(e),
-            ))
-            raise typer.Exit(code=1)
-        typer.echo(f"[error] Settings 로딩 실패: {e}", err=True)
-        raise typer.Exit(code=1)
+        # 1. MLflow에서 model artifact 다운로드
+        model_path = _download_model(run_id)
 
-    try:
-        factory = Factory(settings)
-        model = factory.create_model()
+        # 2. 모델 재구성 + 가중치 로드
+        model, settings = reconstruct_model(model_path)
 
-        if model is None:
-            typer.echo("[error] 모델 생성에 실패했습니다.", err=True)
-            raise typer.Exit(code=1)
+        # 3. 데이터 로드 + 필드 검증
+        recipe_data = settings.recipe.data
+        fields = _resolve_fields(recipe_data.fields, cli_fields)
 
-        # 체크포인트 로드
-        if checkpoint_path is not None:
-            ckpt_path = Path(checkpoint_path)
-            if not ckpt_path.exists():
-                typer.echo(f"[error] 체크포인트를 찾을 수 없습니다: {ckpt_path}", err=True)
-                raise typer.Exit(code=1)
+        test_ds = _load_source(data_source, split="train")
+        columns = test_ds.column_names if hasattr(test_ds, "column_names") else []
+        _validate_data_interface(fields, columns)
+        test_ds = _rename_columns(test_ds, fields)
 
-            if not is_json_mode():
-                typer.echo(f"체크포인트 로드: {ckpt_path}")
-            state_dict = torch.load(
-                ckpt_path, map_location="cpu", weights_only=True
-            )
-            if isinstance(state_dict, dict) and "model_state_dict" in state_dict:
-                state_dict = state_dict["model_state_dict"]
-            model.load_state_dict(state_dict)
+        # 전처리
+        label_strategy = derive_label_strategy(fields)
+        val_transform = None
+        if recipe_data.augmentation:
+            val_transform = build_transforms(recipe_data.augmentation.get("val"))
+        tokenize_fn = build_tokenizer(recipe_data.tokenizer, label_strategy=label_strategy)
+        test_ds = load_data(test_ds, transform=val_transform, tokenize_fn=tokenize_fn)
 
-        dataloaders = factory.create_dataloaders()
-        test_loader = dataloaders.get("test", dataloaders.get("val", dataloaders.get("train")))
+        # DataLoader
+        dl_config = recipe_data.dataloader.model_dump() if recipe_data.dataloader else {}
+        batch_size = dl_config.get("batch_size", 32)
+        num_workers = dl_config.get("num_workers", 0)
+        test_loader = DataLoader(test_ds, batch_size=batch_size, num_workers=num_workers)
 
-        if test_loader is None:
-            typer.echo("[error] 추론용 데이터로더가 없습니다.", err=True)
-            raise typer.Exit(code=1)
+        # 4. Metric 생성
+        recipe_eval = settings.recipe.evaluation.model_dump() if settings.recipe.evaluation else None
+        metrics = _create_metrics(metric_names, recipe_eval)
 
-        output_dir = Path(settings.config.storage.output_dir)
-        output_path = output_dir / f"{settings.recipe.name}_predictions"
-
+        # 5. 추론 실행
+        out_path = Path(output_dir) / f"{settings.recipe.name}_predictions"
         if not is_json_mode():
             typer.echo("배치 추론 시작...")
-        result_path = run_batch_inference(
+
+        result_path, eval_results = run_batch_inference(
             model=model,
             dataloader=test_loader,
-            output_path=output_path,
+            output_path=out_path,
+            output_format=output_format,
             task=settings.recipe.task,
+            metrics=metrics or None,
         )
+
         if not is_json_mode():
             typer.echo(f"추론 완료. 결과: {result_path}")
-
-        # Drift detection
-        monitoring = _detect_drift(settings, model, test_loader)
+            if eval_results:
+                typer.echo("평가 결과:")
+                for name, value in eval_results.items():
+                    typer.echo(f"  {name}: {value}")
 
         if is_json_mode():
             result = InferenceResult(
                 output_path=str(result_path),
                 task=settings.recipe.task,
-                monitoring=monitoring,
+                evaluation_metrics=eval_results or None,
             )
             emit_result(build_result(
-                command="inference", **result.model_dump(exclude_none=True),
+                command="inference", run_id=run_id,
+                **result.model_dump(exclude_none=True),
             ))
-        elif monitoring and monitoring.get("drift_detected"):
-            typer.echo(f"[warning] Drift 감지됨: score={monitoring.get('drift_score', 'N/A')}", err=True)
-            for alert in monitoring.get("alerts", []):
-                typer.echo(f"  - {alert}", err=True)
 
     except typer.Exit:
         raise
     except Exception as e:
         if is_json_mode():
             emit_result(build_error(
-                command="inference",
-                error_type="RuntimeError",
-                message=str(e),
+                command="inference", error_type="RuntimeError", message=str(e),
             ))
             raise typer.Exit(code=1)
-        typer.echo(f"[error] 추론 실패: {e}", err=True)
+        typer.echo(f"[error] {e}", err=True)
         logger.exception("추론 실패 상세")
         raise typer.Exit(code=1)
-
-
-def _detect_drift(settings, model, test_loader) -> dict | None:
-    """baseline.json과 현재 측정치를 비교하여 drift를 감지한다."""
-    import json
-
-    from mdp.monitoring.baseline import compare_baselines, compute_baseline
-
-    try:
-        checkpoint_dir = Path(settings.config.storage.checkpoint_dir)
-        baseline_path = checkpoint_dir / "baseline.json"
-
-        if not baseline_path.exists():
-            logger.info("baseline.json이 없어 drift 감지를 건너뜁니다: %s", baseline_path)
-            return None
-
-        with open(baseline_path) as f:
-            baseline = json.load(f)
-
-        current = compute_baseline(
-            train_dataloader=test_loader,
-            model=model,
-        )
-        return compare_baselines(baseline, current)
-    except Exception as e:
-        logger.warning("Drift 감지 실패 (무시): %s", e)
-        return None

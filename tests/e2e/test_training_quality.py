@@ -236,18 +236,14 @@ class TestMLflowLogging:
 
         tracking_uri = f"sqlite:///{tmp_path / 'mlruns.db'}"
 
-        # Configure Trainer's MLflow settings so it manages the run
+        # Configure Trainer's MLflow settings through Settings (Trainer reads these)
         settings = _make_settings(task="image_classification", epochs=2)
         settings.config.mlflow.tracking_uri = tracking_uri
+        settings.config.mlflow.experiment_name = "test-quality"
         model = TinyVisionModel(num_classes=2, hidden_dim=16)
 
         batches = make_vision_batches(num_batches=3, batch_size=4, num_classes=2, image_size=8)
         train_loader = ListDataLoader(batches)
-
-        # Set experiment before Trainer.train() (Trainer reads mlflow_cfg.experiment
-        # which doesn't match the schema field name, so we set it manually)
-        mlflow.set_tracking_uri(tracking_uri)
-        mlflow.set_experiment("test-quality")
 
         trainer = Trainer(
             settings=settings,

@@ -249,17 +249,10 @@ def create_dataloaders(
         )
     except (ValueError, FileNotFoundError, KeyError):
         val_ds = None
-
-    # split이 없는 경우 random_split fallback
-    if val_ds is None and not streaming and hasattr(train_ds, "__len__"):
-        from torch.utils.data import random_split
-
-        total = len(train_ds)
-        val_size = int(total * 0.2)
-        train_size = total - val_size
-        train_ds, val_ds = random_split(train_ds, [train_size, val_size])
-        result["train"] = _make_loader(
-            train_ds, shuffle=True, sampler=train_sampler, drop_last=train_drop_last,
+        logger.warning(
+            "Val split '%s'을 찾을 수 없습니다. Validation 없이 학습합니다. "
+            "Early stopping과 best checkpoint 선택이 비활성화됩니다.",
+            val_split,
         )
 
     if val_ds is not None:

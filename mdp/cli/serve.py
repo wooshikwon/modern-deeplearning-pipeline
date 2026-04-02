@@ -1,98 +1,79 @@
-"""mdp serve -- 모델 서빙을 시작한다.
-
-Config의 serving.backend에 따라 적절한 서빙 백엔드를 선택하고 서버를 시작한다.
-지원 백엔드: torchserve, vllm, onnx.
-"""
+"""mdp serve -- MLflow run_id 기반 MDP 네이티브 서빙."""
 
 from __future__ import annotations
 
+import logging
+from pathlib import Path
+
 import typer
 
-from mdp.cli.output import build_result, emit_result, is_json_mode
-from mdp.settings.factory import SettingsFactory
+from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+
+logger = logging.getLogger(__name__)
 
 
-def _wait_process(process, backend_name: str) -> None:
-    """프로세스 종료를 대기한다. KeyboardInterrupt 시 graceful shutdown."""
+def run_serve(run_id: str, port: int, host: str = "0.0.0.0") -> None:
+    """MLflow run의 model artifact를 FastAPI로 서빙한다."""
     try:
-        process.wait()
-    except KeyboardInterrupt:
-        typer.echo(f"\n{backend_name} 종료 중...")
-        process.terminate()
-        process.wait()
-
-
-def run_serve(recipe_path: str, config_path: str) -> None:
-    """Recipe + Config에서 서빙 설정을 읽어 서버를 시작한다."""
-    settings = SettingsFactory().for_inference(recipe_path, config_path)
-
-    serving = settings.config.serving
-    if serving is None:
-        typer.echo("Config에 serving 섹션이 없습니다. serving.backend을 지정하세요.", err=True)
+        import uvicorn
+    except ImportError:
+        typer.echo(
+            "[error] 서빙에 fastapi와 uvicorn이 필요합니다: pip install mdp[serve]",
+            err=True,
+        )
         raise typer.Exit(code=1)
 
-    backend = serving.backend
+    import mlflow
 
-    if is_json_mode():
-        emit_result(build_result(
-            command="serve",
-            status="starting",
-            backend=backend,
+    if not is_json_mode():
+        typer.echo(f"MLflow run: {run_id}")
+
+    try:
+        model_dir = Path(mlflow.artifacts.download_artifacts(
+            run_id=run_id, artifact_path="model",
         ))
-
-    if backend == "torchserve":
-        _serve_torchserve(settings)
-    elif backend == "vllm":
-        _serve_vllm(settings)
-    elif backend == "onnx":
-        _serve_onnx(settings)
-    else:
-        typer.echo(f"지원하지 않는 서빙 백엔드: {backend}", err=True)
+    except Exception as e:
+        msg = f"MLflow run '{run_id}'에서 model artifact를 찾을 수 없습니다: {e}"
+        if is_json_mode():
+            emit_result(build_error(command="serve", error_type="ValidationError", message=msg))
+        else:
+            typer.echo(f"[error] {msg}", err=True)
         raise typer.Exit(code=1)
 
+    try:
+        from mdp.serving.server import create_handler, create_app
 
-def _serve_torchserve(settings) -> None:
-    """TorchServe 서버를 시작한다."""
-    from mdp.serving.torchserve import start_torchserve
+        handler = create_handler(model_dir)
+        import yaml
+        recipe_data = yaml.safe_load((model_dir / "recipe.yaml").read_text())
 
-    serving = settings.config.serving
-    model_store = serving.model_repository or "model_store"
-    if not is_json_mode():
-        typer.echo(f"TorchServe 시작: model_store={model_store}")
-    process = start_torchserve(
-        model_store=model_store,
-        port=8080,
-        workers=serving.instance_count,
-    )
-    _wait_process(process, "TorchServe")
+        # recipe 객체를 Settings에서 가져오기 위해 reconstruct
+        from mdp.serving.model_loader import reconstruct_model
+        _, settings = reconstruct_model(model_dir)
+        recipe = settings.recipe
 
+        app = create_app(handler, recipe)
 
-def _serve_vllm(settings) -> None:
-    """vLLM 서버를 시작한다."""
-    from mdp.serving.vllm_server import start_vllm_server
+        if not is_json_mode():
+            typer.echo(f"서빙 시작: http://{host}:{port}")
+            typer.echo(f"  모델: {recipe.name} (task: {recipe.task})")
+            typer.echo(f"  /predict — 추론 엔드포인트")
+            typer.echo(f"  /health  — 헬스 체크")
 
-    model_name = settings.recipe.model.pretrained
-    if model_name and model_name.startswith("hf://"):
-        model_name = model_name[len("hf://"):]
+        if is_json_mode():
+            emit_result(build_result(
+                command="serve", status="starting",
+                run_id=run_id, port=port,
+            ))
 
-    if not model_name:
-        typer.echo("vLLM 서빙에는 model.pretrained URI가 필요합니다.", err=True)
+        uvicorn.run(app, host=host, port=port)
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        if is_json_mode():
+            emit_result(build_error(command="serve", error_type="RuntimeError", message=str(e)))
+            raise typer.Exit(code=1)
+        typer.echo(f"[error] {e}", err=True)
+        logger.exception("서빙 실패 상세")
         raise typer.Exit(code=1)
-
-    serving = settings.config.serving
-    if not is_json_mode():
-        typer.echo(f"vLLM 서버 시작: model={model_name}")
-    process = start_vllm_server(
-        model_name=model_name,
-        port=8000,
-        tensor_parallel_size=serving.instance_count,
-    )
-    _wait_process(process, "vLLM")
-
-
-def _serve_onnx(settings) -> None:
-    """ONNX 모델을 로딩하고 간단한 추론 서버를 제공한다."""
-    if not is_json_mode():
-        typer.echo("ONNX 서빙: onnxruntime으로 모델을 로드합니다.")
-        typer.echo("ONNX 실시간 서빙은 Triton 또는 별도 FastAPI 서버를 권장합니다.")
-        typer.echo("배치 추론은 `mdp inference` 명령을 사용하세요.")

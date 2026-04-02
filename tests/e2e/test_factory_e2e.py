@@ -28,13 +28,13 @@ class TestAttachHead:
         assert model.head is new_head
         assert model.head is not original_head
 
-    def test_attach_head_wrong_attr_raises(self) -> None:
-        """target_attr='nonexistent' should raise AttributeError."""
+    def test_attach_head_new_attr_warns_and_sets(self) -> None:
+        """target_attr='nonexistent' should warn and still set the attribute."""
         model = TinyVisionModel(num_classes=2, hidden_dim=16)
         new_head = ClassificationHead(num_classes=10, hidden_dim=16, dropout=0.0)
 
-        with pytest.raises(AttributeError, match="nonexistent"):
-            Factory._attach_head(model, new_head, target_attr="nonexistent")
+        Factory._attach_head(model, new_head, target_attr="nonexistent")
+        assert model.nonexistent is new_head
 
     def test_attach_head_missing_target_attr_raises(self) -> None:
         """target_attr=None should raise ValueError."""

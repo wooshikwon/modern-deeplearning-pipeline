@@ -67,8 +67,31 @@ def load_data(
     has_language = tokenize_fn is not None
 
     if has_vision and has_language:
-        ds = _apply_language_tokenization(ds, tokenize_fn, streaming)
-        ds = _apply_vision_transform(ds, transform)
+        # Language tokenization (map + remove_columns, set_format 제외)
+        ds = ds.map(tokenize_fn, batched=True)
+        if not streaming:
+            remove_cols = _columns_to_remove(ds)
+            if remove_cols:
+                ds = ds.remove_columns(remove_cols)
+        # Combined set_transform: vision transform + torch tensor 변환
+        # set_transform은 set_format을 덮어쓰므로 한 번에 처리해야 한다
+        import torch as _torch
+
+        def _multimodal_transform(examples: dict) -> dict:
+            result = {}
+            for k, v in examples.items():
+                if k in ("image", "pixel_values"):
+                    result[k] = transform(v)
+                elif isinstance(v, list):
+                    try:
+                        result[k] = _torch.tensor(v)
+                    except (ValueError, TypeError):
+                        result[k] = v
+                else:
+                    result[k] = v
+            return result
+
+        ds.set_transform(_multimodal_transform)
     elif has_vision:
         ds = _apply_vision_transform(ds, transform)
     elif has_language:

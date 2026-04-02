@@ -51,21 +51,22 @@ def apply_adapter(
         pass
 
     if method == "lora":
+        if model is None:
+            raise ValueError("LoRA에는 model이 필요합니다")
         from mdp.models.adapters.lora import apply_lora
         return apply_lora(model, **config)
     elif method == "qlora":
         from mdp.models.adapters.qlora import apply_qlora
-        # qlora는 model 대신 model_name_or_path를 받음
         model_name = config.pop("model_name_or_path", None)
         if model_name is None:
             raise ValueError("QLoRA에는 model_name_or_path가 필요합니다")
         return apply_qlora(model_name, **config)
     elif method == "prefix_tuning":
+        if model is None:
+            raise ValueError("PrefixTuning에는 model이 필요합니다")
         from mdp.models.adapters.prefix_tuning import apply_prefix_tuning
-        # r → num_virtual_tokens 매핑 (adapter 스키마 통일)
         if "r" in config:
             config["num_virtual_tokens"] = config.pop("r")
-        # lora 전용 키 제거
         for k in ("dropout", "target_modules", "modules_to_save", "alpha"):
             config.pop(k, None)
         return apply_prefix_tuning(model, **config)

@@ -11,22 +11,6 @@ from tests.e2e.datasets import ListDataLoader, make_vision_batches
 from tests.e2e.models import TinyVisionModel
 
 
-class _BaselineWrapper(nn.Module):
-    """Wraps TinyVisionModel so forward() accepts **kwargs.
-
-    compute_baseline calls ``model(**model_batch)`` which expands dict
-    keys as keyword arguments, but TinyVisionModel.forward expects a
-    single ``batch`` dict.
-    """
-
-    def __init__(self, inner: TinyVisionModel) -> None:
-        super().__init__()
-        self.inner = inner
-
-    def forward(self, **kwargs: Tensor) -> dict[str, Tensor]:
-        return self.inner.forward(kwargs)
-
-
 # ---------------------------------------------------------------------------
 # compute_baseline
 # ---------------------------------------------------------------------------
@@ -34,7 +18,7 @@ class _BaselineWrapper(nn.Module):
 
 def test_compute_baseline_structure() -> None:
     """compute_baseline returns a dict with meta, input_stats, output_stats."""
-    model = _BaselineWrapper(TinyVisionModel(num_classes=2, hidden_dim=16))
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
     batches = make_vision_batches(num_batches=3, batch_size=4, num_classes=2)
     loader = ListDataLoader(batches)
 

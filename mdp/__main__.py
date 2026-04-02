@@ -56,25 +56,29 @@ def train(
 
 @app.command()
 def inference(
-    recipe: str = typer.Option(..., "-r", "--recipe", help="Recipe YAML 경로"),
-    config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
-    checkpoint: str = typer.Option(None, "--checkpoint", help="체크포인트 경로"),
+    run_id: str = typer.Option(..., "--run-id", help="MLflow run ID"),
+    data: str = typer.Option(..., "--data", help="추론 대상 데이터 (HF Hub 이름 또는 로컬 경로)"),
+    fields: list[str] | None = typer.Option(None, "--fields", help="필드 매핑 오버라이드 (예: image=img label=class)"),
+    metrics: list[str] | None = typer.Option(None, "--metrics", help="평가 metric (예: Accuracy F1Score)"),
+    output_format: str = typer.Option("parquet", "--output-format", help="결과 포맷: parquet|csv|jsonl"),
+    output_dir: str = typer.Option("./output", "--output-dir", help="결과 저장 디렉토리"),
 ):
-    """배치 추론을 실행한다."""
+    """MLflow run 기반 배치 추론을 실행한다."""
     from mdp.cli.inference import run_inference
 
-    run_inference(recipe, config, checkpoint)
+    run_inference(run_id, data, fields, metrics, output_format, output_dir)
 
 
 @app.command()
 def serve(
-    recipe: str = typer.Option(..., "-r", "--recipe", help="Recipe YAML 경로"),
-    config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
+    run_id: str = typer.Option(..., "--run-id", help="MLflow run ID"),
+    port: int = typer.Option(8000, "--port", help="서버 포트"),
+    host: str = typer.Option("0.0.0.0", "--host", help="바인드 주소"),
 ):
-    """모델 서빙을 시작한다."""
+    """학습한 모델을 REST API로 서빙한다."""
     from mdp.cli.serve import run_serve
 
-    run_serve(recipe, config)
+    run_serve(run_id, port, host)
 
 
 @app.command()

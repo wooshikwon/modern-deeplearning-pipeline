@@ -169,7 +169,7 @@ def compute_baseline(
                     else:
                         model_batch[k] = v
 
-                outputs = model(**model_batch)
+                outputs = model(model_batch)
 
                 # Extract logits
                 logits = None

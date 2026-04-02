@@ -93,6 +93,9 @@ class Trainer:
         self.strategy = self._create_strategy(settings)
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
+        # Recipe snapshot (체크포인트에 내장용)
+        self._recipe_dict = settings.recipe.model_dump()
+
         # State
         self.global_step = 0
         self.start_epoch = 0
@@ -220,6 +223,7 @@ class Trainer:
             "scheduler": self.scheduler,
             "global_step": self.global_step,
             "strategy": self.strategy,
+            "recipe_dict": self._recipe_dict,
         }
         kwargs.update(extra_kwargs)
         for cb in self.callbacks:
@@ -263,6 +267,7 @@ class Trainer:
 
         stopped_reason = "completed"
         last_epoch = self.start_epoch
+        baseline_info = None
         mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
 
         max_epochs = self.epochs or sys.maxsize
@@ -397,12 +402,15 @@ class Trainer:
             total_loss += actual_loss
             num_batches += 1
 
-            self._fire(
-                "on_batch_end", step=step, epoch=epoch, metrics={"loss": actual_loss}
-            )
+            if (step + 1) % self.grad_accum_steps == 0:
+                self._fire(
+                    "on_batch_end", step=step, epoch=epoch,
+                    global_step=self.global_step,
+                    metrics={"loss": actual_loss},
+                )
 
-            # MLflow step logging (non-blocking)
-            self._mlflow_log_metric("train_loss", actual_loss, self.global_step)
+                # MLflow step logging (non-blocking)
+                self._mlflow_log_metric("train_loss", actual_loss, self.global_step)
 
             # Mid-epoch validation (step 단위 또는 소수 에폭)
             if (
@@ -600,6 +608,80 @@ class Trainer:
             logger.warning(f"Monitoring baseline 계산 실패: {e}")
             return None
 
+    # ── Checkpoint helpers ──
+
+    def _find_best_checkpoint(self) -> Path | None:
+        """best 또는 latest symlink가 가리키는 체크포인트 디렉토리를 반환한다."""
+        ckpt_dir = Path(self.settings.config.storage.checkpoint_dir)
+        for name in ("best", "latest"):
+            link = ckpt_dir / name
+            if link.exists():
+                return link.resolve()
+        return None
+
+    def _export_and_log_model(self, checkpoint_dir: Path) -> None:
+        """체크포인트에서 서빙 가능 모델을 생성하고 MLflow artifact로 등록한다."""
+        import json
+        import shutil
+        import tempfile
+
+        import mlflow
+
+        from mdp.serving.model_loader import reconstruct_model
+
+        try:
+            model, settings = reconstruct_model(checkpoint_dir)
+            recipe = settings.recipe
+
+            # PEFT adapter 병합
+            merged = False
+            if hasattr(model, "merge_and_unload"):
+                logger.info("LoRA adapter 병합 중...")
+                model = model.merge_and_unload()
+                merged = True
+
+            with tempfile.TemporaryDirectory() as tmp:
+                output_dir = Path(tmp)
+
+                # 모델 저장: HF 모델이면 save_pretrained (config.json 생성)
+                if hasattr(model, "save_pretrained"):
+                    model.save_pretrained(output_dir)
+                else:
+                    from safetensors.torch import save_file
+                    target = getattr(model, "module", model)
+                    save_file(target.state_dict(), output_dir / "model.safetensors")
+
+                # tokenizer 저장
+                tokenizer_config = recipe.data.tokenizer
+                if tokenizer_config:
+                    pretrained = tokenizer_config.get("pretrained") if isinstance(tokenizer_config, dict) else getattr(tokenizer_config, "pretrained", None)
+                    if pretrained:
+                        try:
+                            from transformers import AutoTokenizer
+                            AutoTokenizer.from_pretrained(pretrained).save_pretrained(output_dir)
+                        except Exception as e:
+                            logger.warning(f"토크나이저 저장 실패 (무시): {e}")
+
+                # recipe.yaml 복사
+                recipe_src = checkpoint_dir / "recipe.yaml"
+                if recipe_src.exists():
+                    shutil.copy(recipe_src, output_dir / "recipe.yaml")
+
+                # serving_meta.json
+                meta = {
+                    "vllm_available": hasattr(model, "config") and recipe.head is None,
+                    "model_class": type(model).__name__,
+                    "head_replaced": recipe.head is not None,
+                    "adapter_merged": merged,
+                }
+                (output_dir / "serving_meta.json").write_text(json.dumps(meta, indent=2))
+
+                mlflow.log_artifacts(tmp, "model")
+                logger.info("서빙 모델을 MLflow artifact로 등록: model/")
+
+        except Exception as e:
+            logger.warning(f"모델 export/등록 실패 (학습 결과는 유효합니다): {e}")
+
     # ── MLflow ──
 
     def _start_mlflow_run(self) -> Any:
@@ -613,8 +695,9 @@ class Trainer:
 
             if hasattr(mlflow_cfg, "tracking_uri") and mlflow_cfg.tracking_uri:
                 mlflow.set_tracking_uri(mlflow_cfg.tracking_uri)
-            if hasattr(mlflow_cfg, "experiment") and mlflow_cfg.experiment:
-                mlflow.set_experiment(mlflow_cfg.experiment)
+            experiment_name = getattr(mlflow_cfg, "experiment_name", None) or getattr(mlflow_cfg, "experiment", None)
+            if experiment_name:
+                mlflow.set_experiment(experiment_name)
 
             run_kwargs = {}
             if hasattr(mlflow_cfg, "start_run") and isinstance(mlflow_cfg.start_run, dict):
@@ -688,5 +771,14 @@ class Trainer:
 
             config_dict = sanitize_config(self.settings.model_dump())
             mlflow.log_dict(config_dict, "config/settings.json")
+
+            # Best 체크포인트를 artifact로 등록
+            best_ckpt = self._find_best_checkpoint()
+            if best_ckpt:
+                mlflow.log_artifacts(str(best_ckpt), "checkpoint")
+
+                # 서빙 가능 모델 생성 + artifact 등록
+                self._export_and_log_model(best_ckpt)
+
         except Exception as e:
             logger.warning(f"MLflow summary 로깅 실패 (학습 결과는 유효합니다): {e}")

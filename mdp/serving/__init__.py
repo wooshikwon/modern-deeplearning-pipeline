@@ -1,15 +1,22 @@
-"""MDP 서빙 & 추론 레이어 공개 API."""
+"""MDP 서빙 레이어 공개 API."""
 
-from mdp.serving.inference import run_batch_inference
-from mdp.serving.onnx_export import export_to_onnx, run_onnx_inference
-from mdp.serving.torchserve import export_to_mar, start_torchserve
-from mdp.serving.vllm_server import start_vllm_server
+
+def __getattr__(name: str):
+    _imports = {
+        "run_batch_inference": "mdp.serving.inference",
+        "create_app": "mdp.serving.server",
+        "create_handler": "mdp.serving.server",
+    }
+    if name in _imports:
+        import importlib
+
+        module = importlib.import_module(_imports[name])
+        return getattr(module, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
 
 __all__ = [
     "run_batch_inference",
-    "export_to_onnx",
-    "run_onnx_inference",
-    "export_to_mar",
-    "start_torchserve",
-    "start_vllm_server",
+    "create_app",
+    "create_handler",
 ]

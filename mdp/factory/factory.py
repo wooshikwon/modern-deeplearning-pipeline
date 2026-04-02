@@ -51,6 +51,11 @@ class Factory:
 
         # QLoRA 특수 경로: 양자화 + 로딩 + 어댑터가 한 번에
         if adapter_spec is not None and adapter_spec.method == "qlora":
+            if recipe.head is not None:
+                logger.warning(
+                    "QLoRA는 head가 내장된 모델(AutoModelFor* 등)만 지원합니다. "
+                    "Recipe의 head 설정은 적용되지 않습니다."
+                )
             return self._build_qlora_model(model_spec, adapter_spec)
 
         # 일반 경로
@@ -64,8 +69,8 @@ class Factory:
             head = self.resolver.resolve(head_config)
             self._attach_head(model, head, target_attr)
 
-        # 단계 3: adapter 적용 (설정이 있을 때만)
-        if adapter_spec is not None and adapter_spec.method == "lora":
+        # 단계 3: adapter 적용 (설정이 있을 때만, QLoRA는 위에서 처리)
+        if adapter_spec is not None and adapter_spec.method != "qlora":
             from mdp.models.adapters import apply_adapter
 
             adapter_config = adapter_spec.model_dump(exclude_none=True)
@@ -145,9 +150,10 @@ class Factory:
             )
         if not hasattr(model, target_attr):
             children = [name for name, _ in model.named_children()]
-            raise AttributeError(
-                f"모델에 '{target_attr}' 속성이 없습니다. "
-                f"model의 children: {children}."
+            logger.warning(
+                "모델에 '%s' 속성이 없어 새로 추가합니다. "
+                "model의 children: %s",
+                target_attr, children,
             )
         setattr(model, target_attr, head)
         logger.info("Head 교체: model.%s → %s", target_attr, type(head).__name__)

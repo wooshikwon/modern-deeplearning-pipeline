@@ -41,10 +41,14 @@ class DDPStrategy(BaseStrategy):
         import torch.distributed as dist
 
         if dist.get_rank() == 0:
-            torch.save(model.module.state_dict(), path)
+            from safetensors.torch import save_file
+
+            save_file(model.module.state_dict(), path)
 
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
-        state_dict = torch.load(path, map_location="cpu", weights_only=True)
+        from safetensors.torch import load_file
+
+        state_dict = load_file(path)
         model.module.load_state_dict(state_dict)
         return model
 
