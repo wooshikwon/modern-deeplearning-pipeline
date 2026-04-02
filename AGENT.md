@@ -136,11 +136,14 @@ collate 함수는 `fields` roles에서 파생된 label strategy로 자동 선택
 
 | fields roles | label strategy | collator | 대표 task |
 |-------------|---------------|----------|----------|
+| `{chosen: ..., rejected: ...}` | `preference` | `PreferenceCollator` | reward modeling, DPO, pairwise ranking |
 | `{text: ...}` | `causal` | `DataCollatorForLanguageModeling` | text_generation |
 | `{text: ..., target: ...}` | `seq2seq` | `DataCollatorForSeq2Seq` | seq2seq |
 | `{text: ..., label: ...}` | `copy` | `DataCollatorWithPadding` | text_classification |
 | `{text: ..., token_labels: ...}` | `align` | `DataCollatorWithPadding` | token_classification |
 | `{image: ..., label: ...}` | `none` | None (기본 torch collate) | image_classification |
+
+`preference` 전략은 `prompt` (선택), `chosen` (필수), `rejected` (필수) 역할을 사용한다. HF TRL 표준 형태 `{prompt, chosen, rejected}` JSONL과 호환. `prompt` 부분은 labels에서 -100으로 마스킹되어 응답 부분만 loss에 기여한다. chosen과 rejected는 독립적으로 padding된다.
 
 #### data.augmentation 형식
 

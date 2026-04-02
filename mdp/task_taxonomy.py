@@ -80,22 +80,25 @@ TASK_PRESETS: dict[str, TaskPreset] = {
 
 def validate_task_fields(
     task: str, fields: dict[str, str], data_config: dict[str, bool],
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     """task 선언과 fields/config의 일관성을 검증한다.
 
     Returns:
-        경고 메시지 리스트 (빈 리스트이면 문제 없음).
+        (errors, warnings) 튜플.
+        errors: 필수 fields 누락 등 학습 불가 문제.
+        warnings: 필수 config 누락 등 품질 문제.
     """
     preset = TASK_PRESETS.get(task)
     if preset is None:
-        return [f"알 수 없는 task: '{task}'. 지원: {list(TASK_PRESETS.keys())}"]
+        return [f"알 수 없는 task: '{task}'. 지원: {list(TASK_PRESETS.keys())}"], []
 
+    errors = []
     warnings = []
     declared_fields = set(fields.keys()) if fields else set()
 
     for req in preset.required_fields:
         if req not in declared_fields:
-            warnings.append(
+            errors.append(
                 f"task '{task}'에 필요한 fields.{req}가 선언되지 않았습니다."
             )
 
@@ -105,4 +108,4 @@ def validate_task_fields(
                 f"task '{task}'에 필요한 data.{req} 설정이 없습니다."
             )
 
-    return warnings
+    return errors, warnings

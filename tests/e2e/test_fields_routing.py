@@ -164,34 +164,34 @@ class TestTaskValidation:
         }
         assert set(TASK_PRESETS.keys()) == expected
 
-    def test_valid_fields_no_warnings(self) -> None:
-        """Correct fields for text_generation produce no warnings."""
-        warnings = validate_task_fields(
+    def test_valid_fields_no_errors(self) -> None:
+        """Correct fields for text_generation produce no errors."""
+        errors, warnings = validate_task_fields(
             "text_generation",
             {"text": "content"},
             {"tokenizer": True},
         )
-        assert warnings == []
+        assert errors == []
 
-    def test_missing_required_field_warns(self) -> None:
-        """Missing 'text' field for text_generation produces warning."""
-        warnings = validate_task_fields(
+    def test_missing_required_field_errors(self) -> None:
+        """Missing 'text' field for text_generation produces error."""
+        errors, warnings = validate_task_fields(
             "text_generation",
             {"image": "path"},
             {"tokenizer": True},
         )
-        assert len(warnings) > 0
-        assert any("text" in w for w in warnings)
+        assert len(errors) > 0
+        assert any("text" in e for e in errors)
 
-    def test_unknown_task_warns(self) -> None:
-        """Unknown task produces warning."""
-        warnings = validate_task_fields(
+    def test_unknown_task_errors(self) -> None:
+        """Unknown task produces error."""
+        errors, warnings = validate_task_fields(
             "nonexistent_task",
             {"text": "content"},
             {"tokenizer": True},
         )
-        assert len(warnings) == 1
-        assert "알 수 없는 task" in warnings[0]
+        assert len(errors) == 1
+        assert "알 수 없는 task" in errors[0]
 
 
 # ---------------------------------------------------------------------------

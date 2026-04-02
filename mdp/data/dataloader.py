@@ -16,6 +16,7 @@ from mdp.data.loader import load_data
 from mdp.data.tokenizer import (
     LABEL_CAUSAL,
     LABEL_COPY,
+    LABEL_PREFERENCE,
     LABEL_SEQ2SEQ,
     build_tokenizer,
     derive_label_strategy,
@@ -33,25 +34,33 @@ def _select_collator(
     if tokenizer_config is None:
         return None
 
-    from transformers import (
-        AutoTokenizer,
-        DataCollatorForLanguageModeling,
-        DataCollatorWithPadding,
-    )
+    from transformers import AutoTokenizer
 
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["pretrained"])
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    if label_strategy == LABEL_PREFERENCE:
+        from mdp.data.collators import PreferenceCollator
+
+        max_length = tokenizer_config.get("max_length", 2048)
+        return PreferenceCollator(tokenizer=tokenizer, max_length=max_length)
+
     if label_strategy == LABEL_CAUSAL:
+        from transformers import DataCollatorForLanguageModeling
+
         return DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
     elif label_strategy == LABEL_SEQ2SEQ:
         from transformers import DataCollatorForSeq2Seq
 
         return DataCollatorForSeq2Seq(tokenizer=tokenizer)
     elif label_strategy == LABEL_COPY:
+        from transformers import DataCollatorWithPadding
+
         return DataCollatorWithPadding(tokenizer=tokenizer)
     else:
+        from transformers import DataCollatorWithPadding
+
         return DataCollatorWithPadding(tokenizer=tokenizer)
 
 

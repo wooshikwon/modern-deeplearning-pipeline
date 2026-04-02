@@ -149,5 +149,6 @@ class BusinessValidator:
             "tokenizer": data.tokenizer is not None,
             "augmentation": data.augmentation is not None,
         }
-        warnings = validate_task_fields(recipe.task, data.fields, data_config)
+        errors, warnings = validate_task_fields(recipe.task, data.fields, data_config)
+        result.errors.extend(errors)
         result.warnings.extend(warnings)

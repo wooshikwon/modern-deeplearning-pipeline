@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 # ── label strategy 상수 ──
 
+LABEL_PREFERENCE = "preference"  # pairwise ranking (chosen vs rejected)
 LABEL_CAUSAL = "causal"  # text_generation (multimodal 포함)
 LABEL_SEQ2SEQ = "seq2seq"  # seq2seq (text → target)
 LABEL_COPY = "copy"  # text_classification (labels 그대로 통과)
@@ -30,6 +31,10 @@ def derive_label_strategy(fields: dict[str, str] | None) -> str:
         return LABEL_NONE
 
     roles = set(fields.keys())
+
+    # chosen + rejected → preference (pairwise ranking, 최우선)
+    if "chosen" in roles and "rejected" in roles:
+        return LABEL_PREFERENCE
 
     # target 역할이 있으면 seq2seq
     if "target" in roles:
@@ -77,6 +82,10 @@ def build_tokenizer(
         ``tokenize_fn(examples: dict) -> dict`` 또는 ``None``.
     """
     if config is None:
+        return None
+
+    # preference 전략은 collator가 tokenize를 직접 수행
+    if label_strategy == LABEL_PREFERENCE:
         return None
 
     from transformers import AutoTokenizer  # lazy import
