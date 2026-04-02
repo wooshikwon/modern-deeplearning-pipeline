@@ -73,7 +73,11 @@ class Trainer:
         if precision == "fp16":
             self.amp_enabled = True
             self.amp_dtype = torch.float16
-            self.scaler = GradScaler(scaler_device, enabled=True)
+            if self.device.type == "mps":
+                logger.warning("MPS에서 fp16은 GradScaler를 지원하지 않습니다. bf16을 권장합니다.")
+                self.scaler = GradScaler(scaler_device, enabled=False)
+            else:
+                self.scaler = GradScaler(scaler_device, enabled=True)
         elif precision == "bf16":
             self.amp_enabled = True
             self.amp_dtype = torch.bfloat16
@@ -224,6 +228,7 @@ class Trainer:
             "global_step": self.global_step,
             "strategy": self.strategy,
             "recipe_dict": self._recipe_dict,
+            "scaler": self.scaler,
         }
         kwargs.update(extra_kwargs)
         for cb in self.callbacks:
@@ -243,9 +248,9 @@ class Trainer:
 
     def train(self) -> dict[str, Any]:
         """학습을 실행하고 최종 메트릭을 반환한다."""
-        # Strategy setup (DDP/FSDP wrapping)
+        # Strategy setup (DDP/FSDP/DeepSpeed wrapping)
         if self.strategy is not None:
-            self.model = self.strategy.setup(self.model, self.device)
+            self.model = self.strategy.setup(self.model, self.device, optimizer=self.optimizer)
         else:
             self.model = self.model.to(self.device)
 
@@ -283,6 +288,11 @@ class Trainer:
                     if self.max_steps and self.global_step >= self.max_steps:
                         stopped_reason = "max_steps_reached"
                         break
+
+                    # 분산 학습: 매 에폭 셔플 순서 갱신
+                    sampler = getattr(self.train_loader, "sampler", None)
+                    if sampler is not None and hasattr(sampler, "set_epoch"):
+                        sampler.set_epoch(epoch)
 
                     self._fire("on_epoch_start", epoch=epoch)
                     train_loss = self._train_one_epoch(epoch)
@@ -388,7 +398,7 @@ class Trainer:
                     )
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
 
                 if (
                     self.scheduler is not None
@@ -566,6 +576,13 @@ class Trainer:
                 torch.load(sched_path, map_location="cpu", weights_only=True)
             )
 
+        # GradScaler
+        scaler_path = ckpt_path / "scaler.pt"
+        if scaler_path.exists() and self.scaler.is_enabled():
+            self.scaler.load_state_dict(
+                torch.load(scaler_path, map_location="cpu", weights_only=True)
+            )
+
         # Trainer state
         state_path = ckpt_path / "trainer_state.json"
         if state_path.exists():
@@ -620,35 +637,36 @@ class Trainer:
         return None
 
     def _export_and_log_model(self, checkpoint_dir: Path) -> None:
-        """체크포인트에서 서빙 가능 모델을 생성하고 MLflow artifact로 등록한다."""
+        """체크포인트에서 모델 artifact를 MLflow에 등록한다.
+
+        LoRA 학습이면 adapter만, full finetuning이면 전체 모델을 저장한다.
+        merge는 수행하지 않는다 — merge는 mdp export / mdp serve 시점에 on-demand.
+        """
         import json
         import shutil
         import tempfile
 
         import mlflow
 
-        from mdp.serving.model_loader import reconstruct_model
-
         try:
-            model, settings = reconstruct_model(checkpoint_dir)
-            recipe = settings.recipe
-
-            # PEFT adapter 병합
-            merged = False
-            if hasattr(model, "merge_and_unload"):
-                logger.info("LoRA adapter 병합 중...")
-                model = model.merge_and_unload()
-                merged = True
+            recipe = self.settings.recipe
+            model = self.model
+            # DDP/FSDP에서 원본 모델 추출
+            target = getattr(model, "module", model)
 
             with tempfile.TemporaryDirectory() as tmp:
                 output_dir = Path(tmp)
 
-                # 모델 저장: HF 모델이면 save_pretrained (config.json 생성)
-                if hasattr(model, "save_pretrained"):
-                    model.save_pretrained(output_dir)
+                # 모델 가중치: PEFT면 adapter만, 아니면 전체
+                has_adapter = hasattr(target, "save_pretrained") and hasattr(target, "peft_config")
+                if has_adapter:
+                    # adapter만 저장 (~50MB)
+                    target.save_pretrained(output_dir)
+                elif hasattr(target, "save_pretrained"):
+                    # HF 모델 전체 저장
+                    target.save_pretrained(output_dir)
                 else:
                     from safetensors.torch import save_file
-                    target = getattr(model, "module", model)
                     save_file(target.state_dict(), output_dir / "model.safetensors")
 
                 # tokenizer 저장
@@ -669,18 +687,17 @@ class Trainer:
 
                 # serving_meta.json
                 meta = {
-                    "vllm_available": hasattr(model, "config") and recipe.head is None,
-                    "model_class": type(model).__name__,
+                    "model_class": type(target).__name__,
                     "head_replaced": recipe.head is not None,
-                    "adapter_merged": merged,
+                    "has_adapter": has_adapter,
                 }
                 (output_dir / "serving_meta.json").write_text(json.dumps(meta, indent=2))
 
                 mlflow.log_artifacts(tmp, "model")
-                logger.info("서빙 모델을 MLflow artifact로 등록: model/")
+                logger.info("모델 artifact를 MLflow에 등록: model/")
 
         except Exception as e:
-            logger.warning(f"모델 export/등록 실패 (학습 결과는 유효합니다): {e}")
+            logger.warning(f"모델 artifact 등록 실패 (학습 결과는 유효합니다): {e}")
 
     # ── MLflow ──
 

@@ -50,11 +50,15 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
         logger.warning("체크포인트에 모델 가중치 파일이 없습니다: %s", checkpoint_dir)
 
 
-def reconstruct_model(artifact_dir: Path) -> tuple[Any, Any]:
+def reconstruct_model(artifact_dir: Path, merge: bool = False) -> tuple[Any, Any]:
     """artifact 디렉토리의 recipe.yaml로 모델을 재구성하고 가중치를 로드한다.
 
     model/ artifact와 checkpoint/ artifact 모두 recipe.yaml을 가지고 있으므로
     양쪽에서 사용 가능하다.
+
+    Args:
+        artifact_dir: artifact 또는 checkpoint 디렉토리.
+        merge: True이면 adapter를 base model에 merge한다 (export/serve용).
 
     Returns:
         (model, settings) 튜플.
@@ -65,13 +69,16 @@ def reconstruct_model(artifact_dir: Path) -> tuple[Any, Any]:
     settings = SettingsFactory().from_artifact(str(artifact_dir))
     model = Factory(settings).create_model()
 
-    # model/ artifact: merge 완료 safetensors
-    # checkpoint/ artifact: adapter/safetensors/pt 분기
+    # adapter_config.json이 있으면 PEFT adapter artifact
+    adapter_config_path = artifact_dir / "adapter_config.json"
+    adapter_safetensors = artifact_dir / "adapter_model.safetensors"
     safetensors_path = artifact_dir / "model.safetensors"
-    adapter_path = artifact_dir / "adapter_model.safetensors"
 
-    if adapter_path.exists():
+    if adapter_config_path.exists() or adapter_safetensors.exists():
         load_checkpoint_weights(model, artifact_dir)
+        if merge and hasattr(model, "merge_and_unload"):
+            logger.info("LoRA adapter 병합 중...")
+            model = model.merge_and_unload()
     elif safetensors_path.exists():
         from safetensors.torch import load_file
 

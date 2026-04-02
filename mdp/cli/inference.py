@@ -96,19 +96,17 @@ def _create_metrics(
 
 
 def run_inference(
-    run_id: str,
+    run_id: str | None,
+    model_dir: str | None,
     data_source: str,
     cli_fields: list[str] | None = None,
     metric_names: list[str] | None = None,
     output_format: str = "parquet",
     output_dir: str = "./output",
 ) -> None:
-    """MLflow run_id 기반 배치 추론 + (선택) 평가.
+    """배치 추론 + (선택) 평가.
 
-    1. MLflow에서 checkpoint artifact 다운로드
-    2. recipe.yaml로 모델 재구성 + 가중치 로드
-    3. 데이터 로드 + 인터페이스 검증
-    4. 배치 추론 + (선택) metric 평가
+    --run-id 또는 --model-dir 중 하나를 지정.
     """
     from mdp.cli.schemas import InferenceResult
     from mdp.data.dataloader import _load_source, _rename_columns
@@ -119,16 +117,38 @@ def run_inference(
     from mdp.serving.model_loader import reconstruct_model
     from torch.utils.data import DataLoader
 
+    if run_id and model_dir:
+        msg = "--run-id와 --model-dir는 동시에 지정할 수 없습니다."
+        if is_json_mode():
+            emit_result(build_error(command="inference", error_type="ValidationError", message=msg))
+        else:
+            typer.echo(f"[error] {msg}", err=True)
+        raise typer.Exit(code=1)
+
+    if not run_id and not model_dir:
+        msg = "--run-id 또는 --model-dir 중 하나를 지정하세요."
+        if is_json_mode():
+            emit_result(build_error(command="inference", error_type="ValidationError", message=msg))
+        else:
+            typer.echo(f"[error] {msg}", err=True)
+        raise typer.Exit(code=1)
+
     if not is_json_mode():
-        typer.echo(f"MLflow run: {run_id}")
+        if run_id:
+            typer.echo(f"MLflow run: {run_id}")
+        else:
+            typer.echo(f"모델 디렉토리: {model_dir}")
         typer.echo(f"데이터: {data_source}")
 
     try:
-        # 1. MLflow에서 model artifact 다운로드
-        model_path = _download_model(run_id)
+        # 1. 모델 소스 결정
+        if run_id:
+            model_path = _download_model(run_id)
+        else:
+            model_path = Path(model_dir)
 
-        # 2. 모델 재구성 + 가중치 로드
-        model, settings = reconstruct_model(model_path)
+        # 2. 모델 재구성 + 가중치 로드 (adapter면 merge)
+        model, settings = reconstruct_model(model_path, merge=True)
 
         # 3. 데이터 로드 + 필드 검증
         recipe_data = settings.recipe.data

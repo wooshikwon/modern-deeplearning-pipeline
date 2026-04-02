@@ -1,4 +1,4 @@
-"""mdp serve -- MLflow run_id 기반 MDP 네이티브 서빙."""
+"""mdp serve -- 모델 서빙 REST API 서버."""
 
 from __future__ import annotations
 
@@ -12,8 +12,17 @@ from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
 logger = logging.getLogger(__name__)
 
 
-def run_serve(run_id: str, port: int, host: str = "0.0.0.0") -> None:
-    """MLflow run의 model artifact를 FastAPI로 서빙한다."""
+def run_serve(
+    run_id: str | None = None,
+    model_dir: str | None = None,
+    port: int = 8000,
+    host: str = "0.0.0.0",
+) -> None:
+    """모델을 REST API로 서빙한다.
+
+    --run-id: MLflow run에서 모델 로딩 (adapter면 on-demand merge).
+    --model-dir: 로컬 디렉토리에서 직접 로딩 (mdp export 결과).
+    """
     try:
         import uvicorn
     except ImportError:
@@ -23,17 +32,16 @@ def run_serve(run_id: str, port: int, host: str = "0.0.0.0") -> None:
         )
         raise typer.Exit(code=1)
 
-    import mlflow
+    if run_id and model_dir:
+        msg = "--run-id와 --model-dir는 동시에 지정할 수 없습니다."
+        if is_json_mode():
+            emit_result(build_error(command="serve", error_type="ValidationError", message=msg))
+        else:
+            typer.echo(f"[error] {msg}", err=True)
+        raise typer.Exit(code=1)
 
-    if not is_json_mode():
-        typer.echo(f"MLflow run: {run_id}")
-
-    try:
-        model_dir = Path(mlflow.artifacts.download_artifacts(
-            run_id=run_id, artifact_path="model",
-        ))
-    except Exception as e:
-        msg = f"MLflow run '{run_id}'에서 model artifact를 찾을 수 없습니다: {e}"
+    if not run_id and not model_dir:
+        msg = "--run-id 또는 --model-dir 중 하나를 지정하세요."
         if is_json_mode():
             emit_result(build_error(command="serve", error_type="ValidationError", message=msg))
         else:
@@ -41,17 +49,27 @@ def run_serve(run_id: str, port: int, host: str = "0.0.0.0") -> None:
         raise typer.Exit(code=1)
 
     try:
+        # 모델 디렉토리 결정
+        if run_id:
+            import mlflow
+
+            if not is_json_mode():
+                typer.echo(f"MLflow run: {run_id}")
+            source_dir = Path(mlflow.artifacts.download_artifacts(
+                run_id=run_id, artifact_path="model",
+            ))
+        else:
+            source_dir = Path(model_dir)
+
         from mdp.serving.server import create_handler, create_app
-
-        handler = create_handler(model_dir)
-        import yaml
-        recipe_data = yaml.safe_load((model_dir / "recipe.yaml").read_text())
-
-        # recipe 객체를 Settings에서 가져오기 위해 reconstruct
         from mdp.serving.model_loader import reconstruct_model
-        _, settings = reconstruct_model(model_dir)
+
+        # adapter면 merge, full이면 그대로
+        model, settings = reconstruct_model(source_dir, merge=True)
         recipe = settings.recipe
 
+        model.eval()
+        handler = create_handler.__wrapped__(model, recipe) if hasattr(create_handler, "__wrapped__") else _build_handler(model, source_dir, recipe)
         app = create_app(handler, recipe)
 
         if not is_json_mode():
@@ -63,7 +81,7 @@ def run_serve(run_id: str, port: int, host: str = "0.0.0.0") -> None:
         if is_json_mode():
             emit_result(build_result(
                 command="serve", status="starting",
-                run_id=run_id, port=port,
+                port=port,
             ))
 
         uvicorn.run(app, host=host, port=port)
@@ -77,3 +95,17 @@ def run_serve(run_id: str, port: int, host: str = "0.0.0.0") -> None:
         typer.echo(f"[error] {e}", err=True)
         logger.exception("서빙 실패 상세")
         raise typer.Exit(code=1)
+
+
+def _build_handler(model, source_dir: Path, recipe):
+    """model + recipe에서 handler를 직접 생성한다."""
+    from mdp.serving.handlers import StreamingHandler, BatchHandler
+    from mdp.serving.server import _load_tokenizer, _load_transform
+
+    tokenizer = _load_tokenizer(source_dir, recipe)
+    transform = _load_transform(recipe)
+
+    if recipe.task in ("text_generation", "seq2seq"):
+        return StreamingHandler(model, tokenizer, recipe)
+    else:
+        return BatchHandler(model, tokenizer, transform, recipe)
