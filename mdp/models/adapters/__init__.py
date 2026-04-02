@@ -33,11 +33,22 @@ def apply_adapter(
     method = adapter_config.get("method", "").lower()
     config = {k: v for k, v in adapter_config.items() if k != "method"}
 
-    # alpha → lora_alpha 매핑
-    if "alpha" in config:
-        config["lora_alpha"] = config.pop("alpha")
-    if "dropout" in config:
-        config["lora_dropout"] = config.pop("dropout")
+    # quantization dict 플래트닝 (QLoRA)
+    if "quantization" in config:
+        quant = config.pop("quantization")
+        if isinstance(quant, dict):
+            for qk, qv in quant.items():
+                config.setdefault(qk, qv)
+
+    # alpha → lora_alpha 매핑 (lora/qlora 전용)
+    if method in ("lora", "qlora"):
+        if "alpha" in config:
+            config["lora_alpha"] = config.pop("alpha")
+        if "dropout" in config:
+            config["lora_dropout"] = config.pop("dropout")
+    else:
+        # prefix_tuning 등에는 lora 키 매핑을 적용하지 않음
+        pass
 
     if method == "lora":
         from mdp.models.adapters.lora import apply_lora
@@ -54,6 +65,9 @@ def apply_adapter(
         # r → num_virtual_tokens 매핑 (adapter 스키마 통일)
         if "r" in config:
             config["num_virtual_tokens"] = config.pop("r")
+        # lora 전용 키 제거
+        for k in ("dropout", "target_modules", "modules_to_save", "alpha"):
+            config.pop(k, None)
         return apply_prefix_tuning(model, **config)
     else:
         raise ValueError(f"지원하지 않는 어댑터 method: {method!r}")

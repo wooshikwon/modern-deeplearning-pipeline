@@ -1,0 +1,13 @@
+environment:
+  name: local
+
+compute:
+  target: local
+  gpus: 0
+
+storage:
+  checkpoint_dir: ./checkpoints/e2e-test
+  output_dir: ./outputs/e2e-test
+
+job:
+  resume: disabled

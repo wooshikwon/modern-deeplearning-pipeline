@@ -138,3 +138,90 @@ class TestResume:
         assert result2["total_epochs"] == 2, (
             f"Expected 2 additional epochs, got {result2['total_epochs']}"
         )
+
+    def test_resume_restores_optimizer_state(self, tmp_path) -> None:
+        """Resume 후 optimizer learning rate가 저장 시점과 일치하는지."""
+        ckpt_dir = tmp_path / "checkpoints"
+
+        # Phase 1: CosineAnnealingLR로 3 에폭 학습 (lr이 감소)
+        settings1 = _make_settings(epochs=3, checkpoint_dir=str(ckpt_dir))
+        settings1.recipe.scheduler = {
+            "_component_": "torch.optim.lr_scheduler.CosineAnnealingLR",
+            "T_max": 5,
+            "interval": "epoch",
+        }
+        model1 = TinyVisionModel(num_classes=2, hidden_dim=16)
+
+        batches = make_vision_batches(3, 4, 2, 8)
+        val_batches = make_vision_batches(2, 4, 2, 8, seed=99)
+
+        trainer1 = Trainer(
+            settings=settings1, model=model1,
+            train_loader=ListDataLoader(batches),
+            val_loader=ListDataLoader(val_batches),
+        )
+        trainer1.device = torch.device("cpu")
+        trainer1.amp_enabled = False
+        trainer1.callbacks.append(
+            ModelCheckpoint(dirpath=ckpt_dir, monitor="val_loss", mode="min")
+        )
+
+        trainer1.train()
+        lr_after_phase1 = trainer1.optimizer.param_groups[0]["lr"]
+
+        # Phase 2: Resume — optimizer lr이 복원되는지
+        settings2 = _make_settings(epochs=5, resume="auto", checkpoint_dir=str(ckpt_dir))
+        settings2.recipe.scheduler = settings1.recipe.scheduler
+        model2 = TinyVisionModel(num_classes=2, hidden_dim=16)
+
+        trainer2 = Trainer(
+            settings=settings2, model=model2,
+            train_loader=ListDataLoader(batches),
+            val_loader=ListDataLoader(val_batches),
+        )
+        trainer2.device = torch.device("cpu")
+        trainer2.amp_enabled = False
+
+        # resume 후 lr이 phase1 종료 시점과 유사해야 함
+        lr_after_resume = trainer2.optimizer.param_groups[0]["lr"]
+        assert abs(lr_after_resume - lr_after_phase1) < 0.01, (
+            f"LR mismatch: phase1={lr_after_phase1:.6f}, resume={lr_after_resume:.6f}"
+        )
+
+    def test_resume_model_pt_fallback(self, tmp_path) -> None:
+        """safetensors 없이 model.pt만 있을 때 resume 성공."""
+        ckpt_dir = tmp_path / "checkpoints"
+        ckpt_step_dir = ckpt_dir / "checkpoint-3"
+        ckpt_step_dir.mkdir(parents=True)
+
+        # model.pt로 저장 (safetensors 없이)
+        model_orig = TinyVisionModel(num_classes=2, hidden_dim=16)
+        torch.save(model_orig.state_dict(), ckpt_step_dir / "model.pt")
+        torch.save(
+            torch.optim.AdamW(model_orig.parameters(), lr=1e-3).state_dict(),
+            ckpt_step_dir / "optimizer.pt",
+        )
+        (ckpt_step_dir / "trainer_state.json").write_text(
+            json.dumps({"epoch": 1, "global_step": 3})
+        )
+
+        # latest 심링크 (절대 경로로 생성하여 resolve 호환)
+        latest = ckpt_dir / "latest"
+        latest.symlink_to(ckpt_step_dir)
+
+        # Resume
+        settings = _make_settings(epochs=3, resume="auto", checkpoint_dir=str(ckpt_dir))
+        model_new = TinyVisionModel(num_classes=2, hidden_dim=16)
+
+        trainer = Trainer(
+            settings=settings, model=model_new,
+            train_loader=ListDataLoader(make_vision_batches(3, 4, 2, 8)),
+        )
+        trainer.device = torch.device("cpu")
+        trainer.amp_enabled = False
+
+        # train() 호출 시 _maybe_resume가 실행되어 epoch/step 복원
+        result = trainer.train()
+        # epoch 1에서 시작하여 3까지 = 2 에폭 학습
+        assert result["total_epochs"] == 2
+        assert trainer.global_step > 3

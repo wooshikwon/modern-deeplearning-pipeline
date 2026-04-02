@@ -1,0 +1,34 @@
+name: tiny-vision-e2e
+task: image_classification
+
+model:
+  class_path: tests.e2e.models.TinyVisionModel
+  init_args:
+    num_classes: 2
+    hidden_dim: 16
+
+data:
+  source: /tmp/fake
+  fields:
+    image: pixel_values
+    label: labels
+  dataloader:
+    batch_size: 4
+    num_workers: 0
+
+training:
+  epochs: 2
+  precision: fp32
+
+optimizer:
+  _component_: AdamW
+  lr: 0.001
+
+callbacks:
+  - _component_: EarlyStopping
+    monitor: val_loss
+    patience: 10
+
+metadata:
+  author: test
+  description: "Tiny vision model for pipeline E2E test"
