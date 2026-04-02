@@ -60,23 +60,33 @@ async def _parse_request(request: Any, fields: dict, task: str) -> dict:
     return body
 
 
-def create_handler(model_dir: Path) -> Any:
-    """model/ artifact에서 task에 맞는 handler를 생성한다."""
-    from mdp.serving.model_loader import reconstruct_model
+def create_handler(model: Any, recipe: Any, model_dir: Path | None = None) -> Any:
+    """model + recipe에서 task에 맞는 handler를 생성한다.
+
+    Args:
+        model: eval 모드의 모델. 호출자가 reconstruct + merge를 완료한 상태.
+        recipe: Settings.recipe 객체.
+        model_dir: tokenizer 파일이 있는 디렉토리. None이면 recipe에서 fallback.
+    """
     from mdp.serving.handlers import StreamingHandler, BatchHandler
 
-    model, settings = reconstruct_model(model_dir)
-    recipe = settings.recipe
-
-    tokenizer = _load_tokenizer(model_dir, recipe)
+    tokenizer = _load_tokenizer(model_dir, recipe) if model_dir else _load_tokenizer_from_recipe(recipe)
     transform = _load_transform(recipe)
-
-    model.eval()
 
     if recipe.task in ("text_generation", "seq2seq"):
         return StreamingHandler(model, tokenizer, recipe)
     else:
         return BatchHandler(model, tokenizer, transform, recipe)
+
+
+def _load_tokenizer_from_recipe(recipe: Any) -> Any:
+    """recipe에서 tokenizer를 로드한다."""
+    if recipe.data.tokenizer:
+        pretrained = recipe.data.tokenizer.get("pretrained") if isinstance(recipe.data.tokenizer, dict) else getattr(recipe.data.tokenizer, "pretrained", None)
+        if pretrained:
+            from transformers import AutoTokenizer
+            return AutoTokenizer.from_pretrained(pretrained)
+    return None
 
 
 def _load_tokenizer(model_dir: Path, recipe: Any) -> Any:

@@ -69,7 +69,7 @@ def run_serve(
         recipe = settings.recipe
 
         model.eval()
-        handler = create_handler.__wrapped__(model, recipe) if hasattr(create_handler, "__wrapped__") else _build_handler(model, source_dir, recipe)
+        handler = create_handler(model, recipe, source_dir)
         app = create_app(handler, recipe)
 
         if not is_json_mode():
@@ -97,15 +97,3 @@ def run_serve(
         raise typer.Exit(code=1)
 
 
-def _build_handler(model, source_dir: Path, recipe):
-    """model + recipe에서 handler를 직접 생성한다."""
-    from mdp.serving.handlers import StreamingHandler, BatchHandler
-    from mdp.serving.server import _load_tokenizer, _load_transform
-
-    tokenizer = _load_tokenizer(source_dir, recipe)
-    transform = _load_transform(recipe)
-
-    if recipe.task in ("text_generation", "seq2seq"):
-        return StreamingHandler(model, tokenizer, recipe)
-    else:
-        return BatchHandler(model, tokenizer, transform, recipe)
