@@ -125,14 +125,32 @@ class MemoryEstimator:
     def _estimate_param_count(class_path: str) -> int:
         """class_path에서 모델 크기를 추정한다.
 
-        모델명에 숫자가 포함되어 있으면 파라미터 수로 해석한다.
-        (예: ``llama-7b`` → 7B, ``gpt2-small`` → 124M)
+        1. HuggingFace AutoConfig로 정확한 추정 시도
+        2. 모델명의 숫자 패턴으로 추정 (예: ``llama-7b`` → 7B)
+        3. 알려진 모델 사전 조회
+        4. 기본값 100M
         """
         import re
 
+        # 1. AutoConfig로 정확한 추정 시도
+        try:
+            from transformers import AutoConfig
+
+            config = AutoConfig.from_pretrained(class_path)
+            h = getattr(config, "hidden_size", None)
+            n = getattr(config, "num_hidden_layers", None)
+            v = getattr(config, "vocab_size", None)
+            if h and n:
+                param_est = 12 * n * h * h
+                if v:
+                    param_est += v * h
+                return param_est
+        except Exception:
+            pass
+
         name_lower = class_path.lower()
 
-        # 패턴: 숫자 + b (billion)
+        # 2. 패턴: 숫자 + b (billion)
         match = re.search(r"(\d+\.?\d*)b", name_lower)
         if match:
             return int(float(match.group(1)) * 1e9)
@@ -142,7 +160,7 @@ class MemoryEstimator:
         if match:
             return int(float(match.group(1)) * 1e6)
 
-        # 알려진 모델 크기 (fallback)
+        # 3. 알려진 모델 크기 (fallback)
         known_sizes: dict[str, int] = {
             "gpt2": 124_000_000,
             "bert-base": 110_000_000,
@@ -156,7 +174,7 @@ class MemoryEstimator:
             if pattern in name_lower:
                 return size
 
-        # 기본값: 100M
+        # 4. 기본값: 100M
         logger.warning(
             "모델 크기를 추정할 수 없어 기본값 100M 사용: %s", class_path
         )

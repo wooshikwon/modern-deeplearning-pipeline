@@ -70,7 +70,7 @@ def create_handler(model: Any, recipe: Any, model_dir: Path | None = None) -> An
     """
     from mdp.serving.handlers import StreamingHandler, BatchHandler
 
-    tokenizer = _load_tokenizer(model_dir, recipe) if model_dir else _load_tokenizer_from_recipe(recipe)
+    tokenizer = _load_tokenizer(model_dir, recipe)
     transform = _load_transform(recipe)
 
     if recipe.task in ("text_generation", "seq2seq"):
@@ -79,27 +79,23 @@ def create_handler(model: Any, recipe: Any, model_dir: Path | None = None) -> An
         return BatchHandler(model, tokenizer, transform, recipe)
 
 
-def _load_tokenizer_from_recipe(recipe: Any) -> Any:
-    """recipe에서 tokenizer를 로드한다."""
-    if recipe.data.tokenizer:
-        pretrained = recipe.data.tokenizer.get("pretrained") if isinstance(recipe.data.tokenizer, dict) else getattr(recipe.data.tokenizer, "pretrained", None)
-        if pretrained:
+def _load_tokenizer(model_dir: Path | None, recipe: Any) -> Any:
+    """tokenizer를 로드한다. model_dir 우선, 없으면 recipe fallback."""
+    # 1. model_dir에서 시도
+    if model_dir is not None:
+        tokenizer_json = model_dir / "tokenizer.json"
+        tokenizer_config = model_dir / "tokenizer_config.json"
+        if tokenizer_json.exists() or tokenizer_config.exists():
             from transformers import AutoTokenizer
-            return AutoTokenizer.from_pretrained(pretrained)
-    return None
+            return AutoTokenizer.from_pretrained(str(model_dir))
 
-
-def _load_tokenizer(model_dir: Path, recipe: Any) -> Any:
-    """model_dir에서 tokenizer를 로드한다. 없으면 recipe에서 fallback."""
-    tokenizer_json = model_dir / "tokenizer.json"
-    tokenizer_config = model_dir / "tokenizer_config.json"
-
-    if tokenizer_json.exists() or tokenizer_config.exists():
-        from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(str(model_dir))
-
+    # 2. recipe에서 fallback
     if recipe.data.tokenizer:
-        pretrained = recipe.data.tokenizer.get("pretrained") if isinstance(recipe.data.tokenizer, dict) else getattr(recipe.data.tokenizer, "pretrained", None)
+        pretrained = (
+            recipe.data.tokenizer.get("pretrained")
+            if isinstance(recipe.data.tokenizer, dict)
+            else getattr(recipe.data.tokenizer, "pretrained", None)
+        )
         if pretrained:
             from transformers import AutoTokenizer
             return AutoTokenizer.from_pretrained(pretrained)

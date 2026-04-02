@@ -53,7 +53,4 @@ def apply_lora(
 
     model = get_peft_model(model, config)
 
-    from mdp.models.adapters import log_trainable_params
-    log_trainable_params(model)
-
     return model

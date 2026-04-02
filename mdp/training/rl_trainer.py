@@ -118,8 +118,14 @@ class RLTrainer:
         # Callbacks
         self.callbacks = self._create_callbacks(recipe.callbacks)
 
+        # Validation
+        self.val_check_interval = getattr(training, "val_check_interval", 0)
+        if isinstance(self.val_check_interval, float) and self.val_check_interval < 1.0:
+            self.val_check_interval = 0  # RL은 step 기반만 지원
+
         # State
         self.global_step = 0
+        self.last_metrics: dict[str, float] = {}
 
     @staticmethod
     def _detect_device() -> torch.device:
@@ -199,6 +205,44 @@ class RLTrainer:
 
     def _should_stop(self) -> bool:
         return any(getattr(cb, "should_stop", False) for cb in self.callbacks)
+
+    def _run_rl_validation(self) -> dict[str, float]:
+        """validation prompt에 대해 generation + reward scoring."""
+        if self.val_loader is None or "reward" not in self.frozen:
+            return {}
+
+        self.policy.eval()
+        total_reward = 0.0
+        count = 0
+
+        with torch.no_grad():
+            for batch in self.val_loader:
+                batch = self._move_to_device(batch)
+                prompt_ids = batch["input_ids"]
+                prompt_mask = batch.get("attention_mask")
+
+                gen_model = getattr(self.policy, "module", self.policy)
+                generated_ids = gen_model.generate(
+                    input_ids=prompt_ids,
+                    attention_mask=prompt_mask,
+                    **self._generation_kwargs,
+                )
+
+                reward_out = self._forward_model(
+                    self.frozen["reward"],
+                    {"input_ids": generated_ids},
+                    role="reward",
+                )
+                rewards = self._compute_rewards(
+                    {"reward": reward_out}, generated_ids,
+                    (generated_ids != getattr(getattr(gen_model, "config", None), "pad_token_id", -1)).long(),
+                )
+                total_reward += rewards.sum().item()
+                count += rewards.shape[0]
+
+        self.policy.train()
+        mean_reward = total_reward / max(count, 1)
+        return {"val_mean_reward": mean_reward}
 
     # ── MLflow ──
 
@@ -421,19 +465,12 @@ class RLTrainer:
         if self.strategy is not None:
             trainable_names = set(self.trainable.keys())
             all_models = {**self.trainable, **self.frozen}
-            if hasattr(self.strategy, "setup_models"):
-                wrapped = self.strategy.setup_models(all_models, self.device, trainable_names)
-                for name in self.trainable:
-                    self.trainable[name] = wrapped[name]
-                for name in self.frozen:
-                    self.frozen[name] = wrapped[name]
-                self.policy = self.trainable["policy"]
-            else:
-                for name, model in self.trainable.items():
-                    self.trainable[name] = self.strategy.setup(model, self.device)
-                self.policy = self.trainable["policy"]
-                for name, model in self.frozen.items():
-                    self.frozen[name] = model.to(self.device)
+            wrapped = self.strategy.setup_models(all_models, self.device, trainable_names)
+            for name in self.trainable:
+                self.trainable[name] = wrapped[name]
+            for name in self.frozen:
+                self.frozen[name] = wrapped[name]
+            self.policy = self.trainable["policy"]
         else:
             for name in self.trainable:
                 self.trainable[name] = self.trainable[name].to(self.device)
@@ -505,6 +542,17 @@ class RLTrainer:
                             optimizer=self.optimizers["policy"],
                             scheduler=self.schedulers.get("policy"),
                         )
+
+                    # RL validation
+                    if (
+                        self.val_loader is not None
+                        and self.val_check_interval > 0
+                        and self.global_step > 0
+                        and self.global_step % self.val_check_interval == 0
+                    ):
+                        val_metrics = self._run_rl_validation()
+                        self._fire("on_validation_end", metrics=val_metrics)
+                        self.last_metrics.update(val_metrics)
 
             finally:
                 if self.strategy is not None:
@@ -698,21 +746,14 @@ class RLTrainer:
         """
         result = {}
 
-        def _extract_logits(out):
-            if hasattr(out, "logits"):
-                return out.logits
-            if isinstance(out, dict):
-                return out.get("logits", out.get("output"))
-            return out
-
         # preference 형태 (DPO)
         if "chosen_input_ids" in batch:
-            result["chosen_logits"] = _extract_logits(model(
+            result["chosen_logits"] = self._extract_logits(model(
                 input_ids=batch["chosen_input_ids"],
                 attention_mask=batch.get("chosen_attention_mask"),
             ))
         if "rejected_input_ids" in batch:
-            result["rejected_logits"] = _extract_logits(model(
+            result["rejected_logits"] = self._extract_logits(model(
                 input_ids=batch["rejected_input_ids"],
                 attention_mask=batch.get("rejected_attention_mask"),
             ))
@@ -723,7 +764,7 @@ class RLTrainer:
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("attention_mask"),
             )
-            logits = _extract_logits(out)
+            logits = self._extract_logits(out)
 
             if role == "value":
                 # value model: logits → (batch, seq) scalar values

@@ -104,6 +104,18 @@ Head alias 목록: `ClassificationHead`, `DetectionHead`, `SegmentationHead`, `T
 | `adapter.quantization` | dict | conditional | null | QLoRA 시 필수. `{bits: 4}` |
 | `adapter.modules_to_save` | list[str] | no | `[]` | LoRA 적용 제외하고 전체 학습할 모듈 |
 
+#### Recipe → PEFT 파라미터 자동 매핑
+
+Recipe에서는 간결한 이름을 사용하고, 내부적으로 PEFT가 요구하는 이름으로 변환한다:
+
+| Recipe 필드 | PEFT 필드 | 적용 method |
+|------------|----------|------------|
+| `alpha` | `lora_alpha` | lora, qlora |
+| `dropout` | `lora_dropout` | lora, qlora |
+| `r` | `num_virtual_tokens` | prefix_tuning |
+
+PEFT 원본 이름(`lora_alpha` 등)을 직접 사용해도 동작한다.
+
 ### data.*
 
 | Field | Type | Required | Default | Description |

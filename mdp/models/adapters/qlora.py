@@ -105,7 +105,4 @@ def apply_qlora(
 
     model = get_peft_model(model, lora_config)
 
-    from mdp.models.adapters import log_trainable_params
-    log_trainable_params(model)
-
     return model

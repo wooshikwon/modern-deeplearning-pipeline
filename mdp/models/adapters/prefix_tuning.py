@@ -47,8 +47,4 @@ def apply_prefix_tuning(
 
     model = get_peft_model(model, config)
 
-    trainable, total = model.get_nb_trainable_parameters()
-    pct = 100.0 * trainable / total if total > 0 else 0.0
-    logger.info(f"Trainable: {trainable:,} / {total:,} ({pct:.2f}%)")
-
     return model

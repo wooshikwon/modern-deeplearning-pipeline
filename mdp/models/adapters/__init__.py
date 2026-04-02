@@ -54,13 +54,13 @@ def apply_adapter(
         if model is None:
             raise ValueError("LoRA에는 model이 필요합니다")
         from mdp.models.adapters.lora import apply_lora
-        return apply_lora(model, **config)
+        result = apply_lora(model, **config)
     elif method == "qlora":
         from mdp.models.adapters.qlora import apply_qlora
         model_name = config.pop("model_name_or_path", None)
         if model_name is None:
             raise ValueError("QLoRA에는 model_name_or_path가 필요합니다")
-        return apply_qlora(model_name, **config)
+        result = apply_qlora(model_name, **config)
     elif method == "prefix_tuning":
         if model is None:
             raise ValueError("PrefixTuning에는 model이 필요합니다")
@@ -69,6 +69,9 @@ def apply_adapter(
             config["num_virtual_tokens"] = config.pop("r")
         for k in ("dropout", "target_modules", "modules_to_save", "alpha"):
             config.pop(k, None)
-        return apply_prefix_tuning(model, **config)
+        result = apply_prefix_tuning(model, **config)
     else:
         raise ValueError(f"지원하지 않는 어댑터 method: {method!r}")
+
+    log_trainable_params(result)
+    return result

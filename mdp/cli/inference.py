@@ -63,6 +63,18 @@ def _download_model(run_id: str) -> Path:
     return Path(path)
 
 
+def _resolve_baseline_path(model_path: Path) -> Path | None:
+    """체크포인트 또는 artifact 디렉토리에서 baseline 파일을 찾는다."""
+    candidates = [
+        model_path / "baseline.json",
+        model_path.parent / "baseline.json",
+    ]
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+
 # ── Metric 생성 ──
 
 
@@ -191,6 +203,26 @@ def run_inference(
             metrics=metrics or None,
         )
 
+        # 6. Drift detection (baseline이 존재하면)
+        monitoring_result = None
+        monitoring_cfg = getattr(settings.recipe, "monitoring", None)
+        if monitoring_cfg and getattr(monitoring_cfg, "enabled", False):
+            baseline_path = _resolve_baseline_path(model_path)
+            if baseline_path is not None:
+                try:
+                    import json as _json
+                    from mdp.monitoring.baseline import compute_baseline, compare_baselines
+
+                    stored_baseline = _json.loads(baseline_path.read_text())
+                    current = compute_baseline(
+                        train_dataloader=test_loader, model=model, config=settings,
+                    )
+                    monitoring_result = compare_baselines(stored_baseline, current, settings)
+                    if not is_json_mode() and monitoring_result.get("drift_detected"):
+                        typer.echo(f"[drift] {monitoring_result.get('alerts', [])}")
+                except Exception as e:
+                    logger.warning("Drift detection 실패: %s", e)
+
         if not is_json_mode():
             typer.echo(f"추론 완료. 결과: {result_path}")
             if eval_results:
@@ -202,6 +234,7 @@ def run_inference(
             result = InferenceResult(
                 output_path=str(result_path),
                 task=settings.recipe.task,
+                monitoring=monitoring_result,
                 evaluation_metrics=eval_results or None,
             )
             emit_result(build_result(

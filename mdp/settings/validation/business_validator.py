@@ -152,3 +152,10 @@ class BusinessValidator:
         errors, warnings = validate_task_fields(recipe.task, data.fields, data_config)
         result.errors.extend(errors)
         result.warnings.extend(warnings)
+
+        VISION_TASKS = {"image_classification", "object_detection", "semantic_segmentation"}
+        if recipe.task in VISION_TASKS and data.tokenizer is not None:
+            result.warnings.append(
+                f"태스크 '{recipe.task}'에서는 tokenizer가 사용되지 않습니다. "
+                "data.tokenizer 설정을 제거하면 불필요한 로딩을 방지할 수 있습니다."
+            )

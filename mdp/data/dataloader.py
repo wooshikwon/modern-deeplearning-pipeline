@@ -32,6 +32,11 @@ def _select_collator(
     tokenizer_config: dict[str, Any] | None,
 ) -> Any | None:
     """label_strategy에 따라 적절한 collator를 선택한다."""
+    if label_strategy == LABEL_PREFERENCE and tokenizer_config is None:
+        raise ValueError(
+            "preference 학습(DPO/GRPO)에는 data.tokenizer 설정이 필수입니다. "
+            "recipe의 data.tokenizer.pretrained을 지정하세요."
+        )
     if tokenizer_config is None:
         return None
 
