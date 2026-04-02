@@ -39,6 +39,32 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return (tensor * mask).sum() / mask.sum()
 
 
+def normalize_advantages(
+    advantages: torch.Tensor, mask: torch.Tensor,
+) -> torch.Tensor:
+    """Advantage를 정규화한다. 분산 학습 시 전체 GPU에서 통계를 동기화한다."""
+    import torch.distributed as dist
+
+    masked_adv = advantages * mask.float()
+    count = mask.sum()
+    adv_sum = masked_adv.sum()
+    adv_sq_sum = (masked_adv ** 2).sum()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(count)
+        dist.all_reduce(adv_sum)
+        dist.all_reduce(adv_sq_sum)
+
+    if count == 0:
+        return advantages
+
+    mean = adv_sum / count
+    var = adv_sq_sum / count - mean ** 2
+    std = var.clamp(min=0).sqrt()
+
+    return (advantages - mean) / (std + 1e-8)
+
+
 # ── DPO ──
 
 
@@ -181,10 +207,12 @@ class GRPOLoss:
 
         ratio = (new_log_probs - old_log_probs).exp()
 
-        # GRPO advantage: per-sequence reward → group normalization
+        # GRPO advantage: per-sequence reward → group normalization (분산 동기화)
         rewards = batch["rewards"]  # (batch,) scalar per sequence
         with torch.no_grad():
-            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            # scalar rewards를 per-token mask로 정규화 (broadcast 전)
+            reward_mask = torch.ones_like(rewards, dtype=torch.bool)
+            advantages = normalize_advantages(rewards, reward_mask)
         # broadcast to per-token
         adv = advantages.unsqueeze(-1).expand_as(ratio)
 
@@ -266,10 +294,7 @@ class PPOLoss:
 
         with torch.no_grad():
             advantages = compute_gae(values_padded.detach(), per_token_rewards, mask, lam=self.gae_lambda)
-            # normalize
-            adv_masked = advantages[mask]
-            if adv_masked.numel() > 1:
-                advantages = (advantages - adv_masked.mean()) / (adv_masked.std() + 1e-8)
+            advantages = normalize_advantages(advantages, mask)
 
         # clipped surrogate
         policy_loss = _clipped_surrogate(ratio, advantages, mask, self.clip_range)
