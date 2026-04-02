@@ -521,6 +521,14 @@ class RLTrainer:
 
     def _backward_and_step(self, losses: dict[str, torch.Tensor]) -> None:
         """모델별 독립 backward + optimizer step."""
+        # NaN/Inf loss 감지
+        for name, loss in losses.items():
+            if not torch.isfinite(loss):
+                logger.warning("NaN/Inf loss detected in '%s', skipping step", name)
+                for opt in self.optimizers.values():
+                    opt.zero_grad(set_to_none=True)
+                return
+
         for name, loss in losses.items():
             scaled = loss / self.grad_accum_steps
             self.scaler.scale(scaled).backward()

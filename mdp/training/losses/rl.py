@@ -205,7 +205,8 @@ class GRPOLoss:
         mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0))
         mask = mask.to(new_log_probs.device)
 
-        ratio = (new_log_probs - old_log_probs).exp()
+        log_ratio = (new_log_probs - old_log_probs).clamp(min=-20.0, max=20.0)
+        ratio = log_ratio.exp()
 
         # GRPO advantage: per-sequence reward → group normalization (분산 동기화)
         rewards = batch["rewards"]  # (batch,) scalar per sequence
@@ -273,7 +274,8 @@ class PPOLoss:
         mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0))
         mask = mask.to(new_log_probs.device)
 
-        ratio = (new_log_probs - old_log_probs).exp()
+        log_ratio = (new_log_probs - old_log_probs).clamp(min=-20.0, max=20.0)
+        ratio = log_ratio.exp()
 
         # rewards: (batch,) scalar → per-token (마지막 response 토큰에 배치)
         raw_rewards = batch["rewards"]  # (batch,) scalar from reward model

@@ -122,6 +122,26 @@ class Trainer:
             return custom["optimizer"]
 
         klass, kwargs = self.resolver.resolve_partial(config)
+        weight_decay = kwargs.get("weight_decay", 0.0)
+
+        if weight_decay > 0:
+            # bias, LayerNorm, Embedding은 weight decay에서 제외
+            decay_params = []
+            no_decay_params = []
+            for name, param in self.model.named_parameters():
+                if not param.requires_grad:
+                    continue
+                if "bias" in name or "norm" in name or "layernorm" in name or "ln_" in name:
+                    no_decay_params.append(param)
+                else:
+                    decay_params.append(param)
+            param_groups = [
+                {"params": decay_params, "weight_decay": weight_decay},
+                {"params": no_decay_params, "weight_decay": 0.0},
+            ]
+            kwargs.pop("weight_decay", None)
+            return klass(param_groups, **kwargs)
+
         return klass(self.model.parameters(), **kwargs)
 
     def _create_scheduler(
@@ -387,6 +407,11 @@ class Trainer:
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
                 loss = self._compute_loss(batch)
                 loss = loss / self.grad_accum_steps
+
+            if not torch.isfinite(loss):
+                logger.warning("NaN/Inf loss detected at step %d, skipping", step)
+                self.optimizer.zero_grad(set_to_none=True)
+                continue
 
             self.scaler.scale(loss).backward()
 
