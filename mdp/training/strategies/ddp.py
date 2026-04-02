@@ -25,7 +25,7 @@ class DDPStrategy(BaseStrategy):
     # BaseStrategy interface
     # ------------------------------------------------------------------
 
-    def setup(self, model: nn.Module, device: torch.device) -> nn.Module:  # noqa: ARG002
+    def setup(self, model: nn.Module, device: torch.device, optimizer: torch.optim.Optimizer | None = None) -> nn.Module:  # noqa: ARG002
         import torch.distributed as dist
         from torch.nn.parallel import DistributedDataParallel as DDP
 
@@ -33,9 +33,13 @@ class DDPStrategy(BaseStrategy):
         if not dist.is_initialized():
             dist.init_process_group(backend=self.backend)
 
-        cuda_device = torch.device(f"cuda:{self._local_rank}")
-        model = model.to(cuda_device)
-        return DDP(model, device_ids=[self._local_rank])
+        if device.type == "cuda":
+            target_device = torch.device(f"cuda:{self._local_rank}")
+            model = model.to(target_device)
+            return DDP(model, device_ids=[self._local_rank])
+        else:
+            model = model.to(device)
+            return DDP(model)
 
     def save_checkpoint(self, model: nn.Module, path: str) -> None:
         import torch.distributed as dist
