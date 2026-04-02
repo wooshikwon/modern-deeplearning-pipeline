@@ -81,11 +81,19 @@ mdp serve --model-dir ./deploy/
 **수정 파일**: `mdp/serving/model_loader.py`
 **핵심**: adapter_config.json 존재 시 → base model 로딩 + PeftModel.from_pretrained
 
-### 5. `mdp inference` 변경
+### 5. `mdp inference` 변경 — `--model-dir` 옵션 추가
 
-serve와 동일한 패턴. `--run-id`에서 adapter artifact를 받으면 on-demand merge.
+serve와 동일한 패턴. `--run-id`와 `--model-dir` 둘 다 지원.
 
-**수정 파일**: `mdp/cli/inference.py`
+```bash
+# 개발: MLflow에서 직접 (adapter → on-demand merge)
+mdp inference --run-id abc123 --data ./test.csv
+
+# 프로덕션: export된 디렉토리에서
+mdp inference --model-dir ./deploy/ --data ./test.csv
+```
+
+**수정 파일**: `mdp/cli/inference.py`, `mdp/__main__.py`
 
 ---
 
