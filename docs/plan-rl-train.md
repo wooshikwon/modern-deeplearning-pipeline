@@ -84,9 +84,20 @@ models:
   policy:
     class_path: transformers.AutoModelForCausalLM
     pretrained: hf://meta-llama/Meta-Llama-3-8B
+    torch_dtype: bfloat16
     adapter: {method: lora, r: 64, alpha: 128}
+    optimizer:                        # 모델별 optimizer
+      _component_: AdamW
+      lr: 5e-7
+      weight_decay: 0.01
+    scheduler:
+      _component_: CosineAnnealingLR
+      T_max: 2000
+      warmup_ratio: 0.1
   reference:
-    pretrained: hf://meta-llama/Meta-Llama-3-8B  # frozen, adapter 없음
+    pretrained: hf://meta-llama/Meta-Llama-3-8B
+    torch_dtype: bfloat16
+    # optimizer 없음 + freeze: true (기본) → frozen
 
 dpo:
   beta: 0.1
@@ -107,16 +118,17 @@ training:
   gradient_accumulation_steps: 4
   gradient_clip_max_norm: 1.0
 
-optimizer:
-  _component_: AdamW
-  lr: 5e-7
-
 metadata:
   author: wesley
   description: "LLaMA-3 8B DPO alignment"
 ```
 
-기존 Recipe 스키마에 `models`, `algorithm`, 알고리즘별 config (dpo, ppo 등)를 **optional 필드로 추가**. `models`와 `algorithm`이 None이면 기존 SFT 그대로.
+기존 Recipe 스키마에 `models`, `algorithm`, 알고리즘별 config를 **optional 필드로 추가**. `models`와 `algorithm`이 None이면 기존 SFT 그대로.
+
+**SFT vs RL의 optimizer 위치**:
+- SFT: top-level `optimizer` (모델 1개니까)
+- RL: `models.*.optimizer` (모델별 독립 설정)
+- frozen 모델 규칙: `optimizer` 없으면 frozen. `freeze: false`인데 optimizer 없으면 검증 에러.
 
 ---
 
@@ -127,17 +139,27 @@ class RLTrainer:
     """RL alignment 학습 루프. SFT Trainer와 독립."""
 
     def __init__(self, settings, models: dict[str, nn.Module], train_loader, ...):
-        self.policy = models["policy"]
-        self.frozen_models = {k: v for k, v in models.items() if k != "policy"}
-        for m in self.frozen_models.values():
-            m.eval()
-            for p in m.parameters():
-                p.requires_grad = False
+        self.trainable = {}   # optimizer가 있는 모델
+        self.frozen = {}      # optimizer가 없는 모델 (frozen)
+        self.optimizers = {}  # 모델별 optimizer
+        self.schedulers = {}  # 모델별 scheduler
 
+        for name, model_config in settings.recipe.models.items():
+            model = models[name]
+            if model_config.optimizer is not None:
+                self.trainable[name] = model
+                self.optimizers[name] = create_optimizer(model.parameters(), model_config.optimizer)
+                if model_config.scheduler:
+                    self.schedulers[name] = create_scheduler(self.optimizers[name], model_config.scheduler)
+            else:
+                model.eval()
+                for p in model.parameters():
+                    p.requires_grad = False
+                self.frozen[name] = model
+
+        self.policy = self.trainable["policy"]  # policy는 항상 trainable
         self.algorithm = settings.recipe.algorithm
         self.algo_config = getattr(settings.recipe, self.algorithm, {})
-        # optimizer는 policy 파라미터만
-        # AMP, gradient clipping, callbacks, MLflow — SFT Trainer와 동일 패턴
 
     def train(self):
         for step in range(max_steps):
@@ -145,19 +167,33 @@ class RLTrainer:
 
             # frozen 모델 forward (no_grad)
             with torch.no_grad():
-                frozen_out = {name: model(batch) for name, model in self.frozen_models.items()}
+                frozen_out = {name: model(batch) for name, model in self.frozen.items()}
 
-            # policy forward
-            policy_out = self.policy(batch)
+            # trainable 모델 forward
+            trainable_out = {name: model(batch) for name, model in self.trainable.items()}
 
             # loss (losses/rl.py에서 가져옴)
-            loss = compute_rl_loss(self.algorithm, policy_out, frozen_out, batch, self.algo_config)
+            losses = compute_rl_loss(self.algorithm, trainable_out, frozen_out, batch, self.algo_config)
+            # losses: {"policy": tensor, "value": tensor} 또는 {"policy": tensor}
 
-            # backward (AMP + grad_accum + clip — SFT와 동일 패턴)
-            ...
+            # backward — 모델별 독립 (AMP + grad_accum + clip)
+            for name, loss in losses.items():
+                self.scaler.scale(loss).backward()
+                if (step + 1) % self.grad_accum == 0:
+                    self.scaler.unscale_(self.optimizers[name])
+                    clip_grad_norm_(self.trainable[name].parameters(), self.grad_clip)
+                    self.scaler.step(self.optimizers[name])
+                    if name in self.schedulers:
+                        self.schedulers[name].step()
+            if (step + 1) % self.grad_accum == 0:
+                self.scaler.update()
+                for opt in self.optimizers.values():
+                    opt.zero_grad()
 ```
 
-RLTrainer가 SFT Trainer에서 "복사"하는 패턴: AMP setup, gradient accumulation, gradient clipping, MLflow 로깅, callbacks, checkpoint. 하지만 **상속이 아닌 동일 패턴의 독립 구현**. 이유: SFT train()과 RL train()의 루프 구조가 다르므로(epoch vs step, 단일 모델 vs multi-model), 상속하면 오버라이드 체인이 복잡해진다.
+**optimizer가 있는 모델만 trainable, 없는 모델은 frozen** — Recipe의 models.*.optimizer 유무로 자동 결정.
+
+RLTrainer가 SFT Trainer에서 "복사"하는 패턴: AMP setup, gradient accumulation, gradient clipping, MLflow 로깅, callbacks, checkpoint. **상속이 아닌 동일 패턴의 독립 구현**. 이유: SFT train()과 RL train()의 루프 구조가 다르므로(epoch vs step, 단일 모델 vs multi-model), 상속하면 오버라이드 체인이 복잡해진다.
 
 ---
 
@@ -183,6 +219,8 @@ def compute_rl_loss(algorithm, policy_out, frozen_out, batch, config):
         return weighted_ntp_loss(policy_out, frozen_out["critic"], batch, config)
     ...
 ```
+
+반환값은 `dict[str, Tensor]` — 모델별 loss. DPO는 `{"policy": loss}`, PPO는 `{"policy": policy_loss, "value": value_loss}`. RLTrainer가 모델별로 독립 backward.
 
 전체 ~150줄. 한 파일에서 알고리즘 비교/추가가 쉽다.
 
