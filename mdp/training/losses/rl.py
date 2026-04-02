@@ -83,14 +83,72 @@ class DPOLoss:
         return {"policy": -F.logsigmoid(logits).mean()}
 
 
+# ── 공유: Advantage 계산 ──
+
+
+def _make_response_mask(shape: tuple, prompt_length: int) -> torch.Tensor:
+    """prompt 이후 토큰만 True인 mask를 생성한다."""
+    mask = torch.ones(shape, dtype=torch.bool)
+    if prompt_length > 0:
+        mask[:, :max(0, prompt_length - 1)] = False
+    return mask
+
+
+def compute_gae(
+    values: torch.Tensor,
+    rewards: torch.Tensor,
+    mask: torch.Tensor,
+    gamma: float = 1.0,
+    lam: float = 0.95,
+) -> torch.Tensor:
+    """Generalized Advantage Estimation.
+
+    Args:
+        values: (batch, seq) — value model의 per-token value 예측.
+        rewards: (batch, seq) — per-token reward. 보통 마지막 토큰에만 scalar reward, 나머지 0.
+        mask: (batch, seq) — response 토큰만 True.
+        gamma: 할인율. 텍스트 생성에서는 보통 1.0.
+        lam: GAE lambda. 편향-분산 트레이드오프.
+
+    Returns:
+        (batch, seq) per-token advantage.
+    """
+    seq_len = values.shape[1]
+    advantages = torch.zeros_like(values)
+    last_gae = torch.zeros(values.shape[0], device=values.device)
+
+    for t in reversed(range(seq_len)):
+        next_value = values[:, t + 1] if t + 1 < seq_len else torch.zeros_like(last_gae)
+        delta = rewards[:, t] + gamma * next_value - values[:, t]
+        last_gae = delta + gamma * lam * last_gae
+        advantages[:, t] = last_gae
+
+    return advantages * mask.float()
+
+
+def _clipped_surrogate(
+    ratio: torch.Tensor,
+    advantages: torch.Tensor,
+    mask: torch.Tensor,
+    clip_range: float,
+) -> torch.Tensor:
+    """Clipped surrogate objective."""
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1 - clip_range, 1 + clip_range) * advantages
+    return -masked_mean(torch.min(surr1, surr2), mask)
+
+
 # ── GRPO ──
 
 
 class GRPOLoss:
     """Group Relative Policy Optimization.
 
-    Generation 필요. K개 응답의 group reward 평균 대비 advantage로 policy gradient.
-    Value model 불필요.
+    Generation 필요. group 내 reward 평균 대비 advantage.
+    Value model 불필요 — reward의 mean-normalization이 baseline 역할.
+
+    batch에 "rewards" (batch,) scalar per sequence가 필수.
+    RLTrainer가 frozen reward model forward 결과를 batch["rewards"]에 넣어준다.
 
         algorithm:
           _component_: GRPO
@@ -118,27 +176,19 @@ class GRPOLoss:
     ) -> dict[str, torch.Tensor]:
         new_log_probs = compute_log_probs(trainable_out["policy"]["logits"], batch["input_ids"])
         old_log_probs = batch["old_log_probs"]
+        mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0))
+        mask = mask.to(new_log_probs.device)
 
-        # mask: prompt 이후 토큰만
-        prompt_len = batch.get("prompt_length", 0)
-        seq_len = new_log_probs.shape[1]
-        mask = torch.ones_like(new_log_probs, dtype=torch.bool)
-        if prompt_len > 0:
-            mask[:, :max(0, prompt_len - 1)] = False
-
-        # importance ratio
         ratio = (new_log_probs - old_log_probs).exp()
 
-        # group advantage (per-sequence reward가 있으면 사용, 없으면 log_prob 기반)
+        # GRPO advantage: per-sequence reward → group normalization
+        rewards = batch["rewards"]  # (batch,) scalar per sequence
         with torch.no_grad():
-            seq_rewards = (new_log_probs * mask).sum(dim=-1)
-            advantages = (seq_rewards - seq_rewards.mean()) / (seq_rewards.std() + 1e-8)
-
-        # clipped surrogate
+            advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+        # broadcast to per-token
         adv = advantages.unsqueeze(-1).expand_as(ratio)
-        surr1 = ratio * adv
-        surr2 = ratio.clamp(1 - self.clip_range, 1 + self.clip_range) * adv
-        policy_loss = -masked_mean(torch.min(surr1, surr2), mask)
+
+        policy_loss = _clipped_surrogate(ratio, adv, mask, self.clip_range)
 
         # KL penalty
         if "reference" in frozen_out and "logits" in frozen_out["reference"]:
@@ -155,13 +205,17 @@ class GRPOLoss:
 class PPOLoss:
     """Proximal Policy Optimization.
 
-    Generation 필요. Value model로 advantage 추정 + clipped surrogate.
+    Generation 필요. Value model로 per-token GAE advantage + clipped surrogate.
+
+    batch에 "rewards" (batch, seq) per-token reward가 필수.
+    보통 마지막 토큰에만 scalar reward, 나머지 0.
 
         algorithm:
           _component_: PPO
           clip_range: 0.2
           kl_coeff: 0.1
           value_coeff: 0.5
+          gae_lambda: 0.95
     """
 
     needs_generation = True
@@ -171,11 +225,13 @@ class PPOLoss:
         clip_range: float = 0.2,
         kl_coeff: float = 0.1,
         value_coeff: float = 0.5,
+        gae_lambda: float = 0.95,
         ppo_epochs: int = 4,
     ) -> None:
         self.clip_range = clip_range
         self.kl_coeff = kl_coeff
         self.value_coeff = value_coeff
+        self.gae_lambda = gae_lambda
         self.ppo_epochs = ppo_epochs
 
     def __call__(
@@ -186,28 +242,37 @@ class PPOLoss:
     ) -> dict[str, torch.Tensor]:
         new_log_probs = compute_log_probs(trainable_out["policy"]["logits"], batch["input_ids"])
         old_log_probs = batch["old_log_probs"]
+        mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0))
+        mask = mask.to(new_log_probs.device)
 
-        prompt_len = batch.get("prompt_length", 0)
-        mask = torch.ones_like(new_log_probs, dtype=torch.bool)
-        if prompt_len > 0:
-            mask[:, :max(0, prompt_len - 1)] = False
-
-        # importance ratio
         ratio = (new_log_probs - old_log_probs).exp()
 
-        # advantage from reward model (or value targets in batch)
-        with torch.no_grad():
-            if "rewards" in batch:
-                rewards = batch["rewards"]
-                advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-            else:
-                seq_rewards = (new_log_probs * mask).sum(dim=-1)
-                advantages = (seq_rewards - seq_rewards.mean()) / (seq_rewards.std() + 1e-8)
+        # rewards: (batch,) scalar → per-token (마지막 response 토큰에 배치)
+        raw_rewards = batch["rewards"]  # (batch,) scalar from reward model
+        per_token_rewards = torch.zeros_like(new_log_probs)
+        # 마지막 유효 토큰에 scalar reward 배치
+        response_lengths = mask.sum(dim=-1).long()
+        for i in range(per_token_rewards.shape[0]):
+            idx = response_lengths[i].item() - 1
+            if 0 <= idx < per_token_rewards.shape[1]:
+                per_token_rewards[i, idx] = raw_rewards[i]
 
-        adv = advantages.unsqueeze(-1).expand_as(ratio)
-        surr1 = ratio * adv
-        surr2 = ratio.clamp(1 - self.clip_range, 1 + self.clip_range) * adv
-        policy_loss = -masked_mean(torch.min(surr1, surr2), mask)
+        # Value model → per-token value → GAE
+        if "value" in trainable_out and "logits" in trainable_out["value"]:
+            values_raw = trainable_out["value"]["logits"][:, :-1, 0]  # (batch, seq-1)
+            values_padded = F.pad(values_raw, (0, new_log_probs.shape[1] - values_raw.shape[1]))
+        else:
+            values_padded = torch.zeros_like(new_log_probs)
+
+        with torch.no_grad():
+            advantages = compute_gae(values_padded.detach(), per_token_rewards, mask, lam=self.gae_lambda)
+            # normalize
+            adv_masked = advantages[mask]
+            if adv_masked.numel() > 1:
+                advantages = (advantages - adv_masked.mean()) / (adv_masked.std() + 1e-8)
+
+        # clipped surrogate
+        policy_loss = _clipped_surrogate(ratio, advantages, mask, self.clip_range)
 
         # KL penalty
         if "reference" in frozen_out and "logits" in frozen_out["reference"]:
@@ -217,11 +282,10 @@ class PPOLoss:
 
         losses = {"policy": policy_loss}
 
-        # value loss
+        # value loss: MSE(values, returns)
         if "value" in trainable_out and "logits" in trainable_out["value"]:
-            values = trainable_out["value"]["logits"][:, :-1, 0]  # [batch, seq]
-            value_targets = advantages.unsqueeze(-1).expand_as(values).detach()
-            value_loss = F.mse_loss(values * mask.float(), value_targets * mask.float())
+            returns = (advantages + values_padded).detach()
+            value_loss = F.mse_loss(values_padded * mask.float(), returns * mask.float())
             losses["value"] = self.value_coeff * value_loss
 
         return losses

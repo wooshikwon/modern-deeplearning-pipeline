@@ -302,12 +302,16 @@ class RLTrainer:
             old_logits = self._extract_logits(self.policy(input_ids=generated_ids, attention_mask=gen_mask))
             old_log_probs = compute_log_probs(old_logits, generated_ids)
 
-        # 3. Frozen forward
+        # 3. Frozen forward + reward scoring
+        gen_input = {"input_ids": generated_ids, "attention_mask": gen_mask}
         with torch.no_grad():
             frozen_out = {
-                name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask})
+                name: self._forward_model(m, gen_input)
                 for name, m in self.frozen.items()
             }
+
+        # reward 계산: frozen "reward" 모델이 있으면 그 출력을 reward로 사용
+        rewards = self._compute_rewards(frozen_out, generated_ids, gen_mask)
 
         gen_batch = {
             "input_ids": generated_ids,
@@ -315,6 +319,7 @@ class RLTrainer:
             "labels": generated_ids,
             "prompt_length": prompt_ids.shape[1],
             "old_log_probs": old_log_probs,
+            "rewards": rewards,
         }
 
         # 4. Mini-epoch update
@@ -333,6 +338,48 @@ class RLTrainer:
 
         self.global_step += 1
         return last_loss
+
+    def _compute_rewards(
+        self,
+        frozen_out: dict[str, dict],
+        generated_ids: torch.Tensor,
+        gen_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Frozen reward model에서 reward를 추출한다.
+
+        reward model이 있으면 마지막 토큰의 scalar reward를 반환.
+
+        Returns:
+            (batch,) per-sequence scalar reward.
+            Loss 클래스가 알고리즘에 맞게 사용한다:
+            - GRPO: 그대로 group normalization
+            - PPO: per-token reward 배열로 변환 (마지막 토큰에 배치)
+        """
+        if "reward" in frozen_out:
+            reward_logits = frozen_out["reward"].get("logits")
+            if reward_logits is not None:
+                if reward_logits.dim() == 3:
+                    last_token_idx = gen_mask.sum(dim=-1).long() - 1
+                    scalar_rewards = reward_logits[
+                        torch.arange(reward_logits.shape[0], device=reward_logits.device),
+                        last_token_idx, 0,
+                    ]
+                elif reward_logits.dim() == 2:
+                    scalar_rewards = reward_logits[:, -1]
+                else:
+                    scalar_rewards = reward_logits.squeeze()
+                return scalar_rewards
+
+        # reward model 없으면: reference log_prob sum을 scalar reward로 (fallback)
+        if "reference" in frozen_out and "logits" in frozen_out["reference"]:
+            from mdp.training.losses.rl import compute_log_probs
+            ref_lp = compute_log_probs(frozen_out["reference"]["logits"], generated_ids)
+            mask = gen_mask[:, 1:gen_mask.shape[1]]
+            if ref_lp.shape[1] < mask.shape[1]:
+                mask = mask[:, :ref_lp.shape[1]]
+            return (ref_lp * mask).sum(dim=-1)
+
+        return torch.zeros(generated_ids.shape[0], device=generated_ids.device)
 
     def _backward_and_step(self, losses: dict[str, torch.Tensor]) -> None:
         """모델별 독립 backward + optimizer step."""
