@@ -17,7 +17,6 @@ _DEFAULT_DS_CONFIG: dict[str, Any] = {
         "enabled": True,
     },
     "gradient_clipping": 1.0,
-    "train_micro_batch_size_per_gpu": "auto",
 }
 
 
@@ -29,23 +28,44 @@ class DeepSpeedStrategy(BaseStrategy):
     ds_config:
         A DeepSpeed JSON-compatible config dict.  When *None*, a
         sensible ZeRO Stage-2 / bf16 default is used.
+    batch_size:
+        Micro batch size per GPU. Required by DeepSpeed.
     """
 
-    def __init__(self, ds_config: dict[str, Any] | None = None) -> None:
-        self.ds_config = ds_config if ds_config is not None else _DEFAULT_DS_CONFIG
+    def __init__(
+        self,
+        ds_config: dict[str, Any] | None = None,
+        batch_size: int = 32,
+    ) -> None:
+        self.ds_config = dict(ds_config) if ds_config is not None else dict(_DEFAULT_DS_CONFIG)
+        self.batch_size = batch_size
+        self._engine = None
 
     # ------------------------------------------------------------------
     # BaseStrategy interface
     # ------------------------------------------------------------------
 
-    def setup(self, model: nn.Module, device: torch.device) -> nn.Module:  # noqa: ARG002
+    def setup(
+        self,
+        model: nn.Module,
+        device: torch.device,
+        optimizer: torch.optim.Optimizer | None = None,
+    ) -> nn.Module:  # noqa: ARG002
         import deepspeed  # lazy import
 
-        model_engine, *_ = deepspeed.initialize(
-            model=model,
-            model_parameters=model.parameters(),
-            config=self.ds_config,
-        )
+        # batch size를 config에 주입
+        self.ds_config["train_micro_batch_size_per_gpu"] = self.batch_size
+
+        init_kwargs: dict[str, Any] = {
+            "model": model,
+            "model_parameters": model.parameters(),
+            "config": self.ds_config,
+        }
+        if optimizer is not None:
+            init_kwargs["optimizer"] = optimizer
+
+        model_engine, *_ = deepspeed.initialize(**init_kwargs)
+        self._engine = model_engine
         return model_engine
 
     def save_checkpoint(self, model: nn.Module, path: str) -> None:
@@ -54,6 +74,26 @@ class DeepSpeedStrategy(BaseStrategy):
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
         model.load_checkpoint(path)  # type: ignore[attr-defined]
         return model
+
+    def setup_models(
+        self, models: dict[str, nn.Module], device: torch.device,
+        trainable_names: set[str] | None = None,
+    ) -> dict[str, nn.Module]:
+        import deepspeed
+
+        trainable_names = trainable_names or set()
+        wrapped = {}
+        for name, model in models.items():
+            if name in trainable_names:
+                self.ds_config["train_micro_batch_size_per_gpu"] = self.batch_size
+                engine, *_ = deepspeed.initialize(
+                    model=model, model_parameters=model.parameters(),
+                    config=dict(self.ds_config),
+                )
+                wrapped[name] = engine
+            else:
+                wrapped[name] = model.to(device)
+        return wrapped
 
     def cleanup(self) -> None:
         import torch.distributed as dist

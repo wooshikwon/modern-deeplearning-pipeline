@@ -81,3 +81,147 @@ class DPOLoss:
         )
 
         return {"policy": -F.logsigmoid(logits).mean()}
+
+
+# ── GRPO ──
+
+
+class GRPOLoss:
+    """Group Relative Policy Optimization.
+
+    Generation 필요. K개 응답의 group reward 평균 대비 advantage로 policy gradient.
+    Value model 불필요.
+
+        algorithm:
+          _component_: GRPO
+          clip_range: 0.2
+          kl_coeff: 0.1
+    """
+
+    needs_generation = True
+
+    def __init__(
+        self,
+        clip_range: float = 0.2,
+        kl_coeff: float = 0.1,
+        ppo_epochs: int = 1,
+    ) -> None:
+        self.clip_range = clip_range
+        self.kl_coeff = kl_coeff
+        self.ppo_epochs = ppo_epochs
+
+    def __call__(
+        self,
+        trainable_out: dict[str, Any],
+        frozen_out: dict[str, Any],
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        new_log_probs = compute_log_probs(trainable_out["policy"]["logits"], batch["input_ids"])
+        old_log_probs = batch["old_log_probs"]
+
+        # mask: prompt 이후 토큰만
+        prompt_len = batch.get("prompt_length", 0)
+        seq_len = new_log_probs.shape[1]
+        mask = torch.ones_like(new_log_probs, dtype=torch.bool)
+        if prompt_len > 0:
+            mask[:, :max(0, prompt_len - 1)] = False
+
+        # importance ratio
+        ratio = (new_log_probs - old_log_probs).exp()
+
+        # group advantage (per-sequence reward가 있으면 사용, 없으면 log_prob 기반)
+        with torch.no_grad():
+            seq_rewards = (new_log_probs * mask).sum(dim=-1)
+            advantages = (seq_rewards - seq_rewards.mean()) / (seq_rewards.std() + 1e-8)
+
+        # clipped surrogate
+        adv = advantages.unsqueeze(-1).expand_as(ratio)
+        surr1 = ratio * adv
+        surr2 = ratio.clamp(1 - self.clip_range, 1 + self.clip_range) * adv
+        policy_loss = -masked_mean(torch.min(surr1, surr2), mask)
+
+        # KL penalty
+        if "reference" in frozen_out and "logits" in frozen_out["reference"]:
+            ref_log_probs = compute_log_probs(frozen_out["reference"]["logits"], batch["input_ids"])
+            kl = masked_mean(new_log_probs - ref_log_probs, mask)
+            policy_loss = policy_loss + self.kl_coeff * kl
+
+        return {"policy": policy_loss}
+
+
+# ── PPO ──
+
+
+class PPOLoss:
+    """Proximal Policy Optimization.
+
+    Generation 필요. Value model로 advantage 추정 + clipped surrogate.
+
+        algorithm:
+          _component_: PPO
+          clip_range: 0.2
+          kl_coeff: 0.1
+          value_coeff: 0.5
+    """
+
+    needs_generation = True
+
+    def __init__(
+        self,
+        clip_range: float = 0.2,
+        kl_coeff: float = 0.1,
+        value_coeff: float = 0.5,
+        ppo_epochs: int = 4,
+    ) -> None:
+        self.clip_range = clip_range
+        self.kl_coeff = kl_coeff
+        self.value_coeff = value_coeff
+        self.ppo_epochs = ppo_epochs
+
+    def __call__(
+        self,
+        trainable_out: dict[str, Any],
+        frozen_out: dict[str, Any],
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        new_log_probs = compute_log_probs(trainable_out["policy"]["logits"], batch["input_ids"])
+        old_log_probs = batch["old_log_probs"]
+
+        prompt_len = batch.get("prompt_length", 0)
+        mask = torch.ones_like(new_log_probs, dtype=torch.bool)
+        if prompt_len > 0:
+            mask[:, :max(0, prompt_len - 1)] = False
+
+        # importance ratio
+        ratio = (new_log_probs - old_log_probs).exp()
+
+        # advantage from reward model (or value targets in batch)
+        with torch.no_grad():
+            if "rewards" in batch:
+                rewards = batch["rewards"]
+                advantages = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
+            else:
+                seq_rewards = (new_log_probs * mask).sum(dim=-1)
+                advantages = (seq_rewards - seq_rewards.mean()) / (seq_rewards.std() + 1e-8)
+
+        adv = advantages.unsqueeze(-1).expand_as(ratio)
+        surr1 = ratio * adv
+        surr2 = ratio.clamp(1 - self.clip_range, 1 + self.clip_range) * adv
+        policy_loss = -masked_mean(torch.min(surr1, surr2), mask)
+
+        # KL penalty
+        if "reference" in frozen_out and "logits" in frozen_out["reference"]:
+            ref_log_probs = compute_log_probs(frozen_out["reference"]["logits"], batch["input_ids"])
+            kl = masked_mean(new_log_probs - ref_log_probs, mask)
+            policy_loss = policy_loss + self.kl_coeff * kl
+
+        losses = {"policy": policy_loss}
+
+        # value loss
+        if "value" in trainable_out and "logits" in trainable_out["value"]:
+            values = trainable_out["value"]["logits"][:, :-1, 0]  # [batch, seq]
+            value_targets = advantages.unsqueeze(-1).expand_as(values).detach()
+            value_loss = F.mse_loss(values * mask.float(), value_targets * mask.float())
+            losses["value"] = self.value_coeff * value_loss
+
+        return losses

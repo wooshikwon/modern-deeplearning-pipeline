@@ -30,6 +30,8 @@ evaluator:
   F1Score: torchmetrics.F1Score
 algorithm:
   DPO: mdp.training.losses.rl.DPOLoss
+  GRPO: mdp.training.losses.rl.GRPOLoss
+  PPO: mdp.training.losses.rl.PPOLoss
 strategy:
   DDPStrategy: mdp.training.strategies.ddp.DDPStrategy
   FSDPStrategy: mdp.training.strategies.fsdp.FSDPStrategy

@@ -212,6 +212,14 @@ class RLTrainer:
         num_steps = 0
         max_steps = self.max_steps or (len(self.train_loader) * (self.epochs or 1))
 
+        needs_gen = getattr(self.algorithm, "needs_generation", False)
+
+        # generation kwargs (Recipe의 generation 섹션에서)
+        gen_config = self.settings.recipe.generation
+        self._generation_kwargs = {}
+        if gen_config is not None:
+            self._generation_kwargs = gen_config.model_dump(exclude_none=True) if hasattr(gen_config, "model_dump") else dict(gen_config)
+
         try:
             while self.global_step < max_steps:
                 try:
@@ -222,48 +230,19 @@ class RLTrainer:
 
                 batch = self._move_to_device(batch)
 
-                with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
-                    # frozen forward
-                    with torch.no_grad():
-                        frozen_out = {}
-                        for name, model in self.frozen.items():
-                            frozen_out[name] = self._forward_model(model, batch)
+                if needs_gen:
+                    step_loss = self._train_step_generation(batch, device_type)
+                else:
+                    step_loss = self._train_step_offline(batch, device_type)
 
-                    # trainable forward
-                    trainable_out = {}
-                    for name, model in self.trainable.items():
-                        trainable_out[name] = self._forward_model(model, batch)
-
-                    # loss — algorithm은 _component_로 resolve된 callable
-                    losses = self.algorithm(trainable_out, frozen_out, batch)
-
-                # backward — 모델별 독립
-                for name, loss in losses.items():
-                    scaled = loss / self.grad_accum_steps
-                    self.scaler.scale(scaled).backward()
-
-                if (self.global_step + 1) % self.grad_accum_steps == 0:
-                    for name in losses:
-                        self.scaler.unscale_(self.optimizers[name])
-                        if self.grad_clip_norm is not None:
-                            clip_grad_norm_(self.trainable[name].parameters(), self.grad_clip_norm)
-                        self.scaler.step(self.optimizers[name])
-                        if name in self.schedulers:
-                            self.schedulers[name].step()
-                    self.scaler.update()
-                    for opt in self.optimizers.values():
-                        opt.zero_grad()
-
-                self.global_step += 1
-                policy_loss = losses.get("policy", list(losses.values())[0])
-                total_loss += policy_loss.item()
+                total_loss += step_loss
                 num_steps += 1
 
                 if (self.global_step) % self.grad_accum_steps == 0:
                     self._fire(
                         "on_batch_end", step=self.global_step,
                         global_step=self.global_step,
-                        metrics={"loss": policy_loss.item()},
+                        metrics={"loss": step_loss},
                         model=self.policy,
                         optimizer=self.optimizers["policy"],
                         scheduler=self.schedulers.get("policy"),
@@ -287,6 +266,100 @@ class RLTrainer:
             "total_steps": self.global_step,
             "algorithm": type(self.algorithm).__name__,
         }
+
+    # ── Step 실행 ──
+
+    def _train_step_offline(self, batch: dict, device_type: str) -> float:
+        """DPO / weighted-NTP — 데이터가 이미 완성된 경로."""
+        with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
+            with torch.no_grad():
+                frozen_out = {name: self._forward_model(m, batch) for name, m in self.frozen.items()}
+            trainable_out = {name: self._forward_model(m, batch) for name, m in self.trainable.items()}
+            losses = self.algorithm(trainable_out, frozen_out, batch)
+
+        self._backward_and_step(losses)
+        self.global_step += 1
+        return losses.get("policy", list(losses.values())[0]).item()
+
+    def _train_step_generation(self, batch: dict, device_type: str) -> float:
+        """GRPO / PPO — policy가 텍스트를 생성하고, 그 결과로 학습."""
+        from mdp.training.losses.rl import compute_log_probs
+
+        prompt_ids = batch["input_ids"]
+        prompt_mask = batch.get("attention_mask")
+
+        # 1. Generation (no_grad)
+        with torch.no_grad():
+            generated_ids = self.policy.generate(
+                input_ids=prompt_ids,
+                attention_mask=prompt_mask,
+                **self._generation_kwargs,
+            )
+            gen_mask = (generated_ids != self.policy.config.pad_token_id).long() if hasattr(self.policy, "config") and hasattr(self.policy.config, "pad_token_id") and self.policy.config.pad_token_id is not None else torch.ones_like(generated_ids)
+
+        # 2. Old log_probs (update 전 policy 상태)
+        with torch.no_grad():
+            old_logits = self._extract_logits(self.policy(input_ids=generated_ids, attention_mask=gen_mask))
+            old_log_probs = compute_log_probs(old_logits, generated_ids)
+
+        # 3. Frozen forward
+        with torch.no_grad():
+            frozen_out = {
+                name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask})
+                for name, m in self.frozen.items()
+            }
+
+        gen_batch = {
+            "input_ids": generated_ids,
+            "attention_mask": gen_mask,
+            "labels": generated_ids,
+            "prompt_length": prompt_ids.shape[1],
+            "old_log_probs": old_log_probs,
+        }
+
+        # 4. Mini-epoch update
+        ppo_epochs = getattr(self.algorithm, "ppo_epochs", 1)
+        last_loss = 0.0
+        for _ in range(ppo_epochs):
+            with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
+                trainable_out = {
+                    name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask})
+                    for name, m in self.trainable.items()
+                }
+                losses = self.algorithm(trainable_out, frozen_out, gen_batch)
+
+            self._backward_and_step(losses)
+            last_loss = losses.get("policy", list(losses.values())[0]).item()
+
+        self.global_step += 1
+        return last_loss
+
+    def _backward_and_step(self, losses: dict[str, torch.Tensor]) -> None:
+        """모델별 독립 backward + optimizer step."""
+        for name, loss in losses.items():
+            scaled = loss / self.grad_accum_steps
+            self.scaler.scale(scaled).backward()
+
+        if (self.global_step + 1) % self.grad_accum_steps == 0:
+            for name in losses:
+                if name in self.optimizers:
+                    self.scaler.unscale_(self.optimizers[name])
+                    if self.grad_clip_norm is not None:
+                        clip_grad_norm_(self.trainable[name].parameters(), self.grad_clip_norm)
+                    self.scaler.step(self.optimizers[name])
+                    if name in self.schedulers:
+                        self.schedulers[name].step()
+            self.scaler.update()
+            for opt in self.optimizers.values():
+                opt.zero_grad()
+
+    @staticmethod
+    def _extract_logits(out):
+        if hasattr(out, "logits"):
+            return out.logits
+        if isinstance(out, dict):
+            return out.get("logits", out.get("output"))
+        return out
 
     def _forward_model(self, model: nn.Module, batch: dict) -> dict:
         """배치 형태에 따라 모델 forward를 수행한다.
