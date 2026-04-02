@@ -227,12 +227,12 @@ class RLTrainer:
                     with torch.no_grad():
                         frozen_out = {}
                         for name, model in self.frozen.items():
-                            frozen_out[name] = self._forward_preference(model, batch)
+                            frozen_out[name] = self._forward_model(model, batch)
 
                     # trainable forward
                     trainable_out = {}
                     for name, model in self.trainable.items():
-                        trainable_out[name] = self._forward_preference(model, batch)
+                        trainable_out[name] = self._forward_model(model, batch)
 
                     # loss — algorithm은 _component_로 resolve된 callable
                     losses = self.algorithm(trainable_out, frozen_out, batch)
@@ -288,19 +288,38 @@ class RLTrainer:
             "algorithm": type(self.algorithm).__name__,
         }
 
-    def _forward_preference(self, model: nn.Module, batch: dict) -> dict:
-        """preference 배치에서 chosen/rejected를 각각 forward한다."""
+    def _forward_model(self, model: nn.Module, batch: dict) -> dict:
+        """배치 형태에 따라 모델 forward를 수행한다.
+
+        preference 배치 (DPO): chosen_input_ids, rejected_input_ids → chosen_logits, rejected_logits
+        causal 배치 (weighted-NTP, PPO): input_ids → logits
+        """
         result = {}
+
+        def _extract_logits(out):
+            if hasattr(out, "logits"):
+                return out.logits
+            if isinstance(out, dict):
+                return out.get("logits", out.get("output"))
+            return out
+
+        # preference 형태
         if "chosen_input_ids" in batch:
-            chosen_out = model(
+            result["chosen_logits"] = _extract_logits(model(
                 input_ids=batch["chosen_input_ids"],
-                attention_mask=batch["chosen_attention_mask"],
-            )
-            result["chosen_logits"] = chosen_out.logits if hasattr(chosen_out, "logits") else chosen_out.get("logits", chosen_out)
+                attention_mask=batch.get("chosen_attention_mask"),
+            ))
         if "rejected_input_ids" in batch:
-            rejected_out = model(
+            result["rejected_logits"] = _extract_logits(model(
                 input_ids=batch["rejected_input_ids"],
-                attention_mask=batch["rejected_attention_mask"],
-            )
-            result["rejected_logits"] = rejected_out.logits if hasattr(rejected_out, "logits") else rejected_out.get("logits", rejected_out)
+                attention_mask=batch.get("rejected_attention_mask"),
+            ))
+
+        # causal 형태
+        if "input_ids" in batch:
+            result["logits"] = _extract_logits(model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch.get("attention_mask"),
+            ))
+
         return result
