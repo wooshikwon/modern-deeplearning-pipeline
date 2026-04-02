@@ -42,68 +42,42 @@ def masked_mean(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 # ── DPO ──
 
 
-def dpo_loss(
-    policy_chosen_logits: torch.Tensor,
-    policy_rejected_logits: torch.Tensor,
-    ref_chosen_logits: torch.Tensor,
-    ref_rejected_logits: torch.Tensor,
-    chosen_labels: torch.Tensor,
-    rejected_labels: torch.Tensor,
-    beta: float = 0.1,
-) -> dict[str, torch.Tensor]:
+class DPOLoss:
     """Direct Preference Optimization loss.
 
-    Returns:
-        {"policy": loss_tensor}
+    _component_ 패턴으로 인스턴스화된다:
+        algorithm:
+          _component_: DPO
+          beta: 0.1
     """
-    policy_chosen_lp = compute_log_probs(policy_chosen_logits, chosen_labels)
-    policy_rejected_lp = compute_log_probs(policy_rejected_logits, rejected_labels)
-    ref_chosen_lp = compute_log_probs(ref_chosen_logits, chosen_labels)
-    ref_rejected_lp = compute_log_probs(ref_rejected_logits, rejected_labels)
 
-    chosen_mask = chosen_labels[:, 1:] != -100
-    rejected_mask = rejected_labels[:, 1:] != -100
+    def __init__(self, beta: float = 0.1) -> None:
+        self.beta = beta
 
-    # per-sequence log_prob sum
-    policy_chosen_sum = (policy_chosen_lp * chosen_mask).sum(dim=-1)
-    policy_rejected_sum = (policy_rejected_lp * rejected_mask).sum(dim=-1)
-    ref_chosen_sum = (ref_chosen_lp * chosen_mask).sum(dim=-1)
-    ref_rejected_sum = (ref_rejected_lp * rejected_mask).sum(dim=-1)
+    def __call__(
+        self,
+        trainable_out: dict[str, Any],
+        frozen_out: dict[str, Any],
+        batch: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        policy = trainable_out["policy"]
+        ref = frozen_out["reference"]
 
-    # DPO logit
-    logits = beta * (
-        (policy_chosen_sum - ref_chosen_sum) - (policy_rejected_sum - ref_rejected_sum)
-    )
+        policy_chosen_lp = compute_log_probs(policy["chosen_logits"], batch["chosen_labels"])
+        policy_rejected_lp = compute_log_probs(policy["rejected_logits"], batch["rejected_labels"])
+        ref_chosen_lp = compute_log_probs(ref["chosen_logits"], batch["chosen_labels"])
+        ref_rejected_lp = compute_log_probs(ref["rejected_logits"], batch["rejected_labels"])
 
-    loss = -F.logsigmoid(logits).mean()
-    return {"policy": loss}
+        chosen_mask = batch["chosen_labels"][:, 1:] != -100
+        rejected_mask = batch["rejected_labels"][:, 1:] != -100
 
+        policy_chosen_sum = (policy_chosen_lp * chosen_mask).sum(dim=-1)
+        policy_rejected_sum = (policy_rejected_lp * rejected_mask).sum(dim=-1)
+        ref_chosen_sum = (ref_chosen_lp * chosen_mask).sum(dim=-1)
+        ref_rejected_sum = (ref_rejected_lp * rejected_mask).sum(dim=-1)
 
-# ── 라우터 ──
-
-
-def compute_rl_loss(
-    algorithm: str,
-    trainable_out: dict[str, Any],
-    frozen_out: dict[str, Any],
-    batch: dict[str, torch.Tensor],
-    algo_config: Any,
-) -> dict[str, torch.Tensor]:
-    """알고리즘에 따라 적절한 loss를 계산한다.
-
-    Returns:
-        모델별 loss dict. 예: {"policy": tensor} 또는 {"policy": tensor, "value": tensor}
-    """
-    if algorithm == "dpo":
-        beta = algo_config.beta if hasattr(algo_config, "beta") else 0.1
-        return dpo_loss(
-            policy_chosen_logits=trainable_out["policy"]["chosen_logits"],
-            policy_rejected_logits=trainable_out["policy"]["rejected_logits"],
-            ref_chosen_logits=frozen_out["reference"]["chosen_logits"],
-            ref_rejected_logits=frozen_out["reference"]["rejected_logits"],
-            chosen_labels=batch["chosen_labels"],
-            rejected_labels=batch["rejected_labels"],
-            beta=beta,
+        logits = self.beta * (
+            (policy_chosen_sum - ref_chosen_sum) - (policy_rejected_sum - ref_rejected_sum)
         )
-    else:
-        raise NotImplementedError(f"알고리즘 '{algorithm}'은 아직 구현되지 않았습니다")
+
+        return {"policy": -F.logsigmoid(logits).mean()}

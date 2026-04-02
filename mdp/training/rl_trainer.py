@@ -22,7 +22,6 @@ from torch.utils.data import DataLoader
 
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
-from mdp.training.losses.rl import compute_rl_loss
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +43,9 @@ class RLTrainer:
 
         recipe = settings.recipe
         training = recipe.training
-        self.algorithm = recipe.algorithm
-        self.algo_config = getattr(recipe, self.algorithm, None)
+
+        # algorithm을 _component_ 패턴으로 resolve
+        self.algorithm = self.resolver.resolve(recipe.algorithm)
 
         # Device
         self.device = self._detect_device()
@@ -234,10 +234,8 @@ class RLTrainer:
                     for name, model in self.trainable.items():
                         trainable_out[name] = self._forward_preference(model, batch)
 
-                    # loss
-                    losses = compute_rl_loss(
-                        self.algorithm, trainable_out, frozen_out, batch, self.algo_config,
-                    )
+                    # loss — algorithm은 _component_로 resolve된 callable
+                    losses = self.algorithm(trainable_out, frozen_out, batch)
 
                 # backward — 모델별 독립
                 for name, loss in losses.items():
@@ -287,7 +285,7 @@ class RLTrainer:
             "metrics": {"loss": avg_loss},
             "training_duration_seconds": training_duration,
             "total_steps": self.global_step,
-            "algorithm": self.algorithm,
+            "algorithm": type(self.algorithm).__name__,
         }
 
     def _forward_preference(self, model: nn.Module, batch: dict) -> dict:

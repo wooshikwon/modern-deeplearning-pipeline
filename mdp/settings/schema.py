@@ -122,20 +122,6 @@ class MetadataSpec(BaseModel):
     description: str
 
 
-class DPOConfig(BaseModel):
-    """DPO 알고리즘 설정."""
-    beta: float = 0.1
-
-
-class WeightedNTPConfig(BaseModel):
-    """Weighted-NTP 알고리즘 설정."""
-    gae_lambda: float = 0.95
-    gae_gamma: float = 1.0
-    awr_beta: float = 1.0
-    weight_clip_min: float = 0.1
-    weight_clip_max: float = 3.0
-
-
 class Recipe(BaseModel):
     """실험 정의서. '무엇을 학습할지'를 기술한다."""
 
@@ -156,10 +142,8 @@ class Recipe(BaseModel):
     callbacks: list[dict[str, Any]] = Field(default_factory=list)
     metadata: MetadataSpec
     # RL 필드
-    algorithm: str | None = None  # dpo | weighted_ntp | grpo | ppo. None이면 SFT
+    algorithm: dict[str, Any] | None = None  # _component_ 패턴. None이면 SFT
     models: dict[str, RLModelSpec] | None = None
-    dpo: DPOConfig = Field(default_factory=DPOConfig)
-    weighted_ntp: WeightedNTPConfig = Field(default_factory=WeightedNTPConfig)
 
     @model_validator(mode="after")
     def check_training_duration(self):
@@ -171,7 +155,7 @@ class Recipe(BaseModel):
     def check_rl_consistency(self):
         if self.algorithm is not None:
             if self.models is None:
-                raise ValueError(f"algorithm '{self.algorithm}'이 지정되었지만 models가 없습니다")
+                raise ValueError("algorithm이 지정되었지만 models가 없습니다")
             if "policy" not in self.models:
                 raise ValueError("RL 학습에는 models.policy가 필수입니다")
             policy = self.models["policy"]

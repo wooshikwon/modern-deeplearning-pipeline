@@ -28,6 +28,8 @@ callback:
 evaluator:
   Accuracy: torchmetrics.Accuracy
   F1Score: torchmetrics.F1Score
+algorithm:
+  DPO: mdp.training.losses.rl.DPOLoss
 strategy:
   DDPStrategy: mdp.training.strategies.ddp.DDPStrategy
   FSDPStrategy: mdp.training.strategies.fsdp.FSDPStrategy

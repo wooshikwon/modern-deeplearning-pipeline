@@ -31,15 +31,16 @@ def run_rl_train(recipe_path: str, config_path: str) -> None:
         raise typer.Exit(code=1)
 
     if settings.recipe.algorithm is None:
-        msg = "RL 학습에는 recipe에 algorithm 필드가 필요합니다. SFT는 mdp train을 사용하세요."
+        msg = "RL 학습에는 recipe에 algorithm 섹션이 필요합니다. SFT는 mdp train을 사용하세요."
         if is_json_mode():
             emit_result(build_error(command="rl-train", error_type="ValidationError", message=msg))
         else:
             typer.echo(f"[error] {msg}", err=True)
         raise typer.Exit(code=1)
 
+    algo_name = settings.recipe.algorithm.get("_component_", "unknown")
     if not is_json_mode():
-        typer.echo(f"알고리즘: {settings.recipe.algorithm}")
+        typer.echo(f"알고리즘: {algo_name}")
         typer.echo(f"모델: {list(settings.recipe.models.keys())}")
 
     try:

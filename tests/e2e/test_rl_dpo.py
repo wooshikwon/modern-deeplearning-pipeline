@@ -15,7 +15,6 @@ import torch.nn as nn
 from mdp.settings.schema import (
     Config,
     DataSpec,
-    DPOConfig,
     MetadataSpec,
     ModelSpec,
     RLModelSpec,
@@ -23,28 +22,32 @@ from mdp.settings.schema import (
     Settings,
     TrainingSpec,
 )
-from mdp.training.losses.rl import compute_log_probs, dpo_loss
+from mdp.training.losses.rl import DPOLoss, compute_log_probs
 
 
 def test_dpo_loss_computation() -> None:
-    """DPO loss가 chosen > rejected일 때 낮은 loss를 반환하는지."""
+    """DPOLoss가 올바른 loss를 반환하는지."""
     batch_size, seq_len, vocab = 2, 8, 32
 
-    # policy가 chosen을 선호하는 상황 시뮬레이션
-    policy_chosen_logits = torch.randn(batch_size, seq_len, vocab)
-    policy_rejected_logits = torch.randn(batch_size, seq_len, vocab)
-    ref_chosen_logits = torch.randn(batch_size, seq_len, vocab)
-    ref_rejected_logits = torch.randn(batch_size, seq_len, vocab)
+    trainable_out = {
+        "policy": {
+            "chosen_logits": torch.randn(batch_size, seq_len, vocab),
+            "rejected_logits": torch.randn(batch_size, seq_len, vocab),
+        }
+    }
+    frozen_out = {
+        "reference": {
+            "chosen_logits": torch.randn(batch_size, seq_len, vocab),
+            "rejected_logits": torch.randn(batch_size, seq_len, vocab),
+        }
+    }
+    batch = {
+        "chosen_labels": torch.randint(0, vocab, (batch_size, seq_len)),
+        "rejected_labels": torch.randint(0, vocab, (batch_size, seq_len)),
+    }
 
-    chosen_labels = torch.randint(0, vocab, (batch_size, seq_len))
-    rejected_labels = torch.randint(0, vocab, (batch_size, seq_len))
-
-    losses = dpo_loss(
-        policy_chosen_logits, policy_rejected_logits,
-        ref_chosen_logits, ref_rejected_logits,
-        chosen_labels, rejected_labels,
-        beta=0.1,
-    )
+    dpo = DPOLoss(beta=0.1)
+    losses = dpo(trainable_out, frozen_out, batch)
 
     assert "policy" in losses
     assert torch.isfinite(losses["policy"])
@@ -98,7 +101,7 @@ def test_rl_trainer_dpo() -> None:
     recipe = Recipe(
         name="dpo-test",
         task="text_generation",
-        algorithm="dpo",
+        algorithm={"_component_": "DPO", "beta": 0.1},
         models={
             "policy": RLModelSpec(
                 class_path="tests.e2e.test_rl_dpo.TinyLM",
@@ -108,7 +111,6 @@ def test_rl_trainer_dpo() -> None:
                 class_path="tests.e2e.test_rl_dpo.TinyLM",
             ),
         },
-        dpo=DPOConfig(beta=0.1),
         data=DataSpec(source="/tmp/fake"),
         training=TrainingSpec(max_steps=3),
         metadata=MetadataSpec(author="test", description="dpo test"),
@@ -130,7 +132,7 @@ def test_rl_trainer_dpo() -> None:
     result = trainer.train()
 
     assert result["total_steps"] == 3
-    assert result["algorithm"] == "dpo"
+    assert result["algorithm"] == "DPOLoss"
     assert "loss" in result["metrics"]
     assert result["metrics"]["loss"] > 0
 
@@ -141,7 +143,7 @@ def test_rl_recipe_validation() -> None:
         Recipe(
             name="bad-rl",
             task="text_generation",
-            algorithm="dpo",
+            algorithm={"_component_": "DPO"},
             models={
                 "reference": RLModelSpec(class_path="x"),
             },
@@ -154,7 +156,7 @@ def test_rl_recipe_validation() -> None:
         Recipe(
             name="bad-rl",
             task="text_generation",
-            algorithm="dpo",
+            algorithm={"_component_": "DPO"},
             data=DataSpec(source="/tmp/fake"),
             training=TrainingSpec(max_steps=1),
             metadata=MetadataSpec(author="test", description="test"),
