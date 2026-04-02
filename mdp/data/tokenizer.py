@@ -43,12 +43,8 @@ def derive_label_strategy(fields: dict[str, str] | None) -> str:
     if "text" in roles and "label" in roles:
         return LABEL_COPY
 
-    # text만 있으면 causal (text_generation)
+    # text가 있으면 causal (text_generation, multimodal 포함)
     if "text" in roles:
-        return LABEL_CAUSAL
-
-    # image + text → causal (multimodal text_generation)
-    if "image" in roles and "text" in roles:
         return LABEL_CAUSAL
 
     return LABEL_NONE

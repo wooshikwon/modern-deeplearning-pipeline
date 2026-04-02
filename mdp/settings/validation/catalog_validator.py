@@ -77,7 +77,3 @@ class CatalogValidator:
             )
 
         return result
-
-    def get_defaults(self, pretrained: str) -> dict[str, Any] | None:
-        """pretrained URI로 catalog 항목을 찾아 전체 메타데이터를 반환한다."""
-        return self._find_by_pretrained(pretrained)
