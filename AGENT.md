@@ -7,7 +7,8 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 | Command | Purpose | Key Flags |
 |---------|---------|-----------|
 | `mdp init <name> --task <task> --model <model>` | 프로젝트 스켈레톤 생성 | `--task, --model` |
-| `mdp train -r recipe.yaml -c config.yaml` | 학습 실행 | `--format json` |
+| `mdp train -r recipe.yaml -c config.yaml` | SFT 학습 | `--format json` |
+| `mdp rl-train -r rl-recipe.yaml -c config.yaml` | RL alignment 학습 (DPO 등) | `--format json` |
 | `mdp inference --run-id <id> --data <path>` | 배치 추론 | `--run-id` 또는 `--model-dir`, `--fields`, `--metrics`, `--output-format` |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 | `--format json` |
 | `mdp export --run-id <id> --output <dir>` | 모델 내보내기 (adapter merge + 패키징) | `--run-id` 또는 `--checkpoint` |

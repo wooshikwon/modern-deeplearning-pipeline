@@ -54,6 +54,17 @@ def train(
     run_train(recipe, config)
 
 
+@app.command(name="rl-train")
+def rl_train(
+    recipe: str = typer.Option(..., "-r", "--recipe", help="RL Recipe YAML 경로"),
+    config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
+):
+    """RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO)."""
+    from mdp.cli.rl_train import run_rl_train
+
+    run_rl_train(recipe, config)
+
+
 @app.command()
 def inference(
     run_id: str = typer.Option(None, "--run-id", help="MLflow run ID"),

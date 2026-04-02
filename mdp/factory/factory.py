@@ -188,6 +188,27 @@ class Factory:
 
         return self._get_or_create("dataloaders", _create)
 
+    # ── RL: 복수 모델 생성 ──
+
+    def create_models(self) -> dict[str, nn.Module]:
+        """RL Recipe의 models 설정에 따라 역할별 모델을 생성한다."""
+        def _create() -> dict[str, nn.Module]:
+            recipe = self.settings.recipe
+            if recipe.models is None:
+                raise ValueError("create_models()는 recipe.models가 필요합니다")
+
+            models = {}
+            for name, spec in recipe.models.items():
+                model = self._load_pretrained(spec)
+                if spec.adapter is not None:
+                    from mdp.models.adapters import apply_adapter
+                    adapter_config = spec.adapter.model_dump(exclude_none=True)
+                    model = apply_adapter(model, adapter_config)
+                models[name] = model
+            return models
+
+        return self._get_or_create("models", _create)
+
     # ── Phase 4: 학습 ──
 
     def create_trainer(self) -> Any:

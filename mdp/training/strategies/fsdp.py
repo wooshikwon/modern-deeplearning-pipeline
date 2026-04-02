@@ -124,6 +124,32 @@ class FSDPStrategy(BaseStrategy):
             model.load_state_dict(state_dict)
         return model
 
+    def setup_models(
+        self, models: dict[str, nn.Module], device: torch.device,
+        trainable_names: set[str] | None = None,
+    ) -> dict[str, nn.Module]:
+        import torch.distributed as dist
+        from torch.distributed.fsdp import (
+            FullyShardedDataParallel as FSDP,
+            ShardingStrategy,
+        )
+
+        self._local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        if not dist.is_initialized():
+            dist.init_process_group(backend=self.backend)
+
+        trainable_names = trainable_names or set()
+        wrapped = {}
+        for name, model in models.items():
+            if name in trainable_names:
+                wrapped[name] = self.setup(model, device)
+            else:
+                # frozen → NO_SHARD (forward only, no gradient communication)
+                if device.type == "cuda":
+                    model = model.to(torch.device(f"cuda:{self._local_rank}"))
+                wrapped[name] = FSDP(model, sharding_strategy=ShardingStrategy.NO_SHARD)
+        return wrapped
+
     def cleanup(self) -> None:
         import torch.distributed as dist
 

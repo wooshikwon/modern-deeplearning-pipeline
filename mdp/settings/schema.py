@@ -17,11 +17,20 @@ from pydantic import BaseModel, Field, model_validator
 class ModelSpec(BaseModel):
     """모델 명세. class_path + pretrained URI 패턴."""
 
-    class_path: str
+    class_path: str = "transformers.AutoModelForCausalLM"
     pretrained: str | None = None
     torch_dtype: str | None = None
     attn_implementation: str | None = None
     init_args: dict[str, Any] = Field(default_factory=dict)
+
+
+class RLModelSpec(ModelSpec):
+    """RL 학습용 모델 명세. ModelSpec + 모델별 optimizer/scheduler + freeze."""
+
+    adapter: AdapterSpec | None = None
+    optimizer: dict[str, Any] | None = None  # None이면 frozen
+    scheduler: dict[str, Any] | None = None
+    freeze: bool = True  # optimizer 없으면 True 강제
 
 
 class AdapterSpec(BaseModel):
@@ -113,17 +122,32 @@ class MetadataSpec(BaseModel):
     description: str
 
 
+class DPOConfig(BaseModel):
+    """DPO 알고리즘 설정."""
+    beta: float = 0.1
+
+
+class WeightedNTPConfig(BaseModel):
+    """Weighted-NTP 알고리즘 설정."""
+    gae_lambda: float = 0.95
+    gae_gamma: float = 1.0
+    awr_beta: float = 1.0
+    weight_clip_min: float = 0.1
+    weight_clip_max: float = 3.0
+
+
 class Recipe(BaseModel):
     """실험 정의서. '무엇을 학습할지'를 기술한다."""
 
     name: str
     task: str
-    model: ModelSpec
+    # SFT 필드
+    model: ModelSpec = Field(default_factory=ModelSpec)
     head: dict[str, Any] | None = None
     adapter: AdapterSpec | None = None
     data: DataSpec
     training: TrainingSpec
-    optimizer: dict[str, Any]  # _component_ 패턴 (required)
+    optimizer: dict[str, Any] | None = None  # SFT용 (RL은 models.*.optimizer)
     scheduler: dict[str, Any] | None = None
     loss: dict[str, Any] | None = None
     evaluation: EvaluationSpec = Field(default_factory=EvaluationSpec)
@@ -131,11 +155,28 @@ class Recipe(BaseModel):
     monitoring: MonitoringSpec = Field(default_factory=MonitoringSpec)
     callbacks: list[dict[str, Any]] = Field(default_factory=list)
     metadata: MetadataSpec
+    # RL 필드
+    algorithm: str | None = None  # dpo | weighted_ntp | grpo | ppo. None이면 SFT
+    models: dict[str, RLModelSpec] | None = None
+    dpo: DPOConfig = Field(default_factory=DPOConfig)
+    weighted_ntp: WeightedNTPConfig = Field(default_factory=WeightedNTPConfig)
 
     @model_validator(mode="after")
     def check_training_duration(self):
         if self.training.epochs is None and self.training.max_steps is None:
             raise ValueError("training.epochs 또는 training.max_steps 중 하나는 필수")
+        return self
+
+    @model_validator(mode="after")
+    def check_rl_consistency(self):
+        if self.algorithm is not None:
+            if self.models is None:
+                raise ValueError(f"algorithm '{self.algorithm}'이 지정되었지만 models가 없습니다")
+            if "policy" not in self.models:
+                raise ValueError("RL 학습에는 models.policy가 필수입니다")
+            policy = self.models["policy"]
+            if policy.optimizer is None:
+                raise ValueError("models.policy에는 optimizer가 필수입니다")
         return self
 
 
