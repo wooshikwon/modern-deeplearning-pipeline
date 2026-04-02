@@ -8,9 +8,10 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 |---------|---------|-----------|
 | `mdp init <name> --task <task> --model <model>` | 프로젝트 스켈레톤 생성 | `--task, --model` |
 | `mdp train -r recipe.yaml -c config.yaml` | 학습 실행 | `--format json` |
-| `mdp inference -r recipe.yaml -c config.yaml --checkpoint <path>` | 배치 추론 | `--format json` |
+| `mdp inference --run-id <id> --data <path>` | 배치 추론 | `--run-id` 또는 `--model-dir`, `--fields`, `--metrics`, `--output-format` |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 | `--format json` |
-| `mdp serve -r recipe.yaml -c config.yaml` | 실시간 서빙 시작 | (backend은 Config에서 설정) |
+| `mdp export --run-id <id> --output <dir>` | 모델 내보내기 (adapter merge + 패키징) | `--run-id` 또는 `--checkpoint` |
+| `mdp serve --run-id <id>` | REST API 서빙 | `--run-id` 또는 `--model-dir`, `--port`, `--host` |
 | `mdp list <what>` | 등록 컴포넌트 조회 | `--task`, `models`, `tasks`, `callbacks`, `strategies` |
 | `mdp version` | 버전 출력 | `--format json` |
 
@@ -495,6 +496,7 @@ optimizer:
 - `text_generation` -> `CausalLMHead` (또는 `AutoModelForCausalLM` 사용 시 head 생략)
 - `seq2seq` -> `Seq2SeqLMHead` (또는 `AutoModelForSeq2SeqLM` 사용 시 head 생략)
 - `image_generation` -> head 생략 권장 (모델 내장)
+- `feature_extraction` -> `ClassificationHead` 또는 `DualEncoderHead` (또는 head 생략)
 
 > `vision_language`는 별도 task가 아니다. multimodal 모델(CLIP, LLaVA, Florence-2 등)은 `text_generation` 또는 `feature_extraction` task에 `fields: {image: ..., text: ...}` 조합으로 표현한다.
 
@@ -1020,13 +1022,11 @@ Key fields for agent decision-making:
   "timestamp": "2026-03-31T16:00:00+00:00",
   "error": null,
   "output_path": "/outputs/predictions/result.parquet",
-  "rows": 5000,
-  "duration_seconds": 120,
-  "metrics": {
+  "task": "image_classification",
+  "evaluation_metrics": {
     "accuracy": 0.943,
     "f1": 0.938
   },
-  "task": "classification",
   "monitoring": {
     "drift_detected": true,
     "drift_score": 0.15,
