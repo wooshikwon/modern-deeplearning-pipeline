@@ -61,7 +61,7 @@ class EMACallback(BaseCallback):
 
         self._model = model
         self._shadow_params = [
-            p.data.clone() for p in model.parameters() if p.requires_grad
+            p.data.clone().cpu() for p in model.parameters() if p.requires_grad
         ]
         logger.info(
             "EMACallback: initialised shadow copy for %d parameter tensors.",
@@ -90,7 +90,7 @@ class EMACallback(BaseCallback):
             )
             return
         for shadow, param in zip(self._shadow_params, trainable):
-            shadow.mul_(self.decay).add_(param.data, alpha=1.0 - self.decay)
+            shadow.mul_(self.decay).add_(param.data.cpu(), alpha=1.0 - self.decay)
 
     def on_train_end(
         self,

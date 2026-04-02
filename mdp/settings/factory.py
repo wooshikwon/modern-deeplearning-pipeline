@@ -40,10 +40,12 @@ class SettingsFactory:
 
         recipe = Recipe(**recipe_dict)
         config = Config()
-        return Settings(recipe=recipe, config=config)
+        settings = Settings(recipe=recipe, config=config)
+        self._validate_recipe(settings)
+        return settings
 
     def for_inference(self, recipe_path: str, config_path: str) -> Settings:
-        """추론용 Settings를 조립한다. 학습 전용 검증은 수행하지 않는다."""
+        """추론용 Settings를 조립한다. 분산 학습 전용 검증은 수행하지 않는다."""
         recipe_dict = self._load_yaml(recipe_path)
         config_dict = self._load_yaml(config_path)
 
@@ -52,13 +54,15 @@ class SettingsFactory:
 
         recipe = Recipe(**recipe_dict)
         config = Config(**config_dict)
-        return Settings(recipe=recipe, config=config)
+        settings = Settings(recipe=recipe, config=config)
+        self._validate_recipe(settings)
+        return settings
 
     def from_artifact(self, artifact_dir: str) -> Settings:
         """artifact 디렉토리의 recipe.yaml에서 Settings를 조립한다.
 
         model/ artifact와 checkpoint/ artifact 모두 사용 가능.
-        학습 전용 검증은 수행하지 않는다. 기본 Config를 사용한다.
+        분산 학습 전용 검증은 수행하지 않는다. 기본 Config를 사용한다.
         """
         from pathlib import Path
 
@@ -73,7 +77,9 @@ class SettingsFactory:
 
         recipe = Recipe(**recipe_dict)
         config = Config()
-        return Settings(recipe=recipe, config=config)
+        settings = Settings(recipe=recipe, config=config)
+        self._validate_recipe(settings)
+        return settings
 
     @staticmethod
     def _load_yaml(path: str) -> dict:
@@ -138,6 +144,35 @@ class SettingsFactory:
         except ValueError:
             pass
         return value
+
+    def _validate_recipe(self, settings: Settings) -> None:
+        """모델/adapter 관련 검증만 실행한다.
+
+        학습 전용 검증(task-fields, distributed batch, GPU 호환성)은 생략한다.
+        """
+        from mdp.settings.validation import ValidationResult
+        from mdp.settings.validation.catalog_validator import CatalogValidator
+        from mdp.settings.validation.business_validator import BusinessValidator
+
+        result = ValidationResult()
+
+        # Catalog: 모델이 catalog과 호환되는지
+        cat_result = CatalogValidator().validate(settings)
+        for w in cat_result.warnings:
+            logger.warning(w)
+        result.errors.extend(cat_result.errors)
+
+        # Business: head-task 호환성 + adapter 제약 (data/distributed 제외)
+        BusinessValidator._check_head_task_compat(settings, result)
+        BusinessValidator._check_adapter(settings, result)
+
+        for w in result.warnings:
+            logger.warning(w)
+
+        if result.errors:
+            raise ValueError(
+                "Settings 검증 실패:\n" + "\n".join(f"  - {e}" for e in result.errors)
+            )
 
     def _validate(self, settings: Settings) -> None:
         """CatalogValidator, BusinessValidator, CompatValidator를 순서대로 실행한다.

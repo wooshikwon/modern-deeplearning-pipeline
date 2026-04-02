@@ -482,9 +482,20 @@ def compare_baselines(
     drift_score = max(drift_scores) if drift_scores else 0.0
     drift_detected = len(alerts) > 0
 
+    # Severity level (AGENT.md 설계)
+    if not drift_detected and drift_score >= 0.5:
+        severity_level = "watch"
+    elif drift_detected and len(alerts) == 1:
+        severity_level = "alert"
+    elif drift_detected and len(alerts) > 1:
+        severity_level = "retrain"
+    else:
+        severity_level = "none"
+
     report: dict[str, Any] = {
         "drift_detected": drift_detected,
         "drift_score": drift_score,
+        "severity_level": severity_level,
         "alerts": alerts,
     }
     if embedding_drift is not None:

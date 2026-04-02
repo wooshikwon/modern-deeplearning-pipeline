@@ -226,6 +226,105 @@ class TinyTokenClassModel(BaseModel):
         return {"val_loss": loss.item()}
 
 
+class TinyMoEModel(BaseModel):
+    """Minimal MoE model for strategy tests.
+
+    Architecture: Embedding -> 1-layer with MoE FFN
+      - gate (router): Linear(hidden_dim, num_experts)
+      - experts: ModuleList of Linear(hidden_dim, hidden_dim)
+      - lm_head: Linear(hidden_dim, vocab_size)
+
+    Mimics HuggingFace MoE structure (gate + experts ModuleList)
+    so MoEStrategy hooks can detect and wrap it.
+    """
+
+    def __init__(
+        self,
+        vocab_size: int = 64,
+        hidden_dim: int = 16,
+        num_experts: int = 4,
+        top_k: int = 2,
+        max_len: int = 32,
+    ) -> None:
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.hidden_dim = hidden_dim
+        self.num_experts = num_experts
+        self.top_k = top_k
+
+        # HuggingFace-style config for MoE detection
+        self.config = type("Config", (), {
+            "num_local_experts": num_experts,
+            "num_experts_per_tok": top_k,
+        })()
+
+        self.token_embedding = nn.Embedding(vocab_size, hidden_dim)
+        self.position_embedding = nn.Embedding(max_len, hidden_dim)
+
+        # MoE layer — mimics MixtralDecoderLayer structure
+        self.moe_layer = _TinyMoELayer(hidden_dim, num_experts, top_k)
+
+        self.lm_head = nn.Linear(hidden_dim, vocab_size, bias=False)
+
+    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        input_ids = batch["input_ids"]
+        B, L = input_ids.shape
+        positions = torch.arange(L, device=input_ids.device).unsqueeze(0)
+        x = self.token_embedding(input_ids) + self.position_embedding(positions)
+        x = self.moe_layer(x)
+        logits = self.lm_head(x)
+        return {"logits": logits}
+
+    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
+        outputs = self.forward(batch)
+        logits = outputs["logits"][:, :-1].contiguous()
+        labels = batch["input_ids"][:, 1:].contiguous()
+        return F.cross_entropy(logits.view(-1, self.vocab_size), labels.view(-1))
+
+    def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
+        loss = self.training_step(batch)
+        return {"val_loss": loss.item()}
+
+
+class _TinyMoELayer(nn.Module):
+    """MoE layer with gate + experts for testing.
+
+    Structure matches what MoEStrategy._is_moe_layer() expects:
+    a child named 'experts' that is an nn.ModuleList,
+    and a child named 'gate' that is an nn.Linear.
+    """
+
+    def __init__(self, hidden_dim: int, num_experts: int, top_k: int) -> None:
+        super().__init__()
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.gate = nn.Linear(hidden_dim, num_experts, bias=False)
+        self.experts = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(hidden_dim, hidden_dim * 2),
+                nn.ReLU(),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+            )
+            for _ in range(num_experts)
+        ])
+
+    def forward(self, hidden_states: Tensor) -> Tensor:
+        """Dense MoE forward (no EP, for single-process tests)."""
+        B, L, H = hidden_states.shape
+        flat = hidden_states.view(-1, H)
+        router_logits = self.gate(flat)
+        weights, indices = torch.topk(router_logits.softmax(dim=-1), k=self.top_k, dim=-1)
+        weights = weights / weights.sum(dim=-1, keepdim=True)
+
+        output = torch.zeros_like(flat)
+        for k in range(self.top_k):
+            for e_idx in range(self.num_experts):
+                mask = indices[:, k] == e_idx
+                if mask.any():
+                    output[mask] += weights[mask, k].unsqueeze(-1) * self.experts[e_idx](flat[mask])
+        return output.view(B, L, H)
+
+
 class TinyDualEncoderModel(BaseModel):
     """Minimal dual encoder for multimodal contrastive learning.
 

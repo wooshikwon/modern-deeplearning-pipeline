@@ -112,6 +112,7 @@ class RLTrainer:
 
         # Strategy
         self.strategy = self._create_strategy(settings)
+        self.expert_parallel = self._create_expert_parallel(settings)
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Callbacks
@@ -148,7 +149,28 @@ class RLTrainer:
         class_path = STRATEGY_MAP.get(strategy_name)
         if class_path is None:
             raise ValueError(f"알 수 없는 분산 전략: {strategy_name}")
-        return self.resolver.resolve({"_component_": class_path})
+        strategy_kwargs = {
+            k: v for k, v in (dist_config if isinstance(dist_config, dict) else {}).items()
+            if k not in ("strategy", "moe")
+        }
+        return self.resolver.resolve({"_component_": class_path, **strategy_kwargs})
+
+    @staticmethod
+    def _create_expert_parallel(settings: Settings) -> Any:
+        """distributed.moe config가 있으면 ExpertParallel을 생성한다."""
+        dist_config = settings.config.compute.distributed
+        if dist_config is None or not isinstance(dist_config, dict):
+            return None
+        moe_config = dist_config.get("moe")
+        if moe_config is None or not moe_config.get("enabled", False):
+            return None
+
+        from mdp.training.strategies.moe import ExpertParallel
+
+        return ExpertParallel(
+            ep_size=moe_config.get("ep_size", moe_config.get("expert_parallel_size", 1)),
+            expert_module_pattern=moe_config.get("expert_module_pattern", "experts"),
+        )
 
     def _create_callbacks(self, configs: list[dict[str, Any]]) -> list:
         callbacks = []
@@ -160,6 +182,7 @@ class RLTrainer:
         return callbacks
 
     def _fire(self, hook_name: str, **kwargs: Any) -> None:
+        kwargs["trainer"] = self
         for cb in self.callbacks:
             method = getattr(cb, hook_name, None)
             if method:
@@ -299,6 +322,97 @@ class RLTrainer:
         except Exception as e:
             logger.warning(f"Policy artifact 저장 실패: {e}")
 
+    # ── Checkpoint (Resume) ──
+
+    def _save_checkpoint(self, ckpt_dir: Path) -> None:
+        """모든 모델의 상태를 저장한다."""
+        import json
+
+        for name, model in {**self.trainable, **self.frozen}.items():
+            model_dir = ckpt_dir / name
+            model_dir.mkdir(parents=True, exist_ok=True)
+
+            unwrapped = getattr(model, "module", model)
+            if self.strategy is not None and hasattr(self.strategy, "save_checkpoint"):
+                self.strategy.save_checkpoint(unwrapped, model_dir / "model.safetensors")
+            elif hasattr(unwrapped, "save_pretrained"):
+                unwrapped.save_pretrained(model_dir)
+            else:
+                torch.save(unwrapped.state_dict(), model_dir / "model.pt")
+
+            if name in self.optimizers:
+                torch.save(self.optimizers[name].state_dict(), model_dir / "optimizer.pt")
+            if name in self.schedulers:
+                torch.save(self.schedulers[name].state_dict(), model_dir / "scheduler.pt")
+
+        (ckpt_dir / "trainer_state.json").write_text(json.dumps({
+            "global_step": self.global_step,
+        }))
+        if self.scaler.is_enabled():
+            torch.save(self.scaler.state_dict(), ckpt_dir / "scaler.pt")
+
+    def _maybe_resume(self) -> None:
+        """체크포인트에서 모든 모델 상태를 복원한다."""
+        import json
+
+        job_config = getattr(self.settings.config, "job", None)
+        if job_config is None:
+            return
+        resume_cfg = getattr(job_config, "resume", "disabled")
+        if resume_cfg == "disabled":
+            return
+
+        # checkpoint 경로 해석
+        storage = getattr(self.settings.config, "storage", None)
+        ckpt_root = Path(storage.checkpoint_dir) if storage and hasattr(storage, "checkpoint_dir") and storage.checkpoint_dir else None
+        if resume_cfg == "auto":
+            if ckpt_root is None:
+                return
+            latest = ckpt_root / "latest"
+            if not latest.exists():
+                return
+            ckpt_dir = latest.resolve()
+        else:
+            ckpt_dir = Path(resume_cfg)
+
+        if not ckpt_dir.exists():
+            logger.warning(f"Resume 체크포인트 없음: {ckpt_dir}")
+            return
+
+        for name, model in {**self.trainable, **self.frozen}.items():
+            model_dir = ckpt_dir / name
+            if not model_dir.exists():
+                logger.warning(f"Resume: {name} 체크포인트 없음, 건너뜀")
+                continue
+
+            unwrapped = getattr(model, "module", model)
+            adapter_path = model_dir / "adapter_model.safetensors"
+            if adapter_path.exists() and hasattr(unwrapped, "load_adapter"):
+                unwrapped.load_adapter(model_dir, adapter_name="default")
+            elif (model_dir / "model.safetensors").exists():
+                from safetensors.torch import load_file
+                unwrapped.load_state_dict(load_file(model_dir / "model.safetensors"), strict=False)
+            elif (model_dir / "model.pt").exists():
+                unwrapped.load_state_dict(torch.load(model_dir / "model.pt", map_location="cpu"))
+
+            if name in self.optimizers and (model_dir / "optimizer.pt").exists():
+                self.optimizers[name].load_state_dict(
+                    torch.load(model_dir / "optimizer.pt", map_location="cpu"))
+            if name in self.schedulers and (model_dir / "scheduler.pt").exists():
+                self.schedulers[name].load_state_dict(
+                    torch.load(model_dir / "scheduler.pt", map_location="cpu"))
+
+        state_path = ckpt_dir / "trainer_state.json"
+        if state_path.exists():
+            state = json.loads(state_path.read_text())
+            self.global_step = state.get("global_step", 0)
+
+        scaler_path = ckpt_dir / "scaler.pt"
+        if scaler_path.exists() and self.scaler.is_enabled():
+            self.scaler.load_state_dict(torch.load(scaler_path, map_location="cpu"))
+
+        logger.info(f"Resumed from {ckpt_dir} (step={self.global_step})")
+
     # ── 학습 루프 ──
 
     def train(self) -> dict[str, Any]:
@@ -327,6 +441,9 @@ class RLTrainer:
                 self.frozen[name] = self.frozen[name].to(self.device)
             self.policy = self.trainable["policy"]
 
+        # Gap 5: Resume from checkpoint
+        self._maybe_resume()
+
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
         start_time = time.time()
@@ -334,6 +451,7 @@ class RLTrainer:
         mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
 
         device_type = self.device.type if self.device.type != "mps" else "cpu"
+        epoch_counter = 0
         train_iter = iter(self.train_loader)
         total_loss = 0.0
         num_steps = 0
@@ -358,6 +476,10 @@ class RLTrainer:
                     try:
                         batch = next(train_iter)
                     except StopIteration:
+                        epoch_counter += 1
+                        # Gap 4: 분산 학습 시 에폭 경계에서 sampler 셔플 갱신
+                        if hasattr(self.train_loader.sampler, "set_epoch"):
+                            self.train_loader.sampler.set_epoch(epoch_counter)
                         train_iter = iter(self.train_loader)
                         batch = next(train_iter)
 
@@ -411,8 +533,8 @@ class RLTrainer:
         """DPO / weighted-NTP — 데이터가 이미 완성된 경로."""
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
             with torch.no_grad():
-                frozen_out = {name: self._forward_model(m, batch) for name, m in self.frozen.items()}
-            trainable_out = {name: self._forward_model(m, batch) for name, m in self.trainable.items()}
+                frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
+            trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
             losses = self.algorithm(trainable_out, frozen_out, batch)
 
         self._backward_and_step(losses)
@@ -426,14 +548,28 @@ class RLTrainer:
         prompt_ids = batch["input_ids"]
         prompt_mask = batch.get("attention_mask")
 
+        # Gap 1: group_size (K개 응답 생성)
+        gen_kwargs = dict(self._generation_kwargs)
+        K = gen_kwargs.pop("group_size", 1)
+
         # 1. Generation (no_grad)
         with torch.no_grad():
-            generated_ids = self.policy.generate(
-                input_ids=prompt_ids,
-                attention_mask=prompt_mask,
-                **self._generation_kwargs,
+            if K > 1:
+                expanded_ids = prompt_ids.repeat_interleave(K, dim=0)
+                expanded_mask = prompt_mask.repeat_interleave(K, dim=0) if prompt_mask is not None else None
+            else:
+                expanded_ids = prompt_ids
+                expanded_mask = prompt_mask
+
+            # DDP wrapper를 벗겨 generate() 호출 (no_grad 안이므로 gradient 동기화 불필요)
+            gen_model = getattr(self.policy, "module", self.policy)
+            generated_ids = gen_model.generate(
+                input_ids=expanded_ids,
+                attention_mask=expanded_mask,
+                **gen_kwargs,
             )
-            gen_mask = (generated_ids != self.policy.config.pad_token_id).long() if hasattr(self.policy, "config") and hasattr(self.policy.config, "pad_token_id") and self.policy.config.pad_token_id is not None else torch.ones_like(generated_ids)
+            pad_id = getattr(getattr(gen_model, "config", None), "pad_token_id", None)
+            gen_mask = (generated_ids != pad_id).long() if pad_id is not None else torch.ones_like(generated_ids)
 
         # 2. Old log_probs (update 전 policy 상태)
         with torch.no_grad():
@@ -444,11 +580,10 @@ class RLTrainer:
         gen_input = {"input_ids": generated_ids, "attention_mask": gen_mask}
         with torch.no_grad():
             frozen_out = {
-                name: self._forward_model(m, gen_input)
+                name: self._forward_model(m, gen_input, role=name)
                 for name, m in self.frozen.items()
             }
 
-        # reward 계산: frozen "reward" 모델이 있으면 그 출력을 reward로 사용
         rewards = self._compute_rewards(frozen_out, generated_ids, gen_mask)
 
         gen_batch = {
@@ -458,6 +593,7 @@ class RLTrainer:
             "prompt_length": prompt_ids.shape[1],
             "old_log_probs": old_log_probs,
             "rewards": rewards,
+            "group_size": K,
         }
 
         # 4. Mini-epoch update
@@ -466,7 +602,7 @@ class RLTrainer:
         for _ in range(ppo_epochs):
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
                 trainable_out = {
-                    name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask})
+                    name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask}, role=name)
                     for name, m in self.trainable.items()
                 }
                 losses = self.algorithm(trainable_out, frozen_out, gen_batch)
@@ -483,41 +619,39 @@ class RLTrainer:
         generated_ids: torch.Tensor,
         gen_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Frozen reward model에서 reward를 추출한다.
-
-        reward model이 있으면 마지막 토큰의 scalar reward를 반환.
+        """Frozen reward model에서 scalar reward를 추출한다.
 
         Returns:
             (batch,) per-sequence scalar reward.
-            Loss 클래스가 알고리즘에 맞게 사용한다:
-            - GRPO: 그대로 group normalization
-            - PPO: per-token reward 배열로 변환 (마지막 토큰에 배치)
+
+        추출 우선순위:
+        1. reward model forward 결과의 "reward" 키 (명시적 scalar)
+        2. reward model의 logits에서 마지막 유효 토큰의 첫 번째 값
+        3. reward model 없으면 0 반환
         """
-        if "reward" in frozen_out:
-            reward_logits = frozen_out["reward"].get("logits")
-            if reward_logits is not None:
-                if reward_logits.dim() == 3:
-                    last_token_idx = gen_mask.sum(dim=-1).long() - 1
-                    scalar_rewards = reward_logits[
-                        torch.arange(reward_logits.shape[0], device=reward_logits.device),
-                        last_token_idx, 0,
-                    ]
-                elif reward_logits.dim() == 2:
-                    scalar_rewards = reward_logits[:, -1]
-                else:
-                    scalar_rewards = reward_logits.squeeze()
-                return scalar_rewards
+        if "reward" not in frozen_out:
+            return torch.zeros(generated_ids.shape[0], device=generated_ids.device)
 
-        # reward model 없으면: reference log_prob sum을 scalar reward로 (fallback)
-        if "reference" in frozen_out and "logits" in frozen_out["reference"]:
-            from mdp.training.losses.rl import compute_log_probs
-            ref_lp = compute_log_probs(frozen_out["reference"]["logits"], generated_ids)
-            mask = gen_mask[:, 1:gen_mask.shape[1]]
-            if ref_lp.shape[1] < mask.shape[1]:
-                mask = mask[:, :ref_lp.shape[1]]
-            return (ref_lp * mask).sum(dim=-1)
+        reward_out = frozen_out["reward"]
 
-        return torch.zeros(generated_ids.shape[0], device=generated_ids.device)
+        # 1순위: 명시적 scalar reward (reward model이 "reward" 키를 반환)
+        if "reward" in reward_out:
+            r = reward_out["reward"]
+            return r.view(-1) if r.dim() > 1 else r
+
+        # 2순위: logits에서 마지막 유효 토큰 추출
+        logits = reward_out.get("logits")
+        if logits is None:
+            return torch.zeros(generated_ids.shape[0], device=generated_ids.device)
+
+        last_idx = gen_mask.sum(dim=-1).long() - 1
+        batch_arange = torch.arange(logits.shape[0], device=logits.device)
+        if logits.dim() == 3:
+            return logits[batch_arange, last_idx, 0]
+        elif logits.dim() == 2:
+            return logits[batch_arange, last_idx]
+        else:
+            return logits.squeeze()
 
     def _backward_and_step(self, losses: dict[str, torch.Tensor]) -> None:
         """모델별 독립 backward + optimizer step."""
@@ -554,11 +688,13 @@ class RLTrainer:
             return out.get("logits", out.get("output"))
         return out
 
-    def _forward_model(self, model: nn.Module, batch: dict) -> dict:
+    def _forward_model(self, model: nn.Module, batch: dict, role: str = "policy") -> dict:
         """배치 형태에 따라 모델 forward를 수행한다.
 
-        preference 배치 (DPO): chosen_input_ids, rejected_input_ids → chosen_logits, rejected_logits
-        causal 배치 (weighted-NTP, PPO): input_ids → logits
+        role에 따라 출력 키가 달라진다:
+        - "policy", "reference" → {"logits": (batch, seq, vocab)} 또는 preference 형태
+        - "value" → {"values": (batch, seq)} — scalar head 또는 LM head[:, :, 0]
+        - "reward" → {"reward": (batch,)} 우선, fallback으로 {"logits": tensor}
         """
         result = {}
 
@@ -569,7 +705,7 @@ class RLTrainer:
                 return out.get("logits", out.get("output"))
             return out
 
-        # preference 형태
+        # preference 형태 (DPO)
         if "chosen_input_ids" in batch:
             result["chosen_logits"] = _extract_logits(model(
                 input_ids=batch["chosen_input_ids"],
@@ -583,9 +719,26 @@ class RLTrainer:
 
         # causal 형태
         if "input_ids" in batch:
-            result["logits"] = _extract_logits(model(
+            out = model(
                 input_ids=batch["input_ids"],
                 attention_mask=batch.get("attention_mask"),
-            ))
+            )
+            logits = _extract_logits(out)
+
+            if role == "value":
+                # value model: logits → (batch, seq) scalar values
+                if logits.dim() == 3 and logits.shape[-1] == 1:
+                    result["values"] = logits.squeeze(-1)
+                elif logits.dim() == 3:
+                    result["values"] = logits[:, :, 0]
+                else:
+                    result["values"] = logits
+            elif role == "reward":
+                # reward model: 명시적 "reward" 키 우선, 없으면 logits 반환
+                if isinstance(out, dict) and "reward" in out:
+                    result["reward"] = out["reward"]
+                result["logits"] = logits
+            else:
+                result["logits"] = logits
 
         return result

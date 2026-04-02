@@ -35,6 +35,7 @@ class CompatValidator:
         self._check_gpu_distributed(settings, result)
         self._check_serving_backend(settings, result)
         self._check_fsdp_qlora(settings, result)
+        self._check_moe_distributed(settings, result)
 
         return result
 
@@ -101,4 +102,28 @@ class CompatValidator:
                 "FSDP와 QLoRA(4bit)는 호환되지 않습니다. "
                 "대안: (1) LoRA 사용, (2) DDP 전략 사용, "
                 "(3) DeepSpeed ZeRO-3 사용"
+            )
+
+    @staticmethod
+    def _check_moe_distributed(settings: Settings, result: ValidationResult) -> None:
+        """4. MoE Expert Parallelism 호환성 검증."""
+        distributed = settings.config.compute.distributed
+        if distributed is None:
+            return
+        moe_config = distributed.get("moe")
+        if moe_config is None or not moe_config.get("enabled", False):
+            return
+
+        ep_size = moe_config.get("ep_size", moe_config.get("expert_parallel_size"))
+        if ep_size is None:
+            result.errors.append(
+                "MoE EP에는 moe.ep_size(Expert Parallel degree)가 필수입니다."
+            )
+            return
+
+        gpu_count = _resolve_gpu_count(settings.config.compute.gpus)
+        if gpu_count is not None and gpu_count % ep_size != 0:
+            result.errors.append(
+                f"GPU 수({gpu_count})가 moe.ep_size({ep_size})의 배수가 아닙니다. "
+                f"world_size = ep_size × dp_size 관계가 성립해야 합니다."
             )

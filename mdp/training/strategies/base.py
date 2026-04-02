@@ -54,7 +54,11 @@ class BaseStrategy(ABC):
         """
         wrapped = {}
         for name, model in models.items():
-            wrapped[name] = self.setup(model, device)
+            if trainable_names is not None and name not in trainable_names:
+                # frozen model: 분산 래핑 없이 device 이동만
+                wrapped[name] = model.to(device)
+            else:
+                wrapped[name] = self.setup(model, device)
         return wrapped
 
     def cleanup(self) -> None:

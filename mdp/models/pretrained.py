@@ -126,5 +126,8 @@ class PretrainedResolver:
         """로컬 파일에서 모델 로딩."""
         import torch
 
-        logger.info("로컬 모델 로딩: %s", path)
+        logger.warning(
+            "local:// URI는 weights_only=False로 pickle 코드를 실행합니다. "
+            "신뢰할 수 없는 소스의 .pt 파일은 사용하지 마세요: %s", path,
+        )
         return torch.load(path, map_location="cpu", weights_only=False, **kwargs)

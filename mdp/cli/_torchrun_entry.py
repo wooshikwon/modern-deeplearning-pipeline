@@ -29,6 +29,9 @@ def main() -> None:
     parser.add_argument(
         "--settings-path", required=True, help="Settings JSON 파일 경로"
     )
+    parser.add_argument(
+        "--result-path", default=None, help="학습 결과를 저장할 JSON 파일 경로 (rank-0 전용)"
+    )
     args = parser.parse_args()
 
     from mdp.settings.schema import Settings
@@ -37,7 +40,18 @@ def main() -> None:
         raw = json.load(f)
     settings = Settings(**raw)
 
-    run_training(settings)
+    result = run_training(settings)
+
+    # rank-0만 결과를 저장한다
+    if args.result_path and result:
+        try:
+            import torch.distributed as dist
+            is_main = not dist.is_initialized() or dist.get_rank() == 0
+        except Exception:
+            is_main = True
+        if is_main:
+            with open(args.result_path, "w") as f:
+                json.dump(result, f, ensure_ascii=False, default=str)
 
 
 if __name__ == "__main__":

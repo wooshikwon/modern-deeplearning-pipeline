@@ -95,6 +95,7 @@ class Trainer:
         self.loss_fn = self._create_loss(recipe.loss)
         self.callbacks = self._create_callbacks(recipe.callbacks)
         self.strategy = self._create_strategy(settings)
+        self.expert_parallel = self._create_expert_parallel(settings)
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Recipe snapshot (체크포인트에 내장용)
@@ -226,10 +227,27 @@ class Trainer:
 
         strategy_kwargs = {
             k: v for k, v in (dist_config if isinstance(dist_config, dict) else {}).items()
-            if k != "strategy"
+            if k not in ("strategy", "moe")
         }
         return self.resolver.resolve(
             {"_component_": class_path, **strategy_kwargs}
+        )
+
+    @staticmethod
+    def _create_expert_parallel(settings: Settings) -> Any:
+        """distributed.moe config가 있으면 ExpertParallel을 생성한다."""
+        dist_config = settings.config.compute.distributed
+        if dist_config is None or not isinstance(dist_config, dict):
+            return None
+        moe_config = dist_config.get("moe")
+        if moe_config is None or not moe_config.get("enabled", False):
+            return None
+
+        from mdp.training.strategies.moe import ExpertParallel
+
+        return ExpertParallel(
+            ep_size=moe_config.get("ep_size", moe_config.get("expert_parallel_size", 1)),
+            expert_module_pattern=moe_config.get("expert_module_pattern", "experts"),
         )
 
     def _estimate_total_steps(self) -> int:
@@ -241,6 +259,15 @@ class Trainer:
     # ── Callback dispatch ──
 
     def _fire(self, hook_name: str, **extra_kwargs: Any) -> None:
+        # EP gather: checkpoint를 저장할 수 있는 hook 전에 expert를 모은다.
+        # 이후 strategy.save_checkpoint이 완전한 state_dict를 저장할 수 있다.
+        needs_ep_gather = (
+            self.expert_parallel is not None
+            and hook_name in ("on_validation_end", "on_batch_end")
+        )
+        if needs_ep_gather:
+            self.expert_parallel.gather_experts(self.model)
+
         kwargs = {
             "model": self.model,
             "optimizer": self.optimizer,
@@ -249,6 +276,7 @@ class Trainer:
             "strategy": self.strategy,
             "recipe_dict": self._recipe_dict,
             "scaler": self.scaler,
+            "trainer": self,
         }
         kwargs.update(extra_kwargs)
         for cb in self.callbacks:
@@ -259,6 +287,10 @@ class Trainer:
                 except Exception as e:
                     logger.warning(f"콜백 {type(cb).__name__}.{hook_name} 실패: {e}")
 
+        # EP scatter: checkpoint 저장 후 비담당 expert를 다시 CPU + frozen
+        if needs_ep_gather:
+            self.expert_parallel.scatter_experts(self.model, self.device)
+
     def _should_stop(self) -> bool:
         return any(
             getattr(cb, "should_stop", False) for cb in self.callbacks
@@ -268,6 +300,18 @@ class Trainer:
 
     def train(self) -> dict[str, Any]:
         """학습을 실행하고 최종 메트릭을 반환한다."""
+        # Expert Parallelism (전략 setup 전에 적용 — hook 설치 + expert 분배)
+        if self.expert_parallel is not None:
+            if self.strategy is not None and not dist.is_initialized():
+                # EP는 process group이 필요하므로, 전략이 초기화하게 한다.
+                # 대부분의 전략은 setup() 첫 줄에서 init_process_group()을 호출한다.
+                # EP를 먼저 적용하려면 process group이 먼저 있어야 하므로,
+                # 직접 초기화한다.
+                import torch.distributed as _dist
+                backend = getattr(self.strategy, "backend", "nccl")
+                _dist.init_process_group(backend=backend)
+            self.model = self.expert_parallel.setup(self.model, self.device)
+
         # Strategy setup (DDP/FSDP/DeepSpeed wrapping)
         if self.strategy is not None:
             self.model = self.strategy.setup(self.model, self.device, optimizer=self.optimizer)
@@ -614,6 +658,10 @@ class Trainer:
             state = json.loads(state_path.read_text())
             self.start_epoch = state.get("epoch", 0)
             self.global_step = state.get("global_step", 0)
+
+        # EP: checkpoint에서 전체 expert를 로드한 후, 비담당 expert를 다시 분배
+        if self.expert_parallel is not None:
+            self.expert_parallel.scatter_experts(self.model, self.device)
 
     # ── Monitoring baseline ──
 

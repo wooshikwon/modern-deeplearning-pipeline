@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import logging
 import os
 from typing import Any
 
@@ -10,6 +11,8 @@ import torch
 from torch import nn
 
 from mdp.training.strategies.base import BaseStrategy
+
+logger = logging.getLogger(__name__)
 
 
 class FSDPStrategy(BaseStrategy):
@@ -37,6 +40,7 @@ class FSDPStrategy(BaseStrategy):
         cpu_offload: bool = False,
         precision: str = "bf16",
         min_num_params: int = 1_000_000,
+        auto_wrap_cls: str | None = None,
     ) -> None:
         self.sharding_strategy_name = sharding_strategy
         self.mixed_precision = mixed_precision
@@ -44,6 +48,7 @@ class FSDPStrategy(BaseStrategy):
         self.cpu_offload = cpu_offload
         self.precision = precision
         self.min_num_params = min_num_params
+        self.auto_wrap_cls = auto_wrap_cls
         self._local_rank: int | None = None
 
     # ------------------------------------------------------------------
@@ -70,11 +75,22 @@ class FSDPStrategy(BaseStrategy):
 
         sharding = getattr(ShardingStrategy, self.sharding_strategy_name)
 
+        # Auto-wrap policy: transformer layer class 또는 size 기반
+        if self.auto_wrap_cls is not None:
+            from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+            layer_cls = self._resolve_layer_class(self.auto_wrap_cls)
+            auto_wrap_policy = functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls={layer_cls},
+            )
+        else:
+            auto_wrap_policy = functools.partial(
+                size_based_auto_wrap_policy, min_num_params=self.min_num_params,
+            )
+
         fsdp_kwargs: dict[str, Any] = {
             "sharding_strategy": sharding,
-            "auto_wrap_policy": functools.partial(
-                size_based_auto_wrap_policy, min_num_params=self.min_num_params,
-            ),
+            "auto_wrap_policy": auto_wrap_policy,
         }
 
         if device.type == "cuda":
@@ -155,3 +171,25 @@ class FSDPStrategy(BaseStrategy):
 
         if dist.is_initialized():
             dist.destroy_process_group()
+
+    @staticmethod
+    def _resolve_layer_class(cls_name: str) -> type:
+        """클래스 이름 또는 전체 경로에서 transformer layer 클래스를 resolve한다."""
+        import importlib
+
+        if "." in cls_name:
+            module_path, _, class_name = cls_name.rpartition(".")
+            module = importlib.import_module(module_path)
+            return getattr(module, class_name)
+        # 단축명: transformers 패키지에서 탐색
+        try:
+            import transformers
+            cls = getattr(transformers, cls_name, None)
+            if cls is not None:
+                return cls
+        except ImportError:
+            pass
+        raise ValueError(
+            f"transformer layer class '{cls_name}'를 찾을 수 없습니다. "
+            "전체 경로를 사용하세요."
+        )

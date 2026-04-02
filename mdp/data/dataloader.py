@@ -14,6 +14,7 @@ from torch.utils.data import DataLoader
 
 from mdp.data.loader import load_data
 from mdp.data.tokenizer import (
+    LABEL_ALIGN,
     LABEL_CAUSAL,
     LABEL_COPY,
     LABEL_PREFERENCE,
@@ -58,10 +59,13 @@ def _select_collator(
         from transformers import DataCollatorWithPadding
 
         return DataCollatorWithPadding(tokenizer=tokenizer)
-    else:
+    elif label_strategy == LABEL_ALIGN:
         from transformers import DataCollatorWithPadding
 
         return DataCollatorWithPadding(tokenizer=tokenizer)
+    else:
+        # LABEL_NONE (이미지 등): 기본 torch collate 사용
+        return None
 
 
 # ── Source loading ──

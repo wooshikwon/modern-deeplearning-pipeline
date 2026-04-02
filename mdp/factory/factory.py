@@ -62,6 +62,16 @@ class Factory:
         # 단계 1: pretrained 로딩
         model = self._load_pretrained(model_spec)
 
+        # MoE 감지
+        if self._is_moe_model(model):
+            moe_info = self._extract_moe_info(model)
+            self._cache["moe_info"] = moe_info
+            logger.info(
+                "MoE 모델 감지: %s experts, top-%s",
+                moe_info.get("num_experts", "?"),
+                moe_info.get("top_k", "?"),
+            )
+
         # 단계 2: head 교체 (설정이 있을 때만)
         if recipe.head is not None:
             head_config = dict(recipe.head)
@@ -157,6 +167,24 @@ class Factory:
             )
         setattr(model, target_attr, head)
         logger.info("Head 교체: model.%s → %s", target_attr, type(head).__name__)
+
+    @staticmethod
+    def _is_moe_model(model: nn.Module) -> bool:
+        """모델이 MoE 아키텍처인지 감지한다."""
+        config = getattr(model, "config", None)
+        if config is None:
+            return False
+        return hasattr(config, "num_local_experts") or hasattr(config, "num_experts")
+
+    @staticmethod
+    def _extract_moe_info(model: nn.Module) -> dict:
+        """MoE 모델의 expert 정보를 추출한다."""
+        config = model.config
+        return {
+            "num_experts": getattr(config, "num_local_experts", None)
+            or getattr(config, "num_experts", None),
+            "top_k": getattr(config, "num_experts_per_tok", None),
+        }
 
     # ── Phase 3: 데이터 ──
 

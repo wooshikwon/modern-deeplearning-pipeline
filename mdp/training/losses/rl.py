@@ -126,6 +126,7 @@ def compute_gae(
     mask: torch.Tensor,
     gamma: float = 1.0,
     lam: float = 0.95,
+    last_values: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Generalized Advantage Estimation.
 
@@ -135,6 +136,7 @@ def compute_gae(
         mask: (batch, seq) — response 토큰만 True.
         gamma: 할인율. 텍스트 생성에서는 보통 1.0.
         lam: GAE lambda. 편향-분산 트레이드오프.
+        last_values: (batch,) — truncation bootstrap. None이면 V(T+1)=0.
 
     Returns:
         (batch, seq) per-token advantage.
@@ -144,7 +146,12 @@ def compute_gae(
     last_gae = torch.zeros(values.shape[0], device=values.device)
 
     for t in reversed(range(seq_len)):
-        next_value = values[:, t + 1] if t + 1 < seq_len else torch.zeros_like(last_gae)
+        if t + 1 < seq_len:
+            next_value = values[:, t + 1]
+        elif last_values is not None:
+            next_value = last_values
+        else:
+            next_value = torch.zeros_like(last_gae)
         delta = rewards[:, t] + gamma * next_value - values[:, t]
         last_gae = delta + gamma * lam * last_gae
         advantages[:, t] = last_gae
@@ -208,12 +215,19 @@ class GRPOLoss:
         log_ratio = (new_log_probs - old_log_probs).clamp(min=-20.0, max=20.0)
         ratio = log_ratio.exp()
 
-        # GRPO advantage: per-sequence reward → group normalization (분산 동기화)
-        rewards = batch["rewards"]  # (batch,) scalar per sequence
+        # GRPO advantage: per-sequence reward → group 또는 batch normalization
+        rewards = batch["rewards"]  # (batch*K,) or (batch,) scalar per sequence
+        K = batch.get("group_size", 1)
         with torch.no_grad():
-            # scalar rewards를 per-token mask로 정규화 (broadcast 전)
-            reward_mask = torch.ones_like(rewards, dtype=torch.bool)
-            advantages = normalize_advantages(rewards, reward_mask)
+            if K > 1:
+                # group 내 정규화: (batch*K,) → (batch, K) → normalize → (batch*K,)
+                grouped = rewards.view(-1, K)
+                g_mean = grouped.mean(dim=1, keepdim=True)
+                g_std = grouped.std(dim=1, keepdim=True).clamp(min=1e-8)
+                advantages = ((grouped - g_mean) / g_std).view(-1)
+            else:
+                reward_mask = torch.ones_like(rewards, dtype=torch.bool)
+                advantages = normalize_advantages(rewards, reward_mask)
         # broadcast to per-token
         adv = advantages.unsqueeze(-1).expand_as(ratio)
 
@@ -288,14 +302,23 @@ class PPOLoss:
                 per_token_rewards[i, idx] = raw_rewards[i]
 
         # Value model → per-token value → GAE
-        if "value" in trainable_out and "logits" in trainable_out["value"]:
-            values_raw = trainable_out["value"]["logits"][:, :-1, 0]  # (batch, seq-1)
-            values_padded = F.pad(values_raw, (0, new_log_probs.shape[1] - values_raw.shape[1]))
+        # _forward_model(role="value")가 {"values": (batch, seq)} 를 반환한다.
+        if "value" in trainable_out and "values" in trainable_out["value"]:
+            values_full = trainable_out["value"]["values"]
+            values_raw = values_full[:, :-1]  # causal shift: (batch, seq-1)
+            if values_raw.shape[1] < new_log_probs.shape[1]:
+                values_padded = F.pad(values_raw, (0, new_log_probs.shape[1] - values_raw.shape[1]))
+            else:
+                values_padded = values_raw[:, :new_log_probs.shape[1]]
+            # truncation bootstrap: 마지막 토큰의 value 예측.
+            # EOS 종료 시퀀스에서는 value model이 ~0을 예측하므로 안전.
+            last_values = values_full[:, -1].detach()
         else:
             values_padded = torch.zeros_like(new_log_probs)
+            last_values = None
 
         with torch.no_grad():
-            advantages = compute_gae(values_padded.detach(), per_token_rewards, mask, lam=self.gae_lambda)
+            advantages = compute_gae(values_padded.detach(), per_token_rewards, mask, lam=self.gae_lambda, last_values=last_values)
             advantages = normalize_advantages(advantages, mask)
 
         # clipped surrogate
@@ -310,7 +333,7 @@ class PPOLoss:
         losses = {"policy": policy_loss}
 
         # value loss: MSE(values, returns)
-        if "value" in trainable_out and "logits" in trainable_out["value"]:
+        if "value" in trainable_out and "values" in trainable_out["value"]:
             returns = (advantages + values_padded).detach()
             value_loss = F.mse_loss(values_padded * mask.float(), returns * mask.float())
             losses["value"] = self.value_coeff * value_loss

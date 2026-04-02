@@ -104,6 +104,7 @@ class GenerationSpec(BaseModel):
     do_sample: bool = True
     num_beams: int = 1
     repetition_penalty: float = 1.0
+    group_size: int = 1  # GRPO K개 응답 생성. 1이면 기존 동작.
 
 
 class EvaluationSpec(BaseModel):

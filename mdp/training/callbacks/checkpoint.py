@@ -93,9 +93,23 @@ class ModelCheckpoint(BaseCallback):
         metrics: dict[str, float] | None = None,
         strategy: Any | None = None,
         recipe_dict: dict[str, Any] | None = None,
+        scaler: Any | None = None,
     ) -> Path:
         """Persist a checkpoint to disk and return its path."""
         ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
+
+        # 분산 학습 시 rank-0에서만 저장 (동시 쓰기로 인한 파일 손상 방지)
+        is_main = True
+        try:
+            import torch.distributed as dist
+            if dist.is_initialized():
+                is_main = dist.get_rank() == 0
+        except Exception:
+            pass
+
+        if not is_main:
+            return ckpt_dir
+
         ckpt_dir.mkdir(parents=True, exist_ok=True)
 
         # Recipe를 체크포인트에 내장 (최초 1회)
@@ -116,7 +130,6 @@ class ModelCheckpoint(BaseCallback):
             try:
                 from safetensors.torch import save_file
 
-                # Unwrap DDP/FSDP if needed
                 target = getattr(model, "module", model)
                 save_file(target.state_dict(), ckpt_dir / "model.safetensors")
             except ImportError:
@@ -128,6 +141,10 @@ class ModelCheckpoint(BaseCallback):
         if scheduler is not None:
             torch.save(scheduler.state_dict(), ckpt_dir / "scheduler.pt")
 
+        # GradScaler 상태 (fp16 resume 안정성)
+        if scaler is not None and hasattr(scaler, "is_enabled") and scaler.is_enabled():
+            torch.save(scaler.state_dict(), ckpt_dir / "scaler.pt")
+
         trainer_state = {
             "epoch": epoch,
             "global_step": global_step,
@@ -137,7 +154,6 @@ class ModelCheckpoint(BaseCallback):
             json.dumps(trainer_state, indent=2),
         )
 
-        # Update the "latest" symlink
         self._update_symlink("latest", ckpt_dir)
 
         logger.info("Saved checkpoint: %s", ckpt_dir)
@@ -182,17 +198,27 @@ class ModelCheckpoint(BaseCallback):
     ) -> None:
         global_step = kwargs.get("global_step", step)
         if self.every_n_steps is not None and global_step > 0 and global_step % self.every_n_steps == 0:
-            model = kwargs.get("model")
-            optimizer = kwargs.get("optimizer")
-            if model is not None and optimizer is not None:
-                scheduler = kwargs.get("scheduler")
-                strategy = kwargs.get("strategy")
-                epoch = kwargs.get("epoch", 0)
-                recipe_dict = kwargs.get("recipe_dict")
-                self.save_checkpoint(
-                    model, optimizer, scheduler, epoch, global_step, metrics,
-                    strategy=strategy, recipe_dict=recipe_dict,
-                )
+            # RLTrainer: multi-model checkpoint 위임
+            trainer = kwargs.get("trainer")
+            if trainer is not None and hasattr(trainer, "_save_checkpoint"):
+                ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
+                ckpt_dir.mkdir(parents=True, exist_ok=True)
+                trainer._save_checkpoint(ckpt_dir)
+                self._update_symlink("latest", ckpt_dir)
+                logger.info("Saved RL checkpoint: %s", ckpt_dir)
+            else:
+                model = kwargs.get("model")
+                optimizer = kwargs.get("optimizer")
+                if model is not None and optimizer is not None:
+                    scheduler = kwargs.get("scheduler")
+                    strategy = kwargs.get("strategy")
+                    epoch = kwargs.get("epoch", 0)
+                    recipe_dict = kwargs.get("recipe_dict")
+                    scaler = kwargs.get("scaler")
+                    self.save_checkpoint(
+                        model, optimizer, scheduler, epoch, global_step, metrics,
+                        strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
+                    )
 
     def on_validation_end(
         self,
@@ -219,10 +245,11 @@ class ModelCheckpoint(BaseCallback):
         strategy = kwargs.get("strategy")
         global_step = kwargs.get("global_step", 0)
         recipe_dict = kwargs.get("recipe_dict")
+        scaler = kwargs.get("scaler")
 
         ckpt_path = self.save_checkpoint(
             model, optimizer, scheduler, epoch + 1, global_step, metrics,
-            strategy=strategy, recipe_dict=recipe_dict,
+            strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
         )
 
         metric_value = metrics[self.monitor]

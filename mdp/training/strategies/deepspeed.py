@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from torch import nn
 import torch
 
 from mdp.training.strategies.base import BaseStrategy
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_DS_CONFIG: dict[str, Any] = {
     "zero_optimization": {
@@ -36,10 +39,25 @@ class DeepSpeedStrategy(BaseStrategy):
         self,
         ds_config: dict[str, Any] | None = None,
         batch_size: int = 32,
+        moe: dict | None = None,
     ) -> None:
         self.ds_config = dict(ds_config) if ds_config is not None else dict(_DEFAULT_DS_CONFIG)
         self.batch_size = batch_size
         self._engine = None
+
+        if moe:
+            if "moe" in self.ds_config:
+                logger.warning(
+                    "ds_config에 이미 'moe' 키가 존재합니다. "
+                    "moe 파라미터로 덮어씁니다."
+                )
+            self.ds_config["moe"] = {
+                "enabled": True,
+                "ep_size": moe.get("expert_parallel_size", 1),
+                "moe_param_group": True,
+            }
+            if "num_experts" in moe:
+                self.ds_config["moe"]["num_experts"] = moe["num_experts"]
 
     # ------------------------------------------------------------------
     # BaseStrategy interface

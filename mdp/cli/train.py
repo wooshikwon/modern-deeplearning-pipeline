@@ -33,7 +33,7 @@ def _run_single(settings) -> dict:
     return run_training(settings)
 
 
-def _run_distributed(settings, nproc: int) -> None:
+def _run_distributed(settings, nproc: int) -> dict:
     """torchrun을 사용하여 분산 학습을 실행한다."""
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False,
@@ -41,6 +41,7 @@ def _run_distributed(settings, nproc: int) -> None:
         json.dump(settings.model_dump(), f, ensure_ascii=False, default=str)
         settings_path = f.name
 
+    result_path = settings_path.replace(".json", "_result.json")
     entry_script = Path(__file__).resolve().parent / "_torchrun_entry.py"
 
     cmd = [
@@ -48,10 +49,18 @@ def _run_distributed(settings, nproc: int) -> None:
         f"--nproc_per_node={nproc}",
         str(entry_script),
         "--settings-path", settings_path,
+        "--result-path", result_path,
     ]
     logger.info("torchrun command: %s", " ".join(cmd))
 
     subprocess.run(cmd, check=True)
+
+    # rank-0이 저장한 결과를 읽는다
+    result_file = Path(result_path)
+    if result_file.exists():
+        with open(result_file) as f:
+            return json.load(f)
+    return {}
 
 
 def run_train(recipe_path: str, config_path: str) -> None:
@@ -84,8 +93,7 @@ def run_train(recipe_path: str, config_path: str) -> None:
         if nproc > 1:
             if not is_json_mode():
                 typer.echo(f"분산 학습 시작 (nproc={nproc})...")
-            _run_distributed(settings, nproc)
-            train_result = {}
+            train_result = _run_distributed(settings, nproc)
         else:
             if not is_json_mode():
                 typer.echo("단일 학습 시작...")
