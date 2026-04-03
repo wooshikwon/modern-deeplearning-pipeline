@@ -69,7 +69,8 @@ def run_serve(
         recipe = settings.recipe
 
         model.eval()
-        handler = create_handler(model, recipe, source_dir)
+        serving_config = settings.config.serving
+        handler = create_handler(model, recipe, source_dir, serving_config=serving_config)
         app = create_app(handler, recipe)
 
         if not is_json_mode():
@@ -81,6 +82,7 @@ def run_serve(
         if is_json_mode():
             emit_result(build_result(
                 command="serve", status="starting",
+                run_id=run_id,
                 port=port,
             ))
 

@@ -17,9 +17,6 @@ data:
   fields:
     image: image
     text: text
-  column_map:
-    image: jpg
-    text: txt
   split:
     train: "train"
     val: "val"

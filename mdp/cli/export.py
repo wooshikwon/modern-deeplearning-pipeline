@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import shutil
 from pathlib import Path
@@ -92,21 +91,13 @@ def run_export(
         if recipe_src.exists():
             shutil.copy(recipe_src, output_dir / "recipe.yaml")
 
-        # serving_meta.json
-        meta = {
-            "model_class": type(target).__name__,
-            "head_replaced": recipe.head is not None,
-            "merged": True,
-        }
-        (output_dir / "serving_meta.json").write_text(json.dumps(meta, indent=2))
-
         if not is_json_mode():
             typer.echo(f"내보내기 완료: {output_dir}")
         else:
             emit_result(build_result(
                 command="export",
                 output_dir=str(output_dir),
-                model_class=meta["model_class"],
+                model_class=type(target).__name__,
                 merged=True,
             ))
 

@@ -33,13 +33,22 @@ class BusinessValidator:
 
     def validate(self, settings: Settings) -> ValidationResult:
         """검증 결과를 반환한다."""
+        return self.validate_partial(settings)
+
+    @classmethod
+    def validate_partial(cls, settings: Settings, checks: list[str] | None = None) -> ValidationResult:
+        """부분 검증. checks가 None이면 전체 실행."""
         result = ValidationResult()
-
-        self._check_head_task_compat(settings, result)
-        self._check_adapter(settings, result)
-        self._check_distributed_batch(settings, result)
-        self._check_task_fields(settings, result)
-
+        all_checks = {
+            "head_task": cls._check_head_task_compat,
+            "adapter": cls._check_adapter,
+            "distributed_batch": cls._check_distributed_batch,
+            "task_fields": cls._check_task_fields,
+        }
+        targets = checks or list(all_checks.keys())
+        for name in targets:
+            if name in all_checks:
+                all_checks[name](settings, result)
         return result
 
     # ── 개별 검증 ──
@@ -153,7 +162,7 @@ class BusinessValidator:
         result.errors.extend(errors)
         result.warnings.extend(warnings)
 
-        VISION_TASKS = {"image_classification", "object_detection", "semantic_segmentation"}
+        VISION_TASKS = {"image_classification", "object_detection", "semantic_segmentation", "image_generation"}
         if recipe.task in VISION_TASKS and data.tokenizer is not None:
             result.warnings.append(
                 f"태스크 '{recipe.task}'에서는 tokenizer가 사용되지 않습니다. "

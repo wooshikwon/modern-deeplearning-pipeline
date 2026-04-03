@@ -212,6 +212,7 @@ class Factory:
                 tokenizer_config=data.tokenizer,
                 loader_config=data.dataloader.model_dump(),
                 distributed=distributed,
+                val_split=data.val_split,
             )
 
         return self._get_or_create("dataloaders", _create)

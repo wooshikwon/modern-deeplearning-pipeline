@@ -161,3 +161,74 @@ def test_rl_recipe_validation() -> None:
             training=TrainingSpec(max_steps=1),
             metadata=MetadataSpec(author="test", description="test"),
         )
+
+
+def test_dpo_validation_produces_preference_accuracy() -> None:
+    """DPO 학습 중 validation이 preference accuracy를 반환한다."""
+    from tests.e2e.datasets import ListDataLoader
+    from mdp.training.rl_trainer import RLTrainer
+
+    class TinyLM(nn.Module):
+        def __init__(self, vocab=32, hidden=16):
+            super().__init__()
+            self.embed = nn.Embedding(vocab, hidden)
+            self.head = nn.Linear(hidden, vocab)
+
+        def forward(self, input_ids, attention_mask=None):
+            h = self.embed(input_ids)
+            logits = self.head(h)
+            return type("Out", (), {"logits": logits})()
+
+    def make_pref_batches(n, batch_size, seq_len=8, vocab=32):
+        batches = []
+        for _ in range(n):
+            batches.append({
+                "chosen_input_ids": torch.randint(0, vocab, (batch_size, seq_len)),
+                "chosen_attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+                "chosen_labels": torch.randint(0, vocab, (batch_size, seq_len)),
+                "rejected_input_ids": torch.randint(0, vocab, (batch_size, seq_len)),
+                "rejected_attention_mask": torch.ones(batch_size, seq_len, dtype=torch.long),
+                "rejected_labels": torch.randint(0, vocab, (batch_size, seq_len)),
+            })
+        return batches
+
+    recipe = Recipe(
+        name="dpo-val-test",
+        task="text_generation",
+        algorithm={"_component_": "DPO", "beta": 0.1},
+        models={
+            "policy": RLModelSpec(
+                class_path="tests.e2e.test_rl_dpo.TinyLM",
+                optimizer={"_component_": "AdamW", "lr": 1e-3},
+            ),
+            "reference": RLModelSpec(
+                class_path="tests.e2e.test_rl_dpo.TinyLM",
+            ),
+        },
+        data=DataSpec(source="/tmp/fake"),
+        training=TrainingSpec(max_steps=4, val_check_interval=2),
+        metadata=MetadataSpec(author="test", description="dpo val test"),
+    )
+    settings = Settings(recipe=recipe, config=Config())
+    settings.config.job.resume = "disabled"
+
+    models = {"policy": TinyLM(), "reference": TinyLM()}
+
+    trainer = RLTrainer(
+        settings=settings,
+        models=models,
+        train_loader=ListDataLoader(make_pref_batches(6, 4)),
+        val_loader=ListDataLoader(make_pref_batches(3, 4)),
+    )
+    trainer.device = torch.device("cpu")
+    trainer.amp_enabled = False
+
+    result = trainer.train()
+
+    assert result["total_steps"] == 4
+    # Validation should have run at step 2 and 4, populating last_metrics
+    assert "val_preference_accuracy" in trainer.last_metrics, (
+        f"Expected val_preference_accuracy in last_metrics, got: {trainer.last_metrics}"
+    )
+    acc = trainer.last_metrics["val_preference_accuracy"]
+    assert 0.0 <= acc <= 1.0, f"Preference accuracy should be in [0,1], got {acc}"

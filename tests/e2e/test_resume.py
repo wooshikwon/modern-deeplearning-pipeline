@@ -12,6 +12,7 @@ import torch
 
 from mdp.settings.schema import Settings
 from tests.e2e.conftest import make_test_settings
+from mdp.training.callbacks.base import BaseCallback
 from mdp.training.callbacks.checkpoint import ModelCheckpoint
 from mdp.training.trainer import Trainer
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
@@ -225,3 +226,73 @@ class TestResume:
         # epoch 1에서 시작하여 3까지 = 2 에폭 학습
         assert result["total_epochs"] == 2
         assert trainer.global_step > 3
+
+    def test_step_level_resume_skips_processed_batches(self, tmp_path) -> None:
+        """step-level checkpoint에서 resume 시 이미 처리된 배치를 건너뛴다."""
+        ckpt_dir = tmp_path / "checkpoints"
+        num_batches = 6
+
+        # Phase 1: Train 1 epoch with step-level checkpointing (every 3 steps)
+        settings1 = _make_settings(epochs=1, checkpoint_dir=str(ckpt_dir))
+        model1 = TinyVisionModel(num_classes=2, hidden_dim=16)
+        batches = make_vision_batches(
+            num_batches=num_batches, batch_size=4, num_classes=2, image_size=8
+        )
+
+        trainer1 = Trainer(
+            settings=settings1,
+            model=model1,
+            train_loader=ListDataLoader(batches),
+        )
+        trainer1.device = torch.device("cpu")
+        trainer1.amp_enabled = False
+
+        ckpt_cb = ModelCheckpoint(
+            dirpath=ckpt_dir,
+            monitor="val_loss",
+            mode="min",
+            every_n_steps=3,
+        )
+        trainer1.callbacks.append(ckpt_cb)
+        trainer1.train()
+
+        # Verify a step-level checkpoint was saved with step_in_epoch
+        latest_link = ckpt_dir / "latest"
+        assert latest_link.exists() or latest_link.is_symlink()
+        state_path = latest_link.resolve() / "trainer_state.json"
+        state = json.loads(state_path.read_text())
+        assert state["step_in_epoch"] > 0, "step_in_epoch should be > 0"
+        saved_step_in_epoch = state["step_in_epoch"]
+
+        # Phase 2: Resume for another epoch — first epoch should skip processed batches
+        settings2 = _make_settings(
+            epochs=2, resume="auto", checkpoint_dir=str(ckpt_dir)
+        )
+        model2 = TinyVisionModel(num_classes=2, hidden_dim=16)
+
+        # Track actual batch processing count
+        processed_batches = []
+
+        class BatchCounter(BaseCallback):
+            def on_batch_start(self, step: int, **kwargs):
+                processed_batches.append(step)
+
+        trainer2 = Trainer(
+            settings=settings2,
+            model=model2,
+            train_loader=ListDataLoader(batches),
+        )
+        trainer2.device = torch.device("cpu")
+        trainer2.amp_enabled = False
+        trainer2.callbacks.append(BatchCounter())
+
+        result2 = trainer2.train()
+
+        # The first epoch after resume should have skipped `saved_step_in_epoch` batches.
+        # Total batches in first resumed epoch = num_batches - saved_step_in_epoch
+        # Second epoch = full num_batches
+        # So total processed < 2 * num_batches
+        expected_max = 2 * num_batches - saved_step_in_epoch
+        assert len(processed_batches) <= expected_max, (
+            f"Expected at most {expected_max} batches, got {len(processed_batches)}"
+        )

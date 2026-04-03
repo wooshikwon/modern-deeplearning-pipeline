@@ -8,7 +8,6 @@ from mdp.models.heads import (
     DetectionHead,
     DualEncoderHead,
     SegmentationHead,
-    Seq2SeqLMHead,
     TokenClassificationHead,
 )
 from mdp.models.pretrained import PretrainedResolver
@@ -22,6 +21,5 @@ __all__ = [
     "DualEncoderHead",
     "PretrainedResolver",
     "SegmentationHead",
-    "Seq2SeqLMHead",
     "TokenClassificationHead",
 ]

@@ -63,6 +63,7 @@ class ModelCheckpoint(BaseCallback):
         self.mode = mode
         self.save_top_k = save_top_k
         self.every_n_steps = every_n_steps
+        self.critical: bool = True
 
         # (metric_value, checkpoint_path) — worst first for easy eviction
         self.best_models: list[tuple[float, str]] = []
@@ -94,6 +95,7 @@ class ModelCheckpoint(BaseCallback):
         strategy: Any | None = None,
         recipe_dict: dict[str, Any] | None = None,
         scaler: Any | None = None,
+        step_in_epoch: int = 0,
     ) -> Path:
         """Persist a checkpoint to disk and return its path."""
         ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
@@ -148,6 +150,7 @@ class ModelCheckpoint(BaseCallback):
         trainer_state = {
             "epoch": epoch,
             "global_step": global_step,
+            "step_in_epoch": step_in_epoch,
             "metrics": metrics or {},
         }
         (ckpt_dir / "trainer_state.json").write_text(
@@ -218,6 +221,7 @@ class ModelCheckpoint(BaseCallback):
                     self.save_checkpoint(
                         model, optimizer, scheduler, epoch, global_step, metrics,
                         strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
+                        step_in_epoch=step + 1,
                     )
 
     def on_validation_end(

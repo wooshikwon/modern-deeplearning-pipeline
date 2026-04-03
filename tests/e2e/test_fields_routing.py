@@ -1,12 +1,13 @@
 """E2E tests for fields-based routing, label strategy, collator, and task validation.
 
-23 tests covering:
+25 tests covering:
 - TestDeriveLabelStrategy (10): all fields combinations
 - TestCollatorSelection (2): padding vs causal collator
 - TestLoaderRouting (4): mock-patched internal routing functions
 - TestTaskValidation (4): TASK_PRESETS validation
 - TestGlobalStep (1): grad_accum global_step counting
 - TestInitWithCatalog (2): LLM and vision catalog init
+- TestValSplit (2): val_split default and None behavior
 """
 
 from __future__ import annotations
@@ -268,3 +269,40 @@ class TestInitWithCatalog:
 
         assert data["head_builtin"] is False
         assert "image_classification" in data["supported_tasks"]
+
+
+# ---------------------------------------------------------------------------
+# TestValSplit — 2 tests for val_split field default and None behavior
+# ---------------------------------------------------------------------------
+
+
+class TestValSplit:
+    """Verify val_split schema defaults and semantics."""
+
+    def test_val_split_auto_default(self) -> None:
+        """val_split="auto"(기본)는 기존 동작과 동일."""
+        from mdp.settings.schema import DataSpec
+
+        spec = DataSpec(source="dummy")
+        assert spec.val_split == "auto"
+
+    def test_val_split_null_disables_validation(self) -> None:
+        """val_split=None이면 create_dataloaders가 val DataLoader를 생성하지 않는다."""
+        from unittest.mock import patch, MagicMock
+
+        from mdp.data.dataloader import create_dataloaders
+
+        # Mock _load_source to return a fake dataset
+        fake_ds = MagicMock()
+        fake_ds.column_names = ["text"]
+        fake_ds.__len__ = lambda self: 4
+
+        with patch("mdp.data.dataloader._load_source", return_value=fake_ds), \
+             patch("mdp.data.dataloader.load_data", return_value=fake_ds), \
+             patch("mdp.data.dataloader.build_tokenizer", return_value=None), \
+             patch("mdp.data.dataloader.build_transforms", return_value=(None, None)), \
+             patch("mdp.data.dataloader.DataLoader") as mock_loader:
+            mock_loader.return_value = MagicMock()
+            result = create_dataloaders(source="dummy", val_split=None)
+
+        assert "val" not in result

@@ -21,10 +21,10 @@ def _apply_language_tokenization(
 ) -> Any:
     """Language tokenization을 데이터셋에 적용한다."""
     ds = ds.map(tokenize_fn, batched=True)
+    remove_cols = _columns_to_remove(ds)
+    if remove_cols:
+        ds = ds.remove_columns(remove_cols)
     if not streaming:
-        remove_cols = _columns_to_remove(ds)
-        if remove_cols:
-            ds = ds.remove_columns(remove_cols)
         ds.set_format("torch")
     return ds
 
@@ -67,6 +67,11 @@ def load_data(
     has_language = tokenize_fn is not None
 
     if has_vision and has_language:
+        if streaming:
+            raise ValueError(
+                "streaming=True와 multimodal(vision+language) 조합은 지원되지 않습니다. "
+                "set_transform이 IterableDataset에서 사용 불가합니다."
+            )
         # Language tokenization (map + remove_columns, set_format 제외)
         ds = ds.map(tokenize_fn, batched=True)
         if not streaming:

@@ -121,7 +121,7 @@ def run_inference(
     --run-id 또는 --model-dir 중 하나를 지정.
     """
     from mdp.cli.schemas import InferenceResult
-    from mdp.data.dataloader import _load_source, _rename_columns
+    from mdp.data import _load_source, _rename_columns
     from mdp.data.loader import load_data
     from mdp.data.tokenizer import build_tokenizer, derive_label_strategy
     from mdp.data.transforms import build_transforms

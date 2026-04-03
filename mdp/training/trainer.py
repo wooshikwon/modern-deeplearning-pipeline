@@ -23,16 +23,15 @@ from torch.utils.data import DataLoader
 
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
+from mdp.training._common import (
+    STRATEGY_MAP,
+    create_expert_parallel,
+    create_strategy,
+    detect_device,
+)
 from mdp.training.callbacks.base import BaseCallback
 
 logger = logging.getLogger(__name__)
-
-STRATEGY_MAP: dict[str, str] = {
-    "ddp": "mdp.training.strategies.ddp.DDPStrategy",
-    "fsdp": "mdp.training.strategies.fsdp.FSDPStrategy",
-    "deepspeed": "mdp.training.strategies.deepspeed.DeepSpeedStrategy",
-    "deepspeed_zero3": "mdp.training.strategies.deepspeed.DeepSpeedStrategy",
-}
 
 
 class Trainer:
@@ -55,7 +54,7 @@ class Trainer:
         training = recipe.training
 
         # Device
-        self.device = self._detect_device()
+        self.device = detect_device()
 
         # Training config
         self.epochs = training.epochs
@@ -94,8 +93,8 @@ class Trainer:
         )
         self.loss_fn = self._create_loss(recipe.loss)
         self.callbacks = self._create_callbacks(recipe.callbacks)
-        self.strategy = self._create_strategy(settings)
-        self.expert_parallel = self._create_expert_parallel(settings)
+        self.strategy = create_strategy(settings, self.resolver)
+        self.expert_parallel = create_expert_parallel(settings)
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Recipe snapshot (체크포인트에 내장용)
@@ -104,15 +103,8 @@ class Trainer:
         # State
         self.global_step = 0
         self.start_epoch = 0
+        self._resume_step_in_epoch = 0
         self.last_metrics: dict[str, float] = {}
-
-    @staticmethod
-    def _detect_device() -> torch.device:
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
 
     # ── Component creation ──
 
@@ -207,49 +199,6 @@ class Trainer:
                 logger.warning(f"콜백 생성 실패: {e}")
         return callbacks
 
-    def _create_strategy(self, settings: Settings) -> Any:
-        dist_config = settings.config.compute.distributed
-        if dist_config is None:
-            return None
-
-        strategy_name = dist_config.get("strategy", "auto") if isinstance(dist_config, dict) else "auto"
-
-        if strategy_name == "none":
-            return None
-        if strategy_name == "auto":
-            if not torch.cuda.is_available() or torch.cuda.device_count() <= 1:
-                return None
-            strategy_name = "ddp"
-
-        class_path = STRATEGY_MAP.get(strategy_name)
-        if class_path is None:
-            raise ValueError(f"알 수 없는 분산 전략: {strategy_name}")
-
-        strategy_kwargs = {
-            k: v for k, v in (dist_config if isinstance(dist_config, dict) else {}).items()
-            if k not in ("strategy", "moe")
-        }
-        return self.resolver.resolve(
-            {"_component_": class_path, **strategy_kwargs}
-        )
-
-    @staticmethod
-    def _create_expert_parallel(settings: Settings) -> Any:
-        """distributed.moe config가 있으면 ExpertParallel을 생성한다."""
-        dist_config = settings.config.compute.distributed
-        if dist_config is None or not isinstance(dist_config, dict):
-            return None
-        moe_config = dist_config.get("moe")
-        if moe_config is None or not moe_config.get("enabled", False):
-            return None
-
-        from mdp.training.strategies.moe import ExpertParallel
-
-        return ExpertParallel(
-            ep_size=moe_config.get("ep_size", moe_config.get("expert_parallel_size", 1)),
-            expert_module_pattern=moe_config.get("expert_module_pattern", "experts"),
-        )
-
     def _estimate_total_steps(self) -> int:
         if self.max_steps:
             return self.max_steps
@@ -285,6 +234,8 @@ class Trainer:
                 try:
                     method(**kwargs)
                 except Exception as e:
+                    if getattr(cb, "critical", False):
+                        raise
                     logger.warning(f"콜백 {type(cb).__name__}.{hook_name} 실패: {e}")
 
         # EP scatter: checkpoint 저장 후 비담당 expert를 다시 CPU + frozen
@@ -397,11 +348,14 @@ class Trainer:
                     except Exception as e:
                         logger.warning(f"Strategy cleanup 실패: {e}")
 
+                # on_train_end를 MLflow 컨텍스트 안에서 먼저 발화한다.
+                # EMACallback이 여기서 가중치를 복원하므로,
+                # 이후 _log_mlflow_summary의 모델 export가 EMA 가중치를 포함한다.
+                self._fire("on_train_end", metrics=self.last_metrics)
+
                 training_duration = time.time() - start_time
                 if self._is_main_process:
                     self._log_mlflow_summary(training_duration, stopped_reason)
-
-        self._fire("on_train_end", metrics=self.last_metrics)
 
         result: dict[str, Any] = {
             "metrics": self.last_metrics,
@@ -441,7 +395,16 @@ class Trainer:
         else:
             val_every_n = 0  # 정수 에폭 단위 → train() 메서드에서 처리
 
+        # Skip already-processed batches when resuming from a step-level checkpoint
+        start_step = 0
+        if self._resume_step_in_epoch > 0:
+            start_step = self._resume_step_in_epoch
+            self._resume_step_in_epoch = 0  # Only apply once (first epoch after resume)
+            logger.info("Skipping %d already-processed batches for epoch resume", start_step)
+
         for step, batch in enumerate(self.train_loader):
+            if step < start_step:
+                continue
             if self.max_steps and self.global_step >= self.max_steps:
                 break
 
@@ -658,6 +621,7 @@ class Trainer:
             state = json.loads(state_path.read_text())
             self.start_epoch = state.get("epoch", 0)
             self.global_step = state.get("global_step", 0)
+            self._resume_step_in_epoch = state.get("step_in_epoch", 0)
 
         # EP: checkpoint에서 전체 expert를 로드한 후, 비담당 expert를 다시 분배
         if self.expert_parallel is not None:
@@ -757,14 +721,6 @@ class Trainer:
                 recipe_src = checkpoint_dir / "recipe.yaml"
                 if recipe_src.exists():
                     shutil.copy(recipe_src, output_dir / "recipe.yaml")
-
-                # serving_meta.json
-                meta = {
-                    "model_class": type(target).__name__,
-                    "head_replaced": recipe.head is not None,
-                    "has_adapter": has_adapter,
-                }
-                (output_dir / "serving_meta.json").write_text(json.dumps(meta, indent=2))
 
                 mlflow.log_artifacts(tmp, "model")
                 logger.info("모델 artifact를 MLflow에 등록: model/")

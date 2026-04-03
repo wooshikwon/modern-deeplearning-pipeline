@@ -57,18 +57,18 @@ class DataloaderSpec(BaseModel):
 
 
 class DataSpec(BaseModel):
-    """데이터 파이프라인. source로 데이터를 지정하고, format/column_map으로 스키마를 맞춘다."""
+    """데이터 파이프라인. source로 데이터를 지정하고, format/fields로 스키마를 맞춘다."""
 
     source: str  # HF Hub 이름, 또는 로컬 파일/디렉토리 경로
     fields: dict[str, str] = Field(default_factory=dict)  # {role: column_name}
-    format: str = "auto"  # alpaca | sharegpt | completion | text | auto
+    format: str = "auto"  # auto | csv | json | parquet | imagefolder
     split: str | dict[str, Any] = "train"
     subset: str | None = None
-    column_map: dict[str, str] | None = None
     streaming: bool = False
     data_files: str | dict[str, str] | None = None
     tokenizer: dict[str, Any] | None = None
     augmentation: dict[str, Any] | None = None
+    val_split: str | None = "auto"  # "auto" = 자동 추론, null = 비활성화, 문자열 = 직접 지정
     dataloader: DataloaderSpec = Field(default_factory=DataloaderSpec)
 
 
@@ -217,6 +217,7 @@ class ServingConfig(BaseModel):
     model_repository: str | None = None
     max_batch_size: int = 1
     instance_count: int = 1
+    batch_window_ms: float = 50.0  # 동적 배칭 시간 창 (ms)
 
 
 class JobConfig(BaseModel):

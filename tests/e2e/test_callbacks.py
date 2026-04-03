@@ -1,12 +1,17 @@
-"""E2E tests for training callbacks (EarlyStopping, Checkpoint, EMA)."""
+"""E2E tests for training callbacks (EarlyStopping, Checkpoint, EMA, critical flag)."""
 
 from __future__ import annotations
 
+import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
+from mdp.training.callbacks.base import BaseCallback
 from mdp.training.callbacks.early_stopping import EarlyStopping
 from mdp.training.callbacks.ema import EMACallback
+from mdp.training.trainer import Trainer
+from tests.e2e.conftest import make_test_settings
+from tests.e2e.datasets import ListDataLoader, make_vision_batches
 from tests.e2e.models import TinyVisionModel
 
 
@@ -116,3 +121,52 @@ def test_ema_weights_differ() -> None:
         assert not torch.equal(
             shadow, param.data
         ), "Shadow should differ from current params (decay < 1)"
+
+
+# ---------------------------------------------------------------------------
+# Callback critical flag
+# ---------------------------------------------------------------------------
+
+
+def _make_trainer_with_callback(cb: BaseCallback) -> Trainer:
+    """Create a minimal Trainer with a single callback for _fire() testing."""
+    settings = make_test_settings(epochs=1)
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    batches = make_vision_batches(num_batches=2, batch_size=4, num_classes=2, image_size=8)
+    trainer = Trainer(
+        settings=settings,
+        model=model,
+        train_loader=ListDataLoader(batches),
+    )
+    trainer.device = torch.device("cpu")
+    trainer.amp_enabled = False
+    trainer.callbacks.append(cb)
+    return trainer
+
+
+def test_critical_callback_propagates_exception() -> None:
+    """critical=True인 콜백의 예외는 _fire()에서 전파된다."""
+
+    class FailingCritical(BaseCallback):
+        critical = True
+
+        def on_batch_end(self, **kwargs):
+            raise RuntimeError("critical failure")
+
+    trainer = _make_trainer_with_callback(FailingCritical())
+
+    with pytest.raises(RuntimeError, match="critical failure"):
+        trainer._fire("on_batch_end", step=0, epoch=0)
+
+
+def test_noncritical_callback_swallowed() -> None:
+    """critical=False(기본)인 콜백의 예외는 삼켜진다."""
+
+    class FailingNonCritical(BaseCallback):
+        def on_batch_end(self, **kwargs):
+            raise RuntimeError("non-critical failure")
+
+    trainer = _make_trainer_with_callback(FailingNonCritical())
+
+    # Should not raise — exception is swallowed and logged
+    trainer._fire("on_batch_end", step=0, epoch=0)

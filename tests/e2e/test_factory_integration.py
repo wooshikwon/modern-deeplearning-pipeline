@@ -1,9 +1,10 @@
 """Factory 통합 경로 테스트: Settings → Model → Head → Adapter 조립.
 
-3 tests:
+4 tests:
 - test_factory_model_with_head_and_lora: head 교체 + LoRA 적용 후 학습 가능
 - test_factory_model_without_head: head=None → 원본 모델 반환
 - test_factory_prefix_tuning_path: prefix_tuning adapter가 factory를 통과
+- test_log_trainable_params_plain_module: 일반 nn.Module에서 log_trainable_params 동작
 """
 
 from __future__ import annotations
@@ -107,3 +108,20 @@ def test_factory_prefix_tuning_path() -> None:
         mock_apply.assert_called_once()
         call_config = mock_apply.call_args[0][1]  # 두 번째 positional arg
         assert call_config["method"] == "prefix_tuning"
+
+
+def test_log_trainable_params_plain_module() -> None:
+    """PEFT가 아닌 일반 nn.Module에서도 log_trainable_params가 동작한다."""
+    from torch import nn
+
+    from mdp.models.adapters import log_trainable_params
+
+    model = nn.Linear(10, 5)
+    # Should not raise; should log param counts via the fallback branch
+    log_trainable_params(model)
+
+    # Verify the count is correct (10*5 + 5 = 55 total, all trainable)
+    expected_total = sum(p.numel() for p in model.parameters())
+    expected_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    assert expected_total == 55
+    assert expected_trainable == 55

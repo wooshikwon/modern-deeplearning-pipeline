@@ -245,7 +245,7 @@ def compute_baseline(
                         else:
                             model_batch[k] = v
 
-                    model(**model_batch)
+                    model(model_batch)
 
                     features = hook_output.get("features")
                     if features is None:

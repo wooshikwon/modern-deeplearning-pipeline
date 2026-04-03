@@ -16,7 +16,7 @@ head:
   CausalLMHead: mdp.models.heads.causal_lm.CausalLMHead
   SegmentationHead: mdp.models.heads.segmentation.SegmentationHead
   TokenClassificationHead: mdp.models.heads.token_classification.TokenClassificationHead
-  Seq2SeqLMHead: mdp.models.heads.seq2seq_lm.Seq2SeqLMHead
+  Seq2SeqLMHead: mdp.models.heads.causal_lm.CausalLMHead
   DualEncoderHead: mdp.models.heads.dual_encoder.DualEncoderHead
   SequenceClassificationHead: mdp.models.heads.classification.ClassificationHead
 callback:

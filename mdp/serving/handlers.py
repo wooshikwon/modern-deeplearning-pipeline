@@ -67,12 +67,18 @@ class BatchHandler:
         tokenizer: Any | None,
         transform: Callable | None,
         recipe: Any,
+        serving_config: Any | None = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.transform = transform
         self.task = recipe.task
-        self.scheduler = _BatchScheduler(model, max_batch_size=8, batch_window_ms=50)
+        max_bs = 8
+        window = 50.0
+        if serving_config is not None:
+            max_bs = getattr(serving_config, "max_batch_size", 8)
+            window = getattr(serving_config, "batch_window_ms", 50.0)
+        self.scheduler = _BatchScheduler(model, max_batch_size=max_bs, batch_window_ms=window)
 
     async def handle(self, raw_input: dict) -> dict:
         preprocessed = await asyncio.to_thread(self._preprocess, raw_input)

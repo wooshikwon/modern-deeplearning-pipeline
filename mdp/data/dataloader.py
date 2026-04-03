@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 def _select_collator(
     label_strategy: str,
     tokenizer_config: dict[str, Any] | None,
+    tokenizer: Any | None = None,
 ) -> Any | None:
     """label_strategy에 따라 적절한 collator를 선택한다."""
     if label_strategy == LABEL_PREFERENCE and tokenizer_config is None:
@@ -40,11 +41,12 @@ def _select_collator(
     if tokenizer_config is None:
         return None
 
-    from transformers import AutoTokenizer
+    if tokenizer is None:
+        from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["pretrained"])
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["pretrained"])
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
 
     if label_strategy == LABEL_PREFERENCE:
         from mdp.data.collators import PreferenceCollator
@@ -167,6 +169,7 @@ def create_dataloaders(
     tokenizer_config: dict[str, Any] | None = None,
     loader_config: dict[str, Any] | None = None,
     distributed: bool = False,
+    val_split: str | None = "auto",
 ) -> dict[str, DataLoader]:
     """source에서 데이터를 로드하고 DataLoader 딕셔너리를 반환한다.
 
@@ -188,6 +191,8 @@ def create_dataloaders(
         tokenizer_config: tokenizer 설정.
         loader_config: DataLoader 설정 (batch_size, num_workers 등).
         distributed: ``True``이면 ``DistributedSampler`` 사용.
+        val_split: val split 제어. ``"auto"``이면 train split에서 추론,
+            ``None``이면 비활성화, 문자열이면 해당 split 직접 사용.
 
     Returns:
         ``{"train": DataLoader, "val": DataLoader}`` 딕셔너리.
@@ -204,10 +209,25 @@ def create_dataloaders(
         train_transform = build_transforms(aug_config.get("train", aug_config))
         val_transform = build_transforms(aug_config.get("val"))
 
-    tokenize_fn = build_tokenizer(tokenizer_config, label_strategy=label_strategy)
+    # ── shared tokenizer instance ──
+    tokenizer_instance = None
+    if tokenizer_config is not None:
+        from transformers import AutoTokenizer
+
+        tokenizer_instance = AutoTokenizer.from_pretrained(
+            tokenizer_config["pretrained"],
+        )
+        if tokenizer_instance.pad_token is None:
+            tokenizer_instance.pad_token = tokenizer_instance.eos_token
+
+    tokenize_fn = build_tokenizer(
+        tokenizer_config, label_strategy=label_strategy, tokenizer=tokenizer_instance,
+    )
 
     # ── collate_fn ──
-    collate_fn = _select_collator(label_strategy, tokenizer_config)
+    collate_fn = _select_collator(
+        label_strategy, tokenizer_config, tokenizer=tokenizer_instance,
+    )
 
     # ── DataLoader kwargs (drop_last를 분리하여 이중 전달 방지) ──
     dl_kwargs = dict(loader_config)
@@ -255,23 +275,33 @@ def create_dataloaders(
 
     # ── val dataset ──
     val_ds = None
-    split_str = split if isinstance(split, str) else "train"
-    val_split = _infer_val_split(split_str)
 
-    try:
-        val_ds = _load_source(source, split=val_split, **load_kwargs)
-        val_ds = _rename_columns(val_ds, fields)
-        val_ds = load_data(
-            val_ds, transform=val_transform, tokenize_fn=tokenize_fn,
-            streaming=streaming,
-        )
-    except (ValueError, FileNotFoundError, KeyError):
-        val_ds = None
-        logger.warning(
-            "Val split '%s'을 찾을 수 없습니다. Validation 없이 학습합니다. "
-            "Early stopping과 best checkpoint 선택이 비활성화됩니다.",
-            val_split,
-        )
+    if val_split is None:
+        # Explicit disable — skip val loading entirely
+        logger.info("val_split=None: Validation이 비활성화되었습니다.")
+    else:
+        if val_split == "auto":
+            # Current behavior: infer from train split
+            split_str = split if isinstance(split, str) else "train"
+            resolved_val_split = _infer_val_split(split_str)
+        else:
+            # User-specified split name
+            resolved_val_split = val_split
+
+        try:
+            val_ds = _load_source(source, split=resolved_val_split, **load_kwargs)
+            val_ds = _rename_columns(val_ds, fields)
+            val_ds = load_data(
+                val_ds, transform=val_transform, tokenize_fn=tokenize_fn,
+                streaming=streaming,
+            )
+        except (ValueError, FileNotFoundError, KeyError):
+            val_ds = None
+            logger.warning(
+                "Val split '%s'을 찾을 수 없습니다. Validation 없이 학습합니다. "
+                "Early stopping과 best checkpoint 선택이 비활성화됩니다.",
+                resolved_val_split,
+            )
 
     if val_ds is not None:
         val_sampler = None

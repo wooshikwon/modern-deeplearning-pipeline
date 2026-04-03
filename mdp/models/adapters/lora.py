@@ -14,7 +14,7 @@ def apply_lora(
     model: nn.Module,
     r: int = 8,
     lora_alpha: int = 16,
-    lora_dropout: float = 0.05,
+    lora_dropout: float = 0.0,
     target_modules: list[str] | str = "all_linear",
     task_type: str | None = None,
     **kwargs: Any,

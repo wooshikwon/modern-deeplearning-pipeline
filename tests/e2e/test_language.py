@@ -6,7 +6,6 @@ import torch
 import torch.nn.functional as F
 
 from mdp.models.heads.causal_lm import CausalLMHead
-from mdp.models.heads.seq2seq_lm import Seq2SeqLMHead
 from mdp.models.heads.token_classification import TokenClassificationHead
 from tests.e2e.datasets import (
     ListDataLoader,
@@ -130,9 +129,9 @@ def test_token_classification_head_swap() -> None:
 
 
 def test_seq2seq_head_forward() -> None:
-    """Attach Seq2SeqLMHead(32, 128) to TinyLanguageModel, verify same shape."""
+    """Attach CausalLMHead(32, 128) as seq2seq head to TinyLanguageModel, verify same shape."""
     model = TinyLanguageModel(vocab_size=128, hidden_dim=32)
-    model.lm_head = Seq2SeqLMHead(hidden_dim=32, vocab_size=128)
+    model.lm_head = CausalLMHead(hidden_dim=32, vocab_size=128)
     model.eval()
 
     batches = make_language_batches(1, 4, 16, 128)

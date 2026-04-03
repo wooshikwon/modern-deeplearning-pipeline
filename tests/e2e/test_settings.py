@@ -139,3 +139,118 @@ def test_compat_validator_fsdp_qlora() -> None:
     result = CompatValidator().validate(settings)
     assert len(result.errors) > 0
     assert any("FSDP" in e and "QLoRA" in e for e in result.errors)
+
+
+# ---------------------------------------------------------------------------
+# Seq2SeqLMHead alias → CausalLMHead
+# ---------------------------------------------------------------------------
+
+
+def test_seq2seq_alias_resolves_to_causal_lm() -> None:
+    """Seq2SeqLMHead alias가 CausalLMHead로 해석되는지 확인."""
+    from mdp.models.heads.causal_lm import CausalLMHead
+
+    resolver = ComponentResolver()
+    head = resolver.resolve(
+        {"_component_": "Seq2SeqLMHead", "hidden_dim": 64, "vocab_size": 100}
+    )
+    assert isinstance(head, CausalLMHead)
+
+
+# ---------------------------------------------------------------------------
+# CompatValidator — FSDP string variants
+# ---------------------------------------------------------------------------
+
+
+def test_compat_fsdp_variant_detected() -> None:
+    """FSDP 변형 문자열(fsdp_full_shard)도 QLoRA 비호환으로 감지."""
+    settings = _make_minimal_settings(
+        task="text_generation",
+        head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
+        adapter=AdapterSpec(method="qlora", r=16, alpha=32),
+        distributed={"strategy": "fsdp_full_shard"},
+    )
+    result = CompatValidator().validate(settings)
+    assert len(result.errors) > 0
+    assert any("FSDP" in e and "QLoRA" in e for e in result.errors)
+
+
+def test_compat_strategy_dict_no_crash() -> None:
+    """strategy가 dict일 때 검증이 크래시하지 않는다."""
+    settings = _make_minimal_settings(
+        task="text_generation",
+        head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
+        adapter=AdapterSpec(method="qlora", r=16, alpha=32),
+        distributed={"strategy": {"_component_": "FSDPStrategy"}},
+    )
+    # dict strategy should not raise — validator checks isinstance(str)
+    result = CompatValidator().validate(settings)
+    assert isinstance(result.errors, list)
+    assert isinstance(result.warnings, list)
+
+
+# ---------------------------------------------------------------------------
+# BusinessValidator — validate_partial
+# ---------------------------------------------------------------------------
+
+
+def test_validate_partial_subset() -> None:
+    """validate_partial이 지정된 검증만 실행한다."""
+    settings = _make_minimal_settings(
+        task="image_classification",
+        head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
+        adapter=AdapterSpec(method="lora", r=8, alpha=16),
+    )
+    # adapter-only check should produce no errors (lora config is valid)
+    adapter_result = BusinessValidator.validate_partial(settings, checks=["adapter"])
+    assert len(adapter_result.errors) == 0
+
+    # head_task check should produce errors (CausalLMHead ≠ image_classification)
+    head_result = BusinessValidator.validate_partial(settings, checks=["head_task"])
+    assert len(head_result.errors) > 0
+    assert any("CausalLMHead" in e for e in head_result.errors)
+
+
+# ---------------------------------------------------------------------------
+# BusinessValidator — vision task + tokenizer warning
+# ---------------------------------------------------------------------------
+
+
+def test_vision_task_tokenizer_warning() -> None:
+    """vision 태스크에 tokenizer 설정 시 경고."""
+    recipe = Recipe.model_construct(
+        name="test-vision",
+        task="image_classification",
+        model=ModelSpec(class_path="test.Model"),
+        head={"_component_": "mdp.models.heads.classification.ClassificationHead"},
+        adapter=None,
+        data=DataSpec.model_construct(
+            source="test-dataset",
+            fields={"image": "img", "label": "cls"},
+            format="imagefolder",
+            split="train",
+            tokenizer={"_component_": "AutoTokenizer", "pretrained": "bert-base"},
+            augmentation=None,
+        ),
+        training=TrainingSpec(epochs=1),
+        optimizer={"_component_": "torch.optim.SGD", "lr": 0.01},
+        scheduler=None,
+        loss=None,
+        evaluation=None,
+        generation=None,
+        monitoring=MonitoringSpec(),
+        callbacks=[],
+        metadata=MetadataSpec(author="test", description="test"),
+    )
+    config = Config.model_construct(
+        environment={"name": "local"},
+        compute=ComputeConfig(distributed=None),
+        mlflow=None,
+        storage=None,
+        serving=None,
+        job=None,
+    )
+    settings = Settings.model_construct(recipe=recipe, config=config)
+
+    result = BusinessValidator.validate_partial(settings, checks=["task_fields"])
+    assert any("tokenizer" in w for w in result.warnings)

@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 class EarlyStopping(BaseCallback):
     """Stop training when a monitored metric has stopped improving.
 
+    critical = True: 이 콜백의 실패는 학습을 중단시킨다.
+
     Parameters
     ----------
     monitor:
@@ -46,6 +48,7 @@ class EarlyStopping(BaseCallback):
         self.best_value: float = math.inf if mode == "min" else -math.inf
         self.counter: int = 0
         self.should_stop: bool = False
+        self.critical: bool = True
 
     # ------------------------------------------------------------------
     # Helpers

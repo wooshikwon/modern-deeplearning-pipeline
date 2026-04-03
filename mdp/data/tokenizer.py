@@ -6,7 +6,10 @@ task 문자열이 아닌 label_strategy 상수로 분기한다.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # ── label strategy 상수 ──
 
@@ -58,6 +61,7 @@ def derive_label_strategy(fields: dict[str, str] | None) -> str:
 def build_tokenizer(
     config: dict[str, Any] | None,
     label_strategy: str = LABEL_CAUSAL,
+    tokenizer: Any | None = None,
 ) -> Callable | None:
     """tokenizer YAML 설정 → 토큰화 함수.
 
@@ -72,6 +76,7 @@ def build_tokenizer(
     Args:
         config: tokenizer 설정 딕셔너리. ``None``이면 ``None`` 반환.
         label_strategy: label 생성 전략 상수.
+        tokenizer: 미리 생성된 tokenizer 인스턴스. ``None``이면 내부에서 생성.
             - ``"causal"``: labels = input_ids 복사.
             - ``"seq2seq"``: labels = tokenizer(text_target=...).
             - ``"copy"``: labels 그대로 통과.
@@ -102,7 +107,8 @@ def build_tokenizer(
     if label_strategy == LABEL_ALIGN:
         is_split_into_words = True
 
-    tokenizer = AutoTokenizer.from_pretrained(pretrained)
+    if tokenizer is None:
+        tokenizer = AutoTokenizer.from_pretrained(pretrained)
 
     # pad_token이 없으면 eos_token으로 대체
     if tokenizer.pad_token is None:
@@ -114,19 +120,32 @@ def build_tokenizer(
 
     def tokenize_fn(examples: dict[str, Any]) -> dict[str, Any]:
         # chat_template이 설정되어 있고 messages 키가 있으면 대화형 토큰화
-        if chat_template and "messages" in examples:
-            messages = examples["messages"]
-            if isinstance(messages, list) and messages and isinstance(messages[0], list):
-                # batched: list[list[dict]]
-                texts = [
-                    tokenizer.apply_chat_template(conv, tokenize=False)
-                    for conv in messages
-                ]
+        if chat_template:
+            if "messages" in examples:
+                messages = examples["messages"]
+                if isinstance(messages, list) and messages and isinstance(messages[0], list):
+                    # batched: list[list[dict]]
+                    texts = [
+                        tokenizer.apply_chat_template(conv, tokenize=False)
+                        for conv in messages
+                    ]
+                else:
+                    # single: list[dict]
+                    texts = [tokenizer.apply_chat_template(messages, tokenize=False)]
             else:
-                # single: list[dict]
-                texts = [tokenizer.apply_chat_template(messages, tokenize=False)]
+                logger.warning(
+                    "chat_template이 설정되었으나 데이터에 'messages' 컬럼이 없습니다. "
+                    "chat_template이 무시되고 text 기반 토큰화를 수행합니다."
+                )
+                texts = examples.get("text", examples.get("input", []))
         else:
             texts = examples.get("text", examples.get("input", []))
+
+        if not texts:
+            raise ValueError(
+                "토큰화할 텍스트를 찾을 수 없습니다. "
+                "data.fields에 'text' 또는 'input' 역할을 매핑하세요."
+            )
 
         encoded = tokenizer(
             texts,

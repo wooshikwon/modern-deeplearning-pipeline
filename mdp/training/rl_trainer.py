@@ -22,6 +22,7 @@ from torch.utils.data import DataLoader
 
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
+from mdp.training._common import create_expert_parallel, create_strategy, detect_device
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +49,7 @@ class RLTrainer:
         self.algorithm = self.resolver.resolve(recipe.algorithm)
 
         # Device
-        self.device = self._detect_device()
+        self.device = detect_device()
 
         # Training config
         self.max_steps = training.max_steps
@@ -111,8 +112,8 @@ class RLTrainer:
         self.policy = self.trainable["policy"]
 
         # Strategy
-        self.strategy = self._create_strategy(settings)
-        self.expert_parallel = self._create_expert_parallel(settings)
+        self.strategy = create_strategy(settings, self.resolver)
+        self.expert_parallel = create_expert_parallel(settings)
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Callbacks
@@ -126,57 +127,13 @@ class RLTrainer:
         # State
         self.global_step = 0
         self.last_metrics: dict[str, float] = {}
-
-    @staticmethod
-    def _detect_device() -> torch.device:
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            return torch.device("mps")
-        return torch.device("cpu")
+        self._generation_kwargs: dict[str, Any] = {}
 
     def _estimate_total_steps(self) -> int:
         if self.max_steps:
             return self.max_steps
         steps_per_epoch = len(self.train_loader) // self.grad_accum_steps
         return steps_per_epoch * (self.epochs or 1)
-
-    def _create_strategy(self, settings: Settings) -> Any:
-        from mdp.training.trainer import STRATEGY_MAP
-
-        dist_config = settings.config.compute.distributed
-        if dist_config is None:
-            return None
-        strategy_name = dist_config.get("strategy", "auto") if isinstance(dist_config, dict) else "auto"
-        if strategy_name in ("none", "auto"):
-            if not torch.cuda.is_available() or torch.cuda.device_count() <= 1:
-                return None
-            strategy_name = "ddp"
-        class_path = STRATEGY_MAP.get(strategy_name)
-        if class_path is None:
-            raise ValueError(f"알 수 없는 분산 전략: {strategy_name}")
-        strategy_kwargs = {
-            k: v for k, v in (dist_config if isinstance(dist_config, dict) else {}).items()
-            if k not in ("strategy", "moe")
-        }
-        return self.resolver.resolve({"_component_": class_path, **strategy_kwargs})
-
-    @staticmethod
-    def _create_expert_parallel(settings: Settings) -> Any:
-        """distributed.moe config가 있으면 ExpertParallel을 생성한다."""
-        dist_config = settings.config.compute.distributed
-        if dist_config is None or not isinstance(dist_config, dict):
-            return None
-        moe_config = dist_config.get("moe")
-        if moe_config is None or not moe_config.get("enabled", False):
-            return None
-
-        from mdp.training.strategies.moe import ExpertParallel
-
-        return ExpertParallel(
-            ep_size=moe_config.get("ep_size", moe_config.get("expert_parallel_size", 1)),
-            expert_module_pattern=moe_config.get("expert_module_pattern", "experts"),
-        )
 
     def _create_callbacks(self, configs: list[dict[str, Any]]) -> list:
         callbacks = []
@@ -188,6 +145,13 @@ class RLTrainer:
         return callbacks
 
     def _fire(self, hook_name: str, **kwargs: Any) -> None:
+        needs_ep_gather = (
+            self.expert_parallel is not None
+            and hook_name in ("on_validation_end", "on_batch_end")
+        )
+        if needs_ep_gather:
+            self.expert_parallel.gather_experts(self.policy)
+
         kwargs["trainer"] = self
         for cb in self.callbacks:
             method = getattr(cb, hook_name, None)
@@ -195,7 +159,12 @@ class RLTrainer:
                 try:
                     method(**kwargs)
                 except Exception as e:
+                    if getattr(cb, "critical", False):
+                        raise
                     logger.warning(f"콜백 {type(cb).__name__}.{hook_name} 실패: {e}")
+
+        if needs_ep_gather:
+            self.expert_parallel.scatter_experts(self.policy, self.device)
 
     def _move_to_device(self, batch: dict[str, Any]) -> dict[str, Any]:
         return {
@@ -207,8 +176,15 @@ class RLTrainer:
         return any(getattr(cb, "should_stop", False) for cb in self.callbacks)
 
     def _run_rl_validation(self) -> dict[str, float]:
-        """validation prompt에 대해 generation + reward scoring."""
-        if self.val_loader is None or "reward" not in self.frozen:
+        """validation: generation+reward (GRPO/PPO) 또는 preference accuracy (DPO)."""
+        if self.val_loader is None:
+            return {}
+
+        needs_gen = getattr(self.algorithm, "needs_generation", False)
+        if not needs_gen:
+            return self._run_dpo_validation()
+
+        if "reward" not in self.frozen:
             return {}
 
         self.policy.eval()
@@ -243,6 +219,62 @@ class RLTrainer:
         self.policy.train()
         mean_reward = total_reward / max(count, 1)
         return {"val_mean_reward": mean_reward}
+
+    def _run_dpo_validation(self) -> dict[str, float]:
+        """DPO validation: preference accuracy (chosen log-prob > rejected log-prob)."""
+        from mdp.training.losses.rl import compute_log_probs
+
+        self.policy.eval()
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for batch in self.val_loader:
+                batch = self._move_to_device(batch)
+
+                # chosen/rejected는 collator가 batch에 넣어준다
+                chosen_ids = batch.get("chosen_input_ids")
+                rejected_ids = batch.get("rejected_input_ids")
+                if chosen_ids is None or rejected_ids is None:
+                    continue
+
+                chosen_labels = batch.get("chosen_labels", chosen_ids)
+                rejected_labels = batch.get("rejected_labels", rejected_ids)
+
+                # 각각 forward
+                chosen_out = self._forward_model(
+                    self.policy,
+                    {"input_ids": chosen_ids, "attention_mask": batch.get("chosen_attention_mask")},
+                    role="policy",
+                )
+                rejected_out = self._forward_model(
+                    self.policy,
+                    {"input_ids": rejected_ids, "attention_mask": batch.get("rejected_attention_mask")},
+                    role="policy",
+                )
+
+                chosen_logits = chosen_out.get("logits")
+                rejected_logits = rejected_out.get("logits")
+                if chosen_logits is None or rejected_logits is None:
+                    continue
+
+                # per-token log probs → sequence-level sum
+                chosen_lp = compute_log_probs(chosen_logits, chosen_labels)
+                rejected_lp = compute_log_probs(rejected_logits, rejected_labels)
+
+                # mask out padding (-100)
+                chosen_mask = chosen_labels[:, 1:] != -100
+                rejected_mask = rejected_labels[:, 1:] != -100
+
+                chosen_sum = (chosen_lp * chosen_mask).sum(dim=-1)
+                rejected_sum = (rejected_lp * rejected_mask).sum(dim=-1)
+
+                correct += (chosen_sum > rejected_sum).sum().item()
+                total += chosen_sum.shape[0]
+
+        self.policy.train()
+        accuracy = correct / max(total, 1)
+        return {"val_preference_accuracy": accuracy}
 
     # ── MLflow ──
 
@@ -353,14 +385,6 @@ class RLTrainer:
                 recipe_dict = recipe.model_dump(mode="json")
                 (output_dir / "recipe.yaml").write_text(yaml.dump(recipe_dict, allow_unicode=True))
 
-                # serving_meta.json
-                meta = {
-                    "model_class": type(target).__name__,
-                    "has_adapter": has_adapter,
-                    "algorithm": type(self.algorithm).__name__,
-                }
-                (output_dir / "serving_meta.json").write_text(json.dumps(meta, indent=2))
-
                 mlflow.log_artifacts(tmp, "model")
                 logger.info("Policy 모델을 MLflow artifact로 등록: model/")
         except Exception as e:
@@ -461,6 +485,16 @@ class RLTrainer:
 
     def train(self) -> dict[str, Any]:
         """RL 학습을 실행하고 결과를 반환한다."""
+        # Expert Parallelism (전략 setup 전에 적용)
+        if self.expert_parallel is not None:
+            if self.strategy is not None:
+                import torch.distributed as _dist
+                if not _dist.is_initialized():
+                    backend = getattr(self.strategy, "backend", "nccl")
+                    _dist.init_process_group(backend=backend)
+            self.policy = self.expert_parallel.setup(self.policy, self.device)
+            self.trainable["policy"] = self.policy
+
         # Strategy setup
         if self.strategy is not None:
             trainable_names = set(self.trainable.keys())
@@ -533,7 +567,7 @@ class RLTrainer:
                     # step-level logging
                     self._mlflow_log_metric("loss", step_loss, self.global_step)
 
-                    if (self.global_step) % self.grad_accum_steps == 0:
+                    if (self.global_step + 1) % self.grad_accum_steps == 0:
                         self._fire(
                             "on_batch_end", step=self.global_step,
                             global_step=self.global_step,
@@ -621,7 +655,8 @@ class RLTrainer:
 
         # 2. Old log_probs (update 전 policy 상태)
         with torch.no_grad():
-            old_logits = self._extract_logits(self.policy(input_ids=generated_ids, attention_mask=gen_mask))
+            old_out = self._forward_model(self.policy, {"input_ids": generated_ids, "attention_mask": gen_mask}, role="policy")
+            old_logits = old_out["logits"]
             old_log_probs = compute_log_probs(old_logits, generated_ids)
 
         # 3. Frozen forward + reward scoring
@@ -655,7 +690,7 @@ class RLTrainer:
                 }
                 losses = self.algorithm(trainable_out, frozen_out, gen_batch)
 
-            self._backward_and_step(losses)
+            self._backward_and_step(losses, force_step=True)
             last_loss = losses.get("policy", list(losses.values())[0]).item()
 
         self.global_step += 1
@@ -701,21 +736,23 @@ class RLTrainer:
         else:
             return logits.squeeze()
 
-    def _backward_and_step(self, losses: dict[str, torch.Tensor]) -> None:
+    def _backward_and_step(self, losses: dict[str, torch.Tensor], force_step: bool = False) -> None:
         """모델별 독립 backward + optimizer step."""
         # NaN/Inf loss 감지
         for name, loss in losses.items():
             if not torch.isfinite(loss):
                 logger.warning("NaN/Inf loss detected in '%s', skipping step", name)
-                for opt in self.optimizers.values():
-                    opt.zero_grad(set_to_none=True)
+                for n in losses:
+                    if n in self.optimizers:
+                        self.optimizers[n].zero_grad(set_to_none=True)
                 return
 
+        accum = 1 if force_step else self.grad_accum_steps
         for name, loss in losses.items():
-            scaled = loss / self.grad_accum_steps
+            scaled = loss / accum
             self.scaler.scale(scaled).backward()
 
-        if (self.global_step + 1) % self.grad_accum_steps == 0:
+        if force_step or (self.global_step + 1) % self.grad_accum_steps == 0:
             for name in losses:
                 if name in self.optimizers:
                     self.scaler.unscale_(self.optimizers[name])
@@ -725,8 +762,9 @@ class RLTrainer:
                     if name in self.schedulers:
                         self.schedulers[name].step()
             self.scaler.update()
-            for opt in self.optimizers.values():
-                opt.zero_grad()
+            for name in losses:
+                if name in self.optimizers:
+                    self.optimizers[name].zero_grad()
 
     @staticmethod
     def _extract_logits(out):

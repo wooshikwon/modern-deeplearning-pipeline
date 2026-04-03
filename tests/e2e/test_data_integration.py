@@ -1,9 +1,10 @@
 """데이터 파이프라인 통합 테스트: tokenizer → labels 생성 → collator 연쇄.
 
-3 tests:
+4 tests:
 - test_seq2seq_missing_target_raises: target 컬럼 없으면 KeyError
 - test_causal_label_strategy_produces_labels: causal → labels = input_ids 복사
 - test_copy_label_strategy_preserves_labels: copy → 원본 labels 유지
+- test_streaming_multimodal_raises: streaming + multimodal 조합 ValueError
 """
 
 from __future__ import annotations
@@ -54,3 +55,22 @@ def test_copy_label_strategy_preserves_labels() -> None:
 
     assert "labels" in result
     assert result["labels"] == [0, 1]
+
+
+def test_streaming_multimodal_raises() -> None:
+    """streaming=True + multimodal(vision+language) 조합은 ValueError를 발생시킨다."""
+    from unittest.mock import MagicMock
+
+    from mdp.data.loader import load_data
+
+    fake_ds = MagicMock()
+    dummy_transform = lambda x: x  # noqa: E731
+    dummy_tokenize = lambda x: x  # noqa: E731
+
+    with pytest.raises(ValueError, match="streaming=True.*multimodal"):
+        load_data(
+            fake_ds,
+            transform=dummy_transform,
+            tokenize_fn=dummy_tokenize,
+            streaming=True,
+        )
