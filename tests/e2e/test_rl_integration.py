@@ -18,8 +18,10 @@ from mdp.settings.schema import (
     Config,
     DataSpec,
     GenerationSpec,
+    RLGenerationSpec,
     MetadataSpec,
     RLModelSpec,
+    RLSpec,
     Recipe,
     Settings,
     TrainingSpec,
@@ -70,12 +72,14 @@ def _dpo_settings(max_steps=3, precision="fp32", **overrides):
     recipe = Recipe(
         name="rl-test",
         task="text_generation",
-        algorithm={"_component_": "DPO", "beta": 0.1},
-        models={
-            "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-            "reference": RLModelSpec(),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={"_component_": "DPO", "beta": 0.1},
+            models={
+                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
+                "reference": RLModelSpec(),
+            },
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
         training=TrainingSpec(max_steps=max_steps, precision=precision, **overrides),
         metadata=MetadataSpec(author="test", description="test"),
     )
@@ -88,15 +92,17 @@ def _grpo_settings(max_steps=3):
     recipe = Recipe(
         name="rl-test",
         task="text_generation",
-        algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
-        models={
-            "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-            "reference": RLModelSpec(),
-            "reward": RLModelSpec(),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
+            models={
+                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
+                "reference": RLModelSpec(),
+                "reward": RLModelSpec(),
+            },
+            generation=RLGenerationSpec(max_new_tokens=4),
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
         training=TrainingSpec(max_steps=max_steps),
-        generation=GenerationSpec(max_new_tokens=4),
         metadata=MetadataSpec(author="test", description="test"),
     )
     return Settings(recipe=recipe, config=Config())
@@ -105,7 +111,7 @@ def _grpo_settings(max_steps=3):
 def _make_trainer(settings, batches, models=None):
     from mdp.training.rl_trainer import RLTrainer
 
-    model_names = list(settings.recipe.models.keys())
+    model_names = list(settings.recipe.rl.models.keys())
     if models is None:
         models = {name: TinyLM() for name in model_names}
     trainer = RLTrainer(
@@ -161,13 +167,13 @@ def test_rl_gradient_accumulation() -> None:
         def on_batch_end(self, **kwargs):
             self.count += 1
 
-    settings = _dpo_settings(max_steps=8, gradient_accumulation_steps=4)
+    settings = _dpo_settings(max_steps=2, gradient_accumulation_steps=4)
     trainer = _make_trainer(settings, _pref_batches(10, 4))
     counter = StepCounter()
     trainer.callbacks.append(counter)
 
     trainer.train()
-    # 8 steps / 4 accum = 2 on_batch_end 호출
+    # 2 optimizer steps × 4 accum batches = 8 batches, on_batch_end fires every 4 = 2회
     assert counter.count == 2
 
 
@@ -209,13 +215,13 @@ def test_rl_on_batch_end_per_accum_step() -> None:
         def on_batch_end(self, **kwargs):
             self.steps.append(kwargs.get("global_step"))
 
-    settings = _dpo_settings(max_steps=6, gradient_accumulation_steps=2)
+    settings = _dpo_settings(max_steps=3, gradient_accumulation_steps=2)
     trainer = _make_trainer(settings, _pref_batches(10, 4))
     logger_cb = BatchEndLogger()
     trainer.callbacks.append(logger_cb)
 
     trainer.train()
-    # 6 steps / 2 accum = 3 on_batch_end, global_steps: 2, 4, 6
+    # 3 optimizer steps × 2 accum batches = 6 batches, on_batch_end fires every 2 = 3회
     assert len(logger_cb.steps) == 3
 
 
@@ -239,16 +245,18 @@ def test_ppo_multi_loss() -> None:
     recipe = Recipe(
         name="ppo-test",
         task="text_generation",
-        algorithm={"_component_": "PPO", "clip_range": 0.2, "ppo_epochs": 1},
-        models={
-            "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-            "value": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}, freeze=False),
-            "reference": RLModelSpec(),
-            "reward": RLModelSpec(),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={"_component_": "PPO", "clip_range": 0.2, "ppo_epochs": 1},
+            models={
+                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
+                "value": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}, freeze=False),
+                "reference": RLModelSpec(),
+                "reward": RLModelSpec(),
+            },
+            generation=RLGenerationSpec(max_new_tokens=4),
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
         training=TrainingSpec(max_steps=2),
-        generation=GenerationSpec(max_new_tokens=4),
         metadata=MetadataSpec(author="test", description="test"),
     )
     settings = Settings(recipe=recipe, config=Config())
@@ -274,7 +282,7 @@ def test_rl_export_serve_flow(tmp_path) -> None:
         "name": "rl-serve-test",
         "task": "text_generation",
         "model": {"class_path": "tests.e2e.test_rl_integration.TinyLM"},
-        "data": {"source": "/tmp/fake"},
+        "data": {"source": "/tmp/fake", "label_strategy": "causal"},
         "training": {"max_steps": 1},
         "metadata": {"author": "test", "description": "test"},
     }
@@ -300,12 +308,14 @@ def test_rl_policy_optimizer_required() -> None:
         Recipe(
             name="bad",
             task="text_generation",
-            algorithm={"_component_": "DPO"},
-            models={
-                "policy": RLModelSpec(),  # optimizer 없음
-                "reference": RLModelSpec(),
-            },
-            data=DataSpec(source="/tmp/fake"),
+            rl=RLSpec(
+                algorithm={"_component_": "DPO"},
+                models={
+                    "policy": RLModelSpec(),  # optimizer 없음
+                    "reference": RLModelSpec(),
+                },
+            ),
+            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
             training=TrainingSpec(max_steps=1),
             metadata=MetadataSpec(author="test", description="test"),
         )
@@ -327,15 +337,17 @@ def test_custom_algorithm_causal_data() -> None:
     recipe = Recipe(
         name="custom-test",
         task="text_generation",
-        algorithm={
-            "_component_": "tests.e2e.test_rl_custom_algorithm.SimpleWeightedCELoss",
-            "weight_scale": 1.0,
-        },
-        models={
-            "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-            "critic": RLModelSpec(),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={
+                "_component_": "tests.e2e.test_rl_custom_algorithm.SimpleWeightedCELoss",
+                "weight_scale": 1.0,
+            },
+            models={
+                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
+                "critic": RLModelSpec(),
+            },
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
         training=TrainingSpec(max_steps=3),
         metadata=MetadataSpec(author="test", description="test"),
     )

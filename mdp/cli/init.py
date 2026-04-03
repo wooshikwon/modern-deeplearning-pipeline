@@ -10,6 +10,8 @@ from typing import Any
 import typer
 import yaml
 
+from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+
 
 def _find_catalog_entry(model_name: str) -> dict[str, Any] | None:
     """catalog YAMLs에서 이름으로 모델을 검색한다."""
@@ -66,6 +68,19 @@ def _list_models_for_task(task: str) -> list[dict[str, Any]]:
     return models
 
 
+_TASK_DEFAULT_LABEL_STRATEGY: dict[str, str] = {
+    "image_classification": "copy",
+    "object_detection": "none",
+    "semantic_segmentation": "none",
+    "text_classification": "copy",
+    "token_classification": "align",
+    "text_generation": "causal",
+    "seq2seq": "seq2seq",
+    "image_generation": "none",
+    "feature_extraction": "none",
+}
+
+
 def _build_recipe_from_catalog(
     task: str, catalog: dict[str, Any], project_name: str,
 ) -> str:
@@ -104,7 +119,10 @@ def _build_recipe_from_catalog(
         recipe["head"] = head_config
 
     # data 섹션
-    data: dict[str, Any] = {"source": "???"}
+    data: dict[str, Any] = {
+        "source": "???",
+        "label_strategy": _TASK_DEFAULT_LABEL_STRATEGY.get(task, "none"),
+    }
     required_fields = preset.required_fields if preset else frozenset()
 
     # fields
@@ -221,6 +239,7 @@ def _default_recipe_yaml() -> str:
 
         data:
           source: ./data/cifar10
+          label_strategy: copy
           fields:
             image: image
             label: label
@@ -311,11 +330,15 @@ def init_project(
     root = Path(project_name)
 
     if root.exists():
-        typer.echo(f"[error] '{project_name}' 디렉토리가 이미 존재합니다.", err=True)
+        msg = f"'{project_name}' 디렉토리가 이미 존재합니다."
+        if is_json_mode():
+            emit_result(build_error(command="init", error_type="ValidationError", message=msg))
+        else:
+            typer.echo(f"[error] {msg}", err=True)
         raise typer.Exit(code=1)
 
-    # TTY 대화형 선택
-    is_tty = sys.stdin.isatty()
+    # TTY 대화형 선택 (JSON 모드에서는 비활성)
+    is_tty = sys.stdin.isatty() and not is_json_mode()
 
     if is_tty and task is None:
         from mdp.task_taxonomy import TASK_PRESETS
@@ -329,33 +352,55 @@ def init_project(
             model_names = [m.get("name", "unknown") for m in models]
             model = _interactive_select("Model 선택", model_names)
 
-    # 디렉토리 생성
-    dirs = [
-        root / "configs",
-        root / "recipes",
-        root / "data",
-        root / "checkpoints",
-    ]
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
+    try:
+        # 디렉토리 생성
+        dirs = [
+            root / "configs",
+            root / "recipes",
+            root / "data",
+            root / "checkpoints",
+        ]
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
 
-    # Config 생성
-    (root / "configs" / "local.yaml").write_text(_default_config_yaml())
+        # Config 생성
+        (root / "configs" / "local.yaml").write_text(_default_config_yaml())
 
-    # Recipe 생성
-    if task and model:
-        catalog = _find_catalog_entry(model)
-        if catalog:
-            recipe_content = _build_recipe_from_catalog(task, catalog, project_name)
+        # Recipe 생성
+        if task and model:
+            catalog = _find_catalog_entry(model)
+            if catalog:
+                recipe_content = _build_recipe_from_catalog(task, catalog, project_name)
+            else:
+                recipe_content = _default_recipe_yaml()
         else:
             recipe_content = _default_recipe_yaml()
-    else:
-        recipe_content = _default_recipe_yaml()
 
-    (root / "recipes" / "example.yaml").write_text(recipe_content)
-    (root / ".gitignore").write_text(_gitignore_content())
+        (root / "recipes" / "example.yaml").write_text(recipe_content)
+        (root / ".gitignore").write_text(_gitignore_content())
 
-    typer.echo(f"MDP 프로젝트 '{project_name}' 생성 완료:")
-    for d in dirs:
-        typer.echo(f"  {d}/")
-    typer.echo(f"  {root / '.gitignore'}")
+        if not is_json_mode():
+            typer.echo(f"MDP 프로젝트 '{project_name}' 생성 완료:")
+            for d in dirs:
+                typer.echo(f"  {d}/")
+            typer.echo(f"  {root / '.gitignore'}")
+
+        if is_json_mode():
+            emit_result(build_result(
+                command="init",
+                project_name=project_name,
+                project_dir=str(root.resolve()),
+                task=task,
+                model=model,
+            ))
+
+    except typer.Exit:
+        raise
+    except Exception as e:
+        if is_json_mode():
+            emit_result(build_error(
+                command="init", error_type="RuntimeError", message=str(e),
+            ))
+            raise typer.Exit(code=1)
+        typer.echo(f"[error] {e}", err=True)
+        raise typer.Exit(code=1)

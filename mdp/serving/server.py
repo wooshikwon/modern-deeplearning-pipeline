@@ -69,17 +69,17 @@ def create_handler(
         model: eval 모드의 모델. 호출자가 reconstruct + merge를 완료한 상태.
         recipe: Settings.recipe 객체.
         model_dir: tokenizer 파일이 있는 디렉토리. None이면 recipe에서 fallback.
-        serving_config: ServingConfig 객체. BatchHandler에 배치 설정을 전달한다.
+        serving_config: ServingConfig 객체. PredictHandler에 배치 설정을 전달한다.
     """
-    from mdp.serving.handlers import StreamingHandler, BatchHandler
+    from mdp.serving.handlers import GenerateHandler, PredictHandler
 
     tokenizer = _load_tokenizer(model_dir, recipe)
     transform = _load_transform(recipe)
 
     if recipe.task in ("text_generation", "seq2seq"):
-        return StreamingHandler(model, tokenizer, recipe)
+        return GenerateHandler(model, tokenizer, recipe)
     else:
-        return BatchHandler(model, tokenizer, transform, recipe, serving_config=serving_config)
+        return PredictHandler(model, tokenizer, transform, recipe, serving_config=serving_config)
 
 
 def _load_tokenizer(model_dir: Path | None, recipe: Any) -> Any:

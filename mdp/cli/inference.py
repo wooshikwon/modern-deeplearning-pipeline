@@ -8,7 +8,7 @@ from typing import Any
 
 import typer
 
-from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+from mdp.cli.output import build_error, build_result, emit_result, is_json_mode, resolve_model_source
 
 logger = logging.getLogger(__name__)
 
@@ -123,22 +123,16 @@ def run_inference(
     from mdp.cli.schemas import InferenceResult
     from mdp.data import _load_source, _rename_columns
     from mdp.data.loader import load_data
-    from mdp.data.tokenizer import build_tokenizer, derive_label_strategy
+    from mdp.data.tokenizer import build_tokenizer
     from mdp.data.transforms import build_transforms
     from mdp.serving.inference import run_batch_inference
     from mdp.serving.model_loader import reconstruct_model
     from torch.utils.data import DataLoader
 
-    if run_id and model_dir:
-        msg = "--run-id와 --model-dir는 동시에 지정할 수 없습니다."
-        if is_json_mode():
-            emit_result(build_error(command="inference", error_type="ValidationError", message=msg))
-        else:
-            typer.echo(f"[error] {msg}", err=True)
-        raise typer.Exit(code=1)
-
-    if not run_id and not model_dir:
-        msg = "--run-id 또는 --model-dir 중 하나를 지정하세요."
+    try:
+        model_path = resolve_model_source(run_id, model_dir, "inference")
+    except typer.BadParameter as e:
+        msg = str(e)
         if is_json_mode():
             emit_result(build_error(command="inference", error_type="ValidationError", message=msg))
         else:
@@ -153,11 +147,7 @@ def run_inference(
         typer.echo(f"데이터: {data_source}")
 
     try:
-        # 1. 모델 소스 결정
-        if run_id:
-            model_path = _download_model(run_id)
-        else:
-            model_path = Path(model_dir)
+        # 1. 모델 소스 결정 (already resolved above)
 
         # 2. 모델 재구성 + 가중치 로드 (adapter면 merge)
         model, settings = reconstruct_model(model_path, merge=True)
@@ -172,7 +162,7 @@ def run_inference(
         test_ds = _rename_columns(test_ds, fields)
 
         # 전처리
-        label_strategy = derive_label_strategy(fields)
+        label_strategy = recipe_data.label_strategy
         val_transform = None
         if recipe_data.augmentation:
             val_transform = build_transforms(recipe_data.augmentation.get("val"))

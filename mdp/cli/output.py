@@ -89,6 +89,27 @@ def build_error(
     )
 
 
+def resolve_model_source(
+    run_id: str | None,
+    model_dir: str | None,
+    command: str,
+) -> Path:
+    """run_id 또는 model_dir에서 모델 디렉토리를 해석한다."""
+    from pathlib import Path
+
+    import typer
+
+    if run_id and model_dir:
+        raise typer.BadParameter("--run-id와 --model-dir은 동시에 사용할 수 없습니다.")
+    if not run_id and not model_dir:
+        raise typer.BadParameter("--run-id 또는 --model-dir 중 하나가 필요합니다.")
+    if run_id:
+        import mlflow
+
+        return Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model"))
+    return Path(model_dir)
+
+
 def emit_result(result: dict[str, Any]) -> None:
     """_output_format에 따라 결과를 출력한다.
 

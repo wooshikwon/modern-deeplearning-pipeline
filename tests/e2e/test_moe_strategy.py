@@ -728,23 +728,23 @@ class TestExpertParallelRegistration:
         assert "moe" not in STRATEGY_MAP
 
     def test_trainer_creates_expert_parallel_from_config(self) -> None:
-        """distributed.moe config가 있으면 Trainer가 ExpertParallel을 생성한다."""
-        from mdp.training.trainer import Trainer
+        """distributed.moe config가 있으면 create_expert_parallel이 ExpertParallel을 생성한다."""
+        from mdp.training._common import create_expert_parallel
 
         settings = MagicMock()
         settings.config.compute.distributed = {
             "strategy": "fsdp",
             "moe": {"enabled": True, "ep_size": 4},
         }
-        ep = Trainer._create_expert_parallel(settings)
+        ep = create_expert_parallel(settings)
         assert ep is not None
         assert ep.ep_size == 4
 
     def test_trainer_no_expert_parallel_without_moe(self) -> None:
-        """moe config가 없으면 ExpertParallel이 None이다."""
-        from mdp.training.trainer import Trainer
+        """moe config가 없으면 create_expert_parallel이 None이다."""
+        from mdp.training._common import create_expert_parallel
 
         settings = MagicMock()
         settings.config.compute.distributed = {"strategy": "fsdp"}
-        ep = Trainer._create_expert_parallel(settings)
+        ep = create_expert_parallel(settings)
         assert ep is None

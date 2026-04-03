@@ -83,6 +83,7 @@ def _dpo_distributed_worker(rank: int, world_size: int, result_queue) -> None:
             DataSpec,
             MetadataSpec,
             RLModelSpec,
+            RLSpec,
             Recipe,
             Settings,
             TrainingSpec,
@@ -92,17 +93,19 @@ def _dpo_distributed_worker(rank: int, world_size: int, result_queue) -> None:
         recipe = Recipe(
             name="dpo-dist-test",
             task="text_generation",
-            algorithm={"_component_": "DPO", "beta": 0.1},
-            models={
-                "policy": RLModelSpec(
-                    class_path="tests.e2e.test_distributed_rl.TinyGenLM",
-                    optimizer={"_component_": "AdamW", "lr": 1e-3},
-                ),
-                "reference": RLModelSpec(
-                    class_path="tests.e2e.test_distributed_rl.TinyGenLM",
-                ),
-            },
-            data=DataSpec(source="/tmp/fake"),
+            rl=RLSpec(
+                algorithm={"_component_": "DPO", "beta": 0.1},
+                models={
+                    "policy": RLModelSpec(
+                        class_path="tests.e2e.test_distributed_rl.TinyGenLM",
+                        optimizer={"_component_": "AdamW", "lr": 1e-3},
+                    ),
+                    "reference": RLModelSpec(
+                        class_path="tests.e2e.test_distributed_rl.TinyGenLM",
+                    ),
+                },
+            ),
+            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
             training=TrainingSpec(max_steps=3),
             metadata=MetadataSpec(author="test", description="dpo dist test"),
         )
@@ -155,9 +158,10 @@ def _grpo_distributed_worker(rank: int, world_size: int, result_queue) -> None:
         from mdp.settings.schema import (
             Config,
             DataSpec,
-            GenerationSpec,
             MetadataSpec,
+            RLGenerationSpec,
             RLModelSpec,
+            RLSpec,
             Recipe,
             Settings,
             TrainingSpec,
@@ -167,22 +171,24 @@ def _grpo_distributed_worker(rank: int, world_size: int, result_queue) -> None:
         recipe = Recipe(
             name="grpo-dist-test",
             task="text_generation",
-            algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
-            models={
-                "policy": RLModelSpec(
-                    class_path="tests.e2e.test_distributed_rl.TinyGenLM",
-                    optimizer={"_component_": "AdamW", "lr": 1e-3},
-                ),
-                "reference": RLModelSpec(
-                    class_path="tests.e2e.test_distributed_rl.TinyGenLM",
-                ),
-                "reward": RLModelSpec(
-                    class_path="tests.e2e.test_distributed_rl.TinyGenLM",
-                ),
-            },
-            data=DataSpec(source="/tmp/fake"),
+            rl=RLSpec(
+                algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
+                models={
+                    "policy": RLModelSpec(
+                        class_path="tests.e2e.test_distributed_rl.TinyGenLM",
+                        optimizer={"_component_": "AdamW", "lr": 1e-3},
+                    ),
+                    "reference": RLModelSpec(
+                        class_path="tests.e2e.test_distributed_rl.TinyGenLM",
+                    ),
+                    "reward": RLModelSpec(
+                        class_path="tests.e2e.test_distributed_rl.TinyGenLM",
+                    ),
+                },
+                generation=RLGenerationSpec(max_new_tokens=4),
+            ),
+            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
             training=TrainingSpec(max_steps=2),
-            generation=GenerationSpec(max_new_tokens=4),
             metadata=MetadataSpec(author="test", description="grpo dist test"),
         )
         config = Config()

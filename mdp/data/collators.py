@@ -45,13 +45,12 @@ class PreferenceCollator:
 
             # prompt 길이 측정 (loss masking용)
             if prompt:
-                prompt_tokens = self.tokenizer(
-                    prompt, add_special_tokens=False,
+                full_prefix = self.tokenizer(
+                    prompt, add_special_tokens=True,
                 )["input_ids"]
-                # +1 for BOS token if the tokenizer adds one
-                prompt_len = len(prompt_tokens)
-                if self.tokenizer.bos_token_id is not None:
-                    prompt_len += 1
+                # Use length with special tokens — this matches what the full
+                # text tokenization will produce for the prompt portion
+                prompt_len = len(full_prefix)
             else:
                 prompt_len = 0
 

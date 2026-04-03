@@ -24,6 +24,7 @@ adapter:
     - embed_tokens
 
 data:
+  label_strategy: "causal"
   source: HuggingFaceH4/ultrachat_200k
   format: auto
   fields:

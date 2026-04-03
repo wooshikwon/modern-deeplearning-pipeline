@@ -34,7 +34,7 @@ def _make_factory_settings(
         model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel", init_args={"num_classes": 2, "hidden_dim": 16}),
         head=head,
         adapter=adapter,
-        data=DataSpec(source="/tmp/fake"),
+        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
         training=TrainingSpec(epochs=1),
         optimizer={"_component_": "AdamW", "lr": 1e-3},
         metadata=MetadataSpec(author="test", description="factory integration"),

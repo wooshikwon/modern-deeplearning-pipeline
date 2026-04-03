@@ -8,7 +8,7 @@ from pathlib import Path
 
 import typer
 
-from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+from mdp.cli.output import build_error, build_result, emit_result, is_json_mode, resolve_model_source
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +23,10 @@ def run_export(
     --run-id: MLflow run의 model artifact에서 내보내기.
     --checkpoint: 로컬 checkpoint 디렉토리에서 내보내기.
     """
-    if run_id and checkpoint:
-        msg = "--run-id와 --checkpoint는 동시에 지정할 수 없습니다."
-        if is_json_mode():
-            emit_result(build_error(command="export", error_type="ValidationError", message=msg))
-        else:
-            typer.echo(f"[error] {msg}", err=True)
-        raise typer.Exit(code=1)
-
-    if not run_id and not checkpoint:
-        msg = "--run-id 또는 --checkpoint 중 하나를 지정하세요."
+    try:
+        source_dir = resolve_model_source(run_id, checkpoint, "export")
+    except typer.BadParameter as e:
+        msg = str(e)
         if is_json_mode():
             emit_result(build_error(command="export", error_type="ValidationError", message=msg))
         else:
@@ -42,19 +36,11 @@ def run_export(
     try:
         from mdp.serving.model_loader import reconstruct_model
 
-        # 소스 디렉토리 결정
-        if run_id:
-            import mlflow
+        if not run_id and not source_dir.exists():
+            raise FileNotFoundError(f"checkpoint 경로를 찾을 수 없습니다: {checkpoint}")
 
-            if not is_json_mode():
-                typer.echo(f"MLflow run: {run_id}")
-            source_dir = Path(mlflow.artifacts.download_artifacts(
-                run_id=run_id, artifact_path="model",
-            ))
-        else:
-            source_dir = Path(checkpoint)
-            if not source_dir.exists():
-                raise FileNotFoundError(f"checkpoint 경로를 찾을 수 없습니다: {checkpoint}")
+        if not is_json_mode() and run_id:
+            typer.echo(f"MLflow run: {run_id}")
 
         if not is_json_mode():
             typer.echo(f"소스: {source_dir}")

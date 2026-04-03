@@ -9,17 +9,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def load_serving_model(model_dir: Path) -> None:
-    """model/ artifact에서 가중치를 로드한다. merge 완료 상태이므로 safetensors만 처리."""
-    from safetensors.torch import load_file
-
-    safetensors_path = model_dir / "model.safetensors"
-    if not safetensors_path.exists():
-        raise FileNotFoundError(f"model.safetensors를 찾을 수 없습니다: {model_dir}")
-
-    return load_file(safetensors_path)
-
-
 def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
     """checkpoint/ artifact에서 가중치를 로드한다. resume용 — adapter/safetensors/pt 3가지 분기."""
     import torch
@@ -67,7 +56,7 @@ def reconstruct_model(artifact_dir: Path, merge: bool = False) -> tuple[Any, Any
     from mdp.settings.factory import SettingsFactory
 
     settings = SettingsFactory().from_artifact(str(artifact_dir))
-    model = Factory(settings).create_model()
+    model = Factory(settings).create_model(skip_base_check=True)
 
     # adapter_config.json이 있으면 PEFT adapter artifact
     adapter_config_path = artifact_dir / "adapter_config.json"

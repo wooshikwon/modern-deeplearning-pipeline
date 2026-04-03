@@ -195,7 +195,7 @@ def _list_callbacks() -> None:
 _STRATEGIES = [
     {"name": "ddp", "strategy": "DistributedDataParallel", "description": "멀티 GPU 데이터 병렬"},
     {"name": "fsdp", "strategy": "FullyShardedDataParallel", "description": "메모리 효율적 모델 병렬"},
-    {"name": "deepspeed", "strategy": "DeepSpeed ZeRO", "description": "ZeRO Stage 1/2 최적화"},
+    {"name": "deepspeed_zero2", "strategy": "DeepSpeed ZeRO-2", "description": "ZeRO Stage 2 최적화"},
     {"name": "deepspeed_zero3", "strategy": "DeepSpeed ZeRO-3", "description": "ZeRO Stage 3 전체 분할"},
 ]
 
@@ -242,11 +242,12 @@ def run_list(target: str, task_filter: str | None = None) -> None:
 
     handler = _TARGET_DISPATCH.get(target)
     if handler is None:
-        typer.echo(
-            f"[error] 알 수 없는 target: '{target}'. "
-            f"사용 가능: {_VALID_TARGETS}",
-            err=True,
-        )
+        msg = f"알 수 없는 target: '{target}'. 사용 가능: {_VALID_TARGETS}"
+        if is_json_mode():
+            from mdp.cli.output import build_error
+            emit_result(build_error(command="list", error_type="ValueError", message=msg))
+        else:
+            typer.echo(f"[error] {msg}", err=True)
         raise typer.Exit(code=1)
 
     handler()

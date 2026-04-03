@@ -20,7 +20,6 @@ from mdp.data.tokenizer import (
     LABEL_PREFERENCE,
     LABEL_SEQ2SEQ,
     build_tokenizer,
-    derive_label_strategy,
 )
 from mdp.data.transforms import build_transforms
 
@@ -67,9 +66,9 @@ def _select_collator(
 
         return DataCollatorWithPadding(tokenizer=tokenizer)
     elif label_strategy == LABEL_ALIGN:
-        from transformers import DataCollatorWithPadding
+        from transformers import DataCollatorForTokenClassification
 
-        return DataCollatorWithPadding(tokenizer=tokenizer)
+        return DataCollatorForTokenClassification(tokenizer=tokenizer)
     else:
         # LABEL_NONE (이미지 등): 기본 torch collate 사용
         return None
@@ -165,6 +164,7 @@ def create_dataloaders(
     streaming: bool = False,
     data_files: str | dict[str, str] | None = None,
     fmt: str = "auto",
+    label_strategy: str = "none",
     aug_config: dict[str, Any] | None = None,
     tokenizer_config: dict[str, Any] | None = None,
     loader_config: dict[str, Any] | None = None,
@@ -175,7 +175,7 @@ def create_dataloaders(
 
     1. ``datasets.load_dataset()``로 source 로딩 (HF Hub / 로컬 파일 / 디렉토리)
     2. fields ``{role: column_name}`` 매핑으로 컬럼 리네이밍
-    3. fields roles로부터 label_strategy 파생 → 전처리 자동 결정
+    3. label_strategy에 따라 전처리 자동 결정
     4. ``load_data``로 transform/tokenization 적용
     5. DataLoader 조립
 
@@ -187,6 +187,7 @@ def create_dataloaders(
         streaming: 스트리밍 모드 여부.
         data_files: 로컬 파일 지정 (HF load_dataset data_files).
         fmt: 로컬 파일 포맷. ``"auto"``이면 확장자로 추론.
+        label_strategy: label 생성 전략. recipe의 data.label_strategy에서 전달.
         aug_config: augmentation 설정 (``train``/``val`` 키 포함 가능).
         tokenizer_config: tokenizer 설정.
         loader_config: DataLoader 설정 (batch_size, num_workers 등).
@@ -198,9 +199,6 @@ def create_dataloaders(
         ``{"train": DataLoader, "val": DataLoader}`` 딕셔너리.
     """
     loader_config = loader_config or {}
-
-    # ── label strategy ──
-    label_strategy = derive_label_strategy(fields)
 
     # ── transforms / tokenizer ──
     train_transform = None

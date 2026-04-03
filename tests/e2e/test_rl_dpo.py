@@ -11,6 +11,7 @@ from __future__ import annotations
 import pytest
 import torch
 import torch.nn as nn
+from pydantic import ValidationError
 
 from mdp.settings.schema import (
     Config,
@@ -18,6 +19,7 @@ from mdp.settings.schema import (
     MetadataSpec,
     ModelSpec,
     RLModelSpec,
+    RLSpec,
     Recipe,
     Settings,
     TrainingSpec,
@@ -101,17 +103,19 @@ def test_rl_trainer_dpo() -> None:
     recipe = Recipe(
         name="dpo-test",
         task="text_generation",
-        algorithm={"_component_": "DPO", "beta": 0.1},
-        models={
-            "policy": RLModelSpec(
-                class_path="tests.e2e.test_rl_dpo.TinyLM",
-                optimizer={"_component_": "AdamW", "lr": 1e-3},
-            ),
-            "reference": RLModelSpec(
-                class_path="tests.e2e.test_rl_dpo.TinyLM",
-            ),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={"_component_": "DPO", "beta": 0.1},
+            models={
+                "policy": RLModelSpec(
+                    class_path="tests.e2e.test_rl_dpo.TinyLM",
+                    optimizer={"_component_": "AdamW", "lr": 1e-3},
+                ),
+                "reference": RLModelSpec(
+                    class_path="tests.e2e.test_rl_dpo.TinyLM",
+                ),
+            },
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
         training=TrainingSpec(max_steps=3),
         metadata=MetadataSpec(author="test", description="dpo test"),
     )
@@ -138,29 +142,25 @@ def test_rl_trainer_dpo() -> None:
 
 
 def test_rl_recipe_validation() -> None:
-    """RL Recipe에서 models.policy가 없으면 에러."""
-    with pytest.raises(ValueError, match="models.policy가 필수"):
+    """RL Recipe에서 rl.models.policy가 없으면 에러."""
+    with pytest.raises(ValueError, match="rl.models.policy가 필수"):
         Recipe(
             name="bad-rl",
             task="text_generation",
-            algorithm={"_component_": "DPO"},
-            models={
-                "reference": RLModelSpec(class_path="x"),
-            },
-            data=DataSpec(source="/tmp/fake"),
+            rl=RLSpec(
+                algorithm={"_component_": "DPO"},
+                models={
+                    "reference": RLModelSpec(class_path="x"),
+                },
+            ),
+            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
             training=TrainingSpec(max_steps=1),
             metadata=MetadataSpec(author="test", description="test"),
         )
 
-    with pytest.raises(ValueError, match="models가 없습니다"):
-        Recipe(
-            name="bad-rl",
-            task="text_generation",
-            algorithm={"_component_": "DPO"},
-            data=DataSpec(source="/tmp/fake"),
-            training=TrainingSpec(max_steps=1),
-            metadata=MetadataSpec(author="test", description="test"),
-        )
+    # RLSpec requires models, so Pydantic will reject it
+    with pytest.raises(ValidationError):
+        RLSpec(algorithm={"_component_": "DPO"})
 
 
 def test_dpo_validation_produces_preference_accuracy() -> None:
@@ -195,18 +195,20 @@ def test_dpo_validation_produces_preference_accuracy() -> None:
     recipe = Recipe(
         name="dpo-val-test",
         task="text_generation",
-        algorithm={"_component_": "DPO", "beta": 0.1},
-        models={
-            "policy": RLModelSpec(
-                class_path="tests.e2e.test_rl_dpo.TinyLM",
-                optimizer={"_component_": "AdamW", "lr": 1e-3},
-            ),
-            "reference": RLModelSpec(
-                class_path="tests.e2e.test_rl_dpo.TinyLM",
-            ),
-        },
-        data=DataSpec(source="/tmp/fake"),
-        training=TrainingSpec(max_steps=4, val_check_interval=2),
+        rl=RLSpec(
+            algorithm={"_component_": "DPO", "beta": 0.1},
+            models={
+                "policy": RLModelSpec(
+                    class_path="tests.e2e.test_rl_dpo.TinyLM",
+                    optimizer={"_component_": "AdamW", "lr": 1e-3},
+                ),
+                "reference": RLModelSpec(
+                    class_path="tests.e2e.test_rl_dpo.TinyLM",
+                ),
+            },
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+        training=TrainingSpec(max_steps=4, val_check_interval=2, val_check_unit="step"),
         metadata=MetadataSpec(author="test", description="dpo val test"),
     )
     settings = Settings(recipe=recipe, config=Config())

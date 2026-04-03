@@ -7,7 +7,7 @@ from pathlib import Path
 
 import typer
 
-from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+from mdp.cli.output import build_error, build_result, emit_result, is_json_mode, resolve_model_source
 
 logger = logging.getLogger(__name__)
 
@@ -32,16 +32,10 @@ def run_serve(
         )
         raise typer.Exit(code=1)
 
-    if run_id and model_dir:
-        msg = "--run-id와 --model-dir는 동시에 지정할 수 없습니다."
-        if is_json_mode():
-            emit_result(build_error(command="serve", error_type="ValidationError", message=msg))
-        else:
-            typer.echo(f"[error] {msg}", err=True)
-        raise typer.Exit(code=1)
-
-    if not run_id and not model_dir:
-        msg = "--run-id 또는 --model-dir 중 하나를 지정하세요."
+    try:
+        source_dir = resolve_model_source(run_id, model_dir, "serve")
+    except typer.BadParameter as e:
+        msg = str(e)
         if is_json_mode():
             emit_result(build_error(command="serve", error_type="ValidationError", message=msg))
         else:
@@ -49,17 +43,8 @@ def run_serve(
         raise typer.Exit(code=1)
 
     try:
-        # 모델 디렉토리 결정
-        if run_id:
-            import mlflow
-
-            if not is_json_mode():
-                typer.echo(f"MLflow run: {run_id}")
-            source_dir = Path(mlflow.artifacts.download_artifacts(
-                run_id=run_id, artifact_path="model",
-            ))
-        else:
-            source_dir = Path(model_dir)
+        if not is_json_mode() and run_id:
+            typer.echo(f"MLflow run: {run_id}")
 
         from mdp.serving.server import create_handler, create_app
         from mdp.serving.model_loader import reconstruct_model

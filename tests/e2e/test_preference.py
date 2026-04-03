@@ -12,15 +12,12 @@ from __future__ import annotations
 import torch
 
 from mdp.data.collators import PreferenceCollator
-from mdp.data.tokenizer import LABEL_PREFERENCE, derive_label_strategy
+from mdp.data.tokenizer import LABEL_PREFERENCE
 
 
-def test_preference_label_strategy() -> None:
-    """chosen + rejected 역할이 있으면 LABEL_PREFERENCE."""
-    assert derive_label_strategy({"chosen": "c", "rejected": "r"}) == LABEL_PREFERENCE
-    assert derive_label_strategy({"prompt": "p", "chosen": "c", "rejected": "r"}) == LABEL_PREFERENCE
-    # chosen만 있으면 preference가 아님
-    assert derive_label_strategy({"chosen": "c"}) != LABEL_PREFERENCE
+def test_preference_label_strategy_constant() -> None:
+    """LABEL_PREFERENCE has expected string value."""
+    assert LABEL_PREFERENCE == "preference"
 
 
 def test_preference_collator_output_structure() -> None:

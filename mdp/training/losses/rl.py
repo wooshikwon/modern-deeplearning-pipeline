@@ -112,9 +112,11 @@ class DPOLoss:
 # ── 공유: Advantage 계산 ──
 
 
-def _make_response_mask(shape: tuple, prompt_length: int) -> torch.Tensor:
+def _make_response_mask(
+    shape: tuple, prompt_length: int, device: torch.device | str | None = None,
+) -> torch.Tensor:
     """prompt 이후 토큰만 True인 mask를 생성한다."""
-    mask = torch.ones(shape, dtype=torch.bool)
+    mask = torch.ones(shape, dtype=torch.bool, device=device)
     if prompt_length > 0:
         mask[:, :max(0, prompt_length - 1)] = False
     return mask
@@ -209,8 +211,7 @@ class GRPOLoss:
     ) -> dict[str, torch.Tensor]:
         new_log_probs = compute_log_probs(trainable_out["policy"]["logits"], batch["input_ids"])
         old_log_probs = batch["old_log_probs"]
-        mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0))
-        mask = mask.to(new_log_probs.device)
+        mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0), device=new_log_probs.device)
 
         log_ratio = (new_log_probs - old_log_probs).clamp(min=-20.0, max=20.0)
         ratio = log_ratio.exp()
@@ -285,8 +286,7 @@ class PPOLoss:
     ) -> dict[str, torch.Tensor]:
         new_log_probs = compute_log_probs(trainable_out["policy"]["logits"], batch["input_ids"])
         old_log_probs = batch["old_log_probs"]
-        mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0))
-        mask = mask.to(new_log_probs.device)
+        mask = _make_response_mask(new_log_probs.shape, batch.get("prompt_length", 0), device=new_log_probs.device)
 
         log_ratio = (new_log_probs - old_log_probs).clamp(min=-20.0, max=20.0)
         ratio = log_ratio.exp()

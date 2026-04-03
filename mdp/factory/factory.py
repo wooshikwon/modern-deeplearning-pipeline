@@ -36,15 +36,15 @@ class Factory:
 
     # ── Phase 2: 모델 생성 ──
 
-    def create_model(self) -> nn.Module:
+    def create_model(self, skip_base_check: bool = False) -> nn.Module:
         """Recipe의 model 설정에 따라 모델을 생성한다.
 
         순서: pretrained 로딩 → head 교체 → adapter 적용.
         QLoRA는 양자화+로딩+어댑터가 결합된 특수 경로를 탄다.
         """
-        return self._get_or_create("model", self._build_model)
+        return self._get_or_create("model", lambda: self._build_model(skip_base_check=skip_base_check))
 
-    def _build_model(self) -> nn.Module:
+    def _build_model(self, skip_base_check: bool = False) -> nn.Module:
         recipe = self.settings.recipe
         model_spec = recipe.model
         adapter_spec = recipe.adapter
@@ -78,6 +78,15 @@ class Factory:
             target_attr = head_config.pop("_target_attr", None)
             head = self.resolver.resolve(head_config)
             self._attach_head(model, head, target_attr)
+
+        # 커스텀 모델(pretrained 없음)은 BaseModel 상속 필수 — adapter 래핑 전에 검사
+        from mdp.models.base import BaseModel
+        if not skip_base_check and recipe.model.pretrained is None and not isinstance(model, BaseModel):
+            raise TypeError(
+                f"{model.__class__.__name__}이 BaseModel을 상속하지 않습니다. "
+                "커스텀 모델은 BaseModel을 상속하여 forward, training_step, "
+                "validation_step을 구현하세요. HF 모델이라면 pretrained: hf://... 를 사용하세요."
+            )
 
         # 단계 3: adapter 적용 (설정이 있을 때만, QLoRA는 위에서 처리)
         if adapter_spec is not None and adapter_spec.method != "qlora":
@@ -208,6 +217,7 @@ class Factory:
                 streaming=data.streaming,
                 data_files=data.data_files,
                 fmt=data.format,
+                label_strategy=data.label_strategy,
                 aug_config=data.augmentation,
                 tokenizer_config=data.tokenizer,
                 loader_config=data.dataloader.model_dump(),
@@ -223,11 +233,11 @@ class Factory:
         """RL Recipe의 models 설정에 따라 역할별 모델을 생성한다."""
         def _create() -> dict[str, nn.Module]:
             recipe = self.settings.recipe
-            if recipe.models is None:
-                raise ValueError("create_models()는 recipe.models가 필요합니다")
+            if recipe.rl is None:
+                raise ValueError("create_models()는 recipe.rl이 필요합니다")
 
             models = {}
-            for name, spec in recipe.models.items():
+            for name, spec in recipe.rl.models.items():
                 model = self._load_pretrained(spec)
                 if spec.adapter is not None:
                     from mdp.models.adapters import apply_adapter

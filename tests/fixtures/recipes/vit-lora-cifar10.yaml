@@ -25,6 +25,7 @@ adapter:
     - v_proj
 
 data:
+  label_strategy: "none"
   source: cifar10
   fields:
     image: image

@@ -23,63 +23,25 @@ from mdp.data.tokenizer import (
     LABEL_COPY,
     LABEL_NONE,
     LABEL_SEQ2SEQ,
-    derive_label_strategy,
 )
 from mdp.task_taxonomy import TASK_PRESETS, validate_task_fields
 
 
 # ---------------------------------------------------------------------------
-# TestDeriveLabelStrategy — 10 tests for all fields combinations
+# TestLabelStrategyConstants — label strategy 상수 값 검증
 # ---------------------------------------------------------------------------
 
 
-class TestDeriveLabelStrategy:
-    """Verify derive_label_strategy returns correct strategy for all field combos."""
+class TestLabelStrategyConstants:
+    """Verify label strategy constants are correct string values."""
 
-    def test_none_fields(self) -> None:
-        """None fields -> LABEL_NONE."""
-        assert derive_label_strategy(None) == LABEL_NONE
-
-    def test_empty_fields(self) -> None:
-        """Empty dict -> LABEL_NONE."""
-        assert derive_label_strategy({}) == LABEL_NONE
-
-    def test_text_only(self) -> None:
-        """text only -> LABEL_CAUSAL (text generation)."""
-        assert derive_label_strategy({"text": "content"}) == LABEL_CAUSAL
-
-    def test_text_and_label(self) -> None:
-        """text + label -> LABEL_COPY (text classification)."""
-        assert derive_label_strategy({"text": "content", "label": "sentiment"}) == LABEL_COPY
-
-    def test_text_and_target(self) -> None:
-        """text + target -> LABEL_SEQ2SEQ."""
-        assert derive_label_strategy({"text": "source", "target": "translation"}) == LABEL_SEQ2SEQ
-
-    def test_text_and_token_labels(self) -> None:
-        """text + token_labels -> LABEL_ALIGN."""
-        assert derive_label_strategy({"text": "tokens", "token_labels": "ner_tags"}) == LABEL_ALIGN
-
-    def test_image_only(self) -> None:
-        """image only -> LABEL_NONE (feature extraction)."""
-        assert derive_label_strategy({"image": "path"}) == LABEL_NONE
-
-    def test_image_and_label(self) -> None:
-        """image + label -> LABEL_NONE (no text role, falls through)."""
-        # image + label without text doesn't match any text-based strategy
-        result = derive_label_strategy({"image": "path", "label": "class"})
-        assert result == LABEL_NONE
-
-    def test_target_takes_priority(self) -> None:
-        """text + target + label -> LABEL_SEQ2SEQ (target has priority)."""
-        fields = {"text": "source", "target": "summary", "label": "score"}
-        assert derive_label_strategy(fields) == LABEL_SEQ2SEQ
-
-    def test_token_labels_over_label(self) -> None:
-        """text + token_labels + label -> LABEL_ALIGN (token_labels before label)."""
-        fields = {"text": "tokens", "token_labels": "tags", "label": "sentiment"}
-        # target not present, so check token_labels next
-        assert derive_label_strategy(fields) == LABEL_ALIGN
+    def test_label_strategy_values(self) -> None:
+        """All label strategy constants have expected string values."""
+        assert LABEL_CAUSAL == "causal"
+        assert LABEL_SEQ2SEQ == "seq2seq"
+        assert LABEL_COPY == "copy"
+        assert LABEL_ALIGN == "align"
+        assert LABEL_NONE == "none"
 
 
 # ---------------------------------------------------------------------------
@@ -92,13 +54,11 @@ class TestCollatorSelection:
 
     def test_causal_strategy_uses_causal_collator(self) -> None:
         """LABEL_CAUSAL should route to causal-style collation (labels=input_ids shifted)."""
-        strategy = derive_label_strategy({"text": "content"})
-        assert strategy == LABEL_CAUSAL
+        assert LABEL_CAUSAL == "causal"
 
     def test_copy_strategy_preserves_labels(self) -> None:
         """LABEL_COPY should pass labels through unchanged."""
-        strategy = derive_label_strategy({"text": "content", "label": "class"})
-        assert strategy == LABEL_COPY
+        assert LABEL_COPY == "copy"
 
 
 # ---------------------------------------------------------------------------
@@ -109,43 +69,21 @@ class TestCollatorSelection:
 class TestLoaderRouting:
     """Verify data loader routing based on fields."""
 
-    @patch("mdp.data.dataloader.build_tokenizer")
-    @patch("mdp.data.dataloader.build_transforms")
-    def test_text_fields_route_to_tokenizer(
-        self, mock_transforms: MagicMock, mock_tokenizer: MagicMock
-    ) -> None:
-        """Fields with 'text' should invoke build_tokenizer."""
-        mock_tokenizer.return_value = lambda x: x
-        mock_transforms.return_value = None
+    def test_causal_strategy_is_text_generation(self) -> None:
+        """LABEL_CAUSAL is for text generation."""
+        assert LABEL_CAUSAL == "causal"
 
-        # Verify the strategy derivation for text fields
-        strategy = derive_label_strategy({"text": "content"})
-        assert strategy == LABEL_CAUSAL
+    def test_none_strategy_for_image(self) -> None:
+        """LABEL_NONE is for image-only or feature extraction."""
+        assert LABEL_NONE == "none"
 
-    @patch("mdp.data.dataloader.build_tokenizer")
-    @patch("mdp.data.dataloader.build_transforms")
-    def test_image_fields_route_to_transforms(
-        self, mock_transforms: MagicMock, mock_tokenizer: MagicMock
-    ) -> None:
-        """Fields with 'image' only should not need tokenizer."""
-        mock_tokenizer.return_value = None
-        mock_transforms.return_value = lambda x: x
+    def test_seq2seq_strategy_value(self) -> None:
+        """LABEL_SEQ2SEQ is for text-to-text tasks."""
+        assert LABEL_SEQ2SEQ == "seq2seq"
 
-        strategy = derive_label_strategy({"image": "path"})
-        assert strategy == LABEL_NONE
-
-    def test_multimodal_fields_have_both(self) -> None:
-        """image + text fields should derive causal (multimodal text_generation)."""
-        fields = {"image": "path", "text": "caption"}
-        strategy = derive_label_strategy(fields)
-        # image + text without label → LABEL_CAUSAL
-        assert strategy == LABEL_CAUSAL
-
-    def test_seq2seq_fields_derive_correctly(self) -> None:
-        """text + target fields should derive seq2seq strategy."""
-        fields = {"text": "source_text", "target": "target_text"}
-        strategy = derive_label_strategy(fields)
-        assert strategy == LABEL_SEQ2SEQ
+    def test_align_strategy_value(self) -> None:
+        """LABEL_ALIGN is for token classification."""
+        assert LABEL_ALIGN == "align"
 
 
 # ---------------------------------------------------------------------------
@@ -283,7 +221,7 @@ class TestValSplit:
         """val_split="auto"(기본)는 기존 동작과 동일."""
         from mdp.settings.schema import DataSpec
 
-        spec = DataSpec(source="dummy")
+        spec = DataSpec(source="dummy", label_strategy="none")
         assert spec.val_split == "auto"
 
     def test_val_split_null_disables_validation(self) -> None:
@@ -303,6 +241,6 @@ class TestValSplit:
              patch("mdp.data.dataloader.build_transforms", return_value=(None, None)), \
              patch("mdp.data.dataloader.DataLoader") as mock_loader:
             mock_loader.return_value = MagicMock()
-            result = create_dataloaders(source="dummy", val_split=None)
+            result = create_dataloaders(source="dummy", label_strategy="none", val_split=None)
 
         assert "val" not in result

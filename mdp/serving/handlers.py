@@ -14,8 +14,8 @@ from starlette.responses import StreamingResponse
 logger = logging.getLogger(__name__)
 
 
-class StreamingHandler:
-    """text_generation/seq2seq용. TextIteratorStreamer + SSE."""
+class GenerateHandler:
+    """text_generation/seq2seq용. autoregressive token streaming via SSE."""
 
     def __init__(
         self,
@@ -58,8 +58,8 @@ class StreamingHandler:
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
-class BatchHandler:
-    """classification/detection용. BatchScheduler + JSON."""
+class PredictHandler:
+    """classification/detection용. max_batch_size > 1이면 BatchScheduler, 아니면 즉시 처리."""
 
     def __init__(
         self,
@@ -73,16 +73,36 @@ class BatchHandler:
         self.tokenizer = tokenizer
         self.transform = transform
         self.task = recipe.task
-        max_bs = 8
+        self._device = next(model.parameters()).device
+        max_bs = 1
         window = 50.0
         if serving_config is not None:
-            max_bs = getattr(serving_config, "max_batch_size", 8)
+            max_bs = getattr(serving_config, "max_batch_size", 1)
             window = getattr(serving_config, "batch_window_ms", 50.0)
-        self.scheduler = _BatchScheduler(model, max_batch_size=max_bs, batch_window_ms=window)
+        self._use_batching = max_bs > 1
+        if self._use_batching:
+            self.scheduler = _BatchScheduler(model, max_batch_size=max_bs, batch_window_ms=window)
 
     async def handle(self, raw_input: dict) -> dict:
         preprocessed = await asyncio.to_thread(self._preprocess, raw_input)
-        return await self.scheduler.submit(preprocessed)
+        if self._use_batching:
+            return await self.scheduler.submit(preprocessed)
+        return await self._infer_single(preprocessed)
+
+    async def _infer_single(self, preprocessed: dict) -> dict:
+        """배치 없이 단일 요청을 즉시 처리한다."""
+        inputs = {
+            k: v.to(self._device) if isinstance(v, torch.Tensor) else v
+            for k, v in preprocessed.items()
+        }
+        outputs = await asyncio.to_thread(self._run_model, inputs)
+        if isinstance(outputs, torch.Tensor):
+            outputs = {"logits": outputs}
+        return _BatchScheduler._unbatch(outputs, 0)
+
+    def _run_model(self, inputs: dict) -> Any:
+        with torch.no_grad():
+            return self.model(inputs)
 
     def _preprocess(self, raw_input: dict) -> dict:
         """raw 입력을 모델 입력 텐서로 변환한다."""
@@ -101,7 +121,8 @@ class BatchHandler:
 
     async def start(self) -> None:
         """배치 루프를 시작한다. FastAPI lifespan에서 호출."""
-        self._task = asyncio.create_task(self.scheduler.batch_loop())
+        if self._use_batching:
+            self._task = asyncio.create_task(self.scheduler.batch_loop())
 
     async def stop(self) -> None:
         if hasattr(self, "_task"):
@@ -124,7 +145,7 @@ class _BatchScheduler:
         self._device = next(model.parameters()).device
 
     async def submit(self, preprocessed: dict) -> dict:
-        future = asyncio.get_event_loop().create_future()
+        future = asyncio.get_running_loop().create_future()
         await self.queue.put((preprocessed, future))
         return await future
 
@@ -134,9 +155,9 @@ class _BatchScheduler:
                 first_item = await self.queue.get()
                 batch_items = [first_item]
 
-                deadline = asyncio.get_event_loop().time() + self.batch_window
+                deadline = asyncio.get_running_loop().time() + self.batch_window
                 while len(batch_items) < self.max_batch_size:
-                    remaining = deadline - asyncio.get_event_loop().time()
+                    remaining = deadline - asyncio.get_running_loop().time()
                     if remaining <= 0:
                         break
                     try:
@@ -176,7 +197,19 @@ class _BatchScheduler:
         for k in keys:
             values = [inp[k] for inp in inputs]
             if isinstance(values[0], torch.Tensor):
-                batched[k] = torch.cat(values, dim=0)
+                if values[0].dim() >= 1 and any(v.shape != values[0].shape for v in values):
+                    # Re-pad to max length (variable-length text support)
+                    max_len = max(v.shape[-1] for v in values)
+                    padded = []
+                    for v in values:
+                        if v.shape[-1] < max_len:
+                            pad_size = max_len - v.shape[-1]
+                            padded.append(torch.nn.functional.pad(v, (0, pad_size)))
+                        else:
+                            padded.append(v)
+                    batched[k] = torch.cat(padded, dim=0)
+                else:
+                    batched[k] = torch.cat(values, dim=0)
             else:
                 batched[k] = values
         return batched

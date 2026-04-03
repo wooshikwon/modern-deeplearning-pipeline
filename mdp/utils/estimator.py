@@ -193,8 +193,10 @@ class MemoryEstimator:
         return precision_map.get(precision, 4)
 
     @staticmethod
-    def _extract_optimizer_name(optimizer_config: dict[str, Any]) -> str:
+    def _extract_optimizer_name(optimizer_config: dict[str, Any] | None) -> str:
         """옵티마이저 설정에서 이름을 추출한다."""
+        if optimizer_config is None:
+            return "adamw"  # safe default
         component = optimizer_config.get("_component_", "")
         name = component.rsplit(".", 1)[-1].lower()
         return name

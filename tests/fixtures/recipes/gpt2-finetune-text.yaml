@@ -10,6 +10,7 @@ head:
   _target_attr: lm_head
 
 data:
+  label_strategy: "causal"
   source: wikitext
   subset: wikitext-103-v1
   format: text

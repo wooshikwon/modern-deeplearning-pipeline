@@ -34,9 +34,10 @@ class RLModelSpec(ModelSpec):
 
 
 class AdapterSpec(BaseModel):
-    """어댑터 명세. method로 lora/qlora 분기."""
+    """어댑터 명세. method로 lora/qlora/prefix_tuning 분기."""
 
-    method: str  # "lora", "qlora"
+    method: str  # "lora", "qlora", "prefix_tuning"
+    task_type: str | None = None  # PEFT TaskType (e.g. "CAUSAL_LM")
     r: int | None = None
     alpha: int | None = None
     dropout: float = 0.0
@@ -60,6 +61,7 @@ class DataSpec(BaseModel):
     """데이터 파이프라인. source로 데이터를 지정하고, format/fields로 스키마를 맞춘다."""
 
     source: str  # HF Hub 이름, 또는 로컬 파일/디렉토리 경로
+    label_strategy: str = "none"  # "preference" | "causal" | "seq2seq" | "copy" | "align" | "none"
     fields: dict[str, str] = Field(default_factory=dict)  # {role: column_name}
     format: str = "auto"  # auto | csv | json | parquet | imagefolder
     split: str | dict[str, Any] = "train"
@@ -75,7 +77,7 @@ class DataSpec(BaseModel):
 class TrainingSpec(BaseModel):
     """학습 루프 설정."""
 
-    epochs: int | None = None
+    epochs: float | None = None
     max_steps: int | None = None
     precision: str = "fp32"
     gradient_accumulation_steps: int = 1
@@ -95,7 +97,7 @@ class MonitoringSpec(BaseModel):
 
 
 class GenerationSpec(BaseModel):
-    """자기회귀 생성 설정 (추론 전용)."""
+    """자기회귀 생성 설정 (서빙/추론 전용)."""
 
     max_new_tokens: int = 256
     temperature: float = 1.0
@@ -104,7 +106,20 @@ class GenerationSpec(BaseModel):
     do_sample: bool = True
     num_beams: int = 1
     repetition_penalty: float = 1.0
+
+
+class RLGenerationSpec(GenerationSpec):
+    """RL 학습 중 응답 생성 설정. GenerationSpec + RL 전용 필드."""
+
     group_size: int = 1  # GRPO K개 응답 생성. 1이면 기존 동작.
+
+
+class RLSpec(BaseModel):
+    """RL alignment 설정. None이면 SFT."""
+
+    algorithm: dict[str, Any]  # _component_ 패턴 (DPO, GRPO, PPO)
+    models: dict[str, RLModelSpec]  # 역할별 모델 정의 (policy 필수)
+    generation: RLGenerationSpec | None = None  # GRPO/PPO 전용 응답 생성 파라미터
 
 
 class EvaluationSpec(BaseModel):
@@ -138,13 +153,12 @@ class Recipe(BaseModel):
     scheduler: dict[str, Any] | None = None
     loss: dict[str, Any] | None = None
     evaluation: EvaluationSpec = Field(default_factory=EvaluationSpec)
-    generation: GenerationSpec | None = None
+    generation: GenerationSpec | None = None  # 서빙/추론 전용 (rl.generation과 독립)
     monitoring: MonitoringSpec = Field(default_factory=MonitoringSpec)
     callbacks: list[dict[str, Any]] = Field(default_factory=list)
     metadata: MetadataSpec
-    # RL 필드
-    algorithm: dict[str, Any] | None = None  # _component_ 패턴. None이면 SFT
-    models: dict[str, RLModelSpec] | None = None
+    # RL
+    rl: RLSpec | None = None  # None이면 SFT
 
     @model_validator(mode="after")
     def check_training_duration(self):
@@ -154,14 +168,12 @@ class Recipe(BaseModel):
 
     @model_validator(mode="after")
     def check_rl_consistency(self):
-        if self.algorithm is not None:
-            if self.models is None:
-                raise ValueError("algorithm이 지정되었지만 models가 없습니다")
-            if "policy" not in self.models:
-                raise ValueError("RL 학습에는 models.policy가 필수입니다")
-            policy = self.models["policy"]
+        if self.rl is not None:
+            if "policy" not in self.rl.models:
+                raise ValueError("RL 학습에는 rl.models.policy가 필수입니다")
+            policy = self.rl.models["policy"]
             if policy.optimizer is None:
-                raise ValueError("models.policy에는 optimizer가 필수입니다")
+                raise ValueError("rl.models.policy에는 optimizer가 필수입니다")
         return self
 
 

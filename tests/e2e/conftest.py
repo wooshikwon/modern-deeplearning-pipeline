@@ -34,7 +34,7 @@ def make_test_settings(
         name=name,
         task=task,
         model=ModelSpec(class_path=model_class),
-        data=DataSpec(source="/tmp/fake"),
+        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
         training=TrainingSpec(
             epochs=epochs,
             max_steps=max_steps,

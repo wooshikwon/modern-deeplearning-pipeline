@@ -17,7 +17,7 @@ TASK_HEAD_COMPAT: dict[str, list[str]] = {
     "text_classification": ["ClassificationHead"],
     "token_classification": ["TokenClassificationHead", "ClassificationHead"],
     "text_generation": ["CausalLMHead"],
-    "seq2seq": ["Seq2SeqLMHead"],
+    "seq2seq": ["Seq2SeqLMHead", "CausalLMHead"],
     "image_generation": [],  # head 생략 권장
     "feature_extraction": ["ClassificationHead", "DualEncoderHead"],
 }
@@ -44,6 +44,7 @@ class BusinessValidator:
             "adapter": cls._check_adapter,
             "distributed_batch": cls._check_distributed_batch,
             "task_fields": cls._check_task_fields,
+            "label_strategy_fields": cls._check_label_strategy_fields,
         }
         targets = checks or list(all_checks.keys())
         for name in targets:
@@ -162,9 +163,44 @@ class BusinessValidator:
         result.errors.extend(errors)
         result.warnings.extend(warnings)
 
-        VISION_TASKS = {"image_classification", "object_detection", "semantic_segmentation", "image_generation"}
-        if recipe.task in VISION_TASKS and data.tokenizer is not None:
+        # fields에 text 역할이 없는데 tokenizer가 설정된 경우 경고
+        text_roles = {"text", "target", "chosen", "rejected"}
+        has_text_field = any(role in data.fields for role in text_roles)
+        if not has_text_field and data.tokenizer is not None:
             result.warnings.append(
-                f"태스크 '{recipe.task}'에서는 tokenizer가 사용되지 않습니다. "
+                "data.fields에 text 역할이 없어 tokenizer가 사용되지 않습니다. "
                 "data.tokenizer 설정을 제거하면 불필요한 로딩을 방지할 수 있습니다."
             )
+
+    @staticmethod
+    def _check_label_strategy_fields(
+        settings: Settings, result: ValidationResult
+    ) -> None:
+        """5. label_strategy-fields 정합성 검증."""
+        strategy = settings.recipe.data.label_strategy
+        fields = settings.recipe.data.fields
+        declared = set(fields.keys()) if fields else set()
+
+        REQUIRED_FIELDS: dict[str, list[str]] = {
+            "preference": ["chosen", "rejected"],
+            "seq2seq": ["text", "target"],
+            "align": ["text", "token_labels"],
+            "copy": ["text", "label"],
+            "causal": ["text"],
+            "none": [],
+        }
+
+        required = REQUIRED_FIELDS.get(strategy)
+        if required is None:
+            result.errors.append(
+                f"알 수 없는 label_strategy: '{strategy}'. "
+                f"허용: {list(REQUIRED_FIELDS.keys())}"
+            )
+            return
+
+        for field in required:
+            if field not in declared:
+                result.errors.append(
+                    f"label_strategy '{strategy}'에 필요한 fields.{field}가 "
+                    f"선언되지 않았습니다."
+                )

@@ -11,9 +11,10 @@ import torch.nn as nn
 from mdp.settings.schema import (
     Config,
     DataSpec,
-    GenerationSpec,
+    RLGenerationSpec,
     MetadataSpec,
     RLModelSpec,
+    RLSpec,
     Recipe,
     Settings,
     TrainingSpec,
@@ -64,22 +65,24 @@ def test_grpo_generation_loop() -> None:
     recipe = Recipe(
         name="grpo-test",
         task="text_generation",
-        algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
-        models={
-            "policy": RLModelSpec(
-                class_path="tests.e2e.test_rl_generation.TinyGenLM",
-                optimizer={"_component_": "AdamW", "lr": 1e-3},
-            ),
-            "reference": RLModelSpec(
-                class_path="tests.e2e.test_rl_generation.TinyGenLM",
-            ),
-            "reward": RLModelSpec(
-                class_path="tests.e2e.test_rl_generation.TinyGenLM",
-            ),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
+            models={
+                "policy": RLModelSpec(
+                    class_path="tests.e2e.test_rl_generation.TinyGenLM",
+                    optimizer={"_component_": "AdamW", "lr": 1e-3},
+                ),
+                "reference": RLModelSpec(
+                    class_path="tests.e2e.test_rl_generation.TinyGenLM",
+                ),
+                "reward": RLModelSpec(
+                    class_path="tests.e2e.test_rl_generation.TinyGenLM",
+                ),
+            },
+            generation=RLGenerationSpec(max_new_tokens=4),
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
         training=TrainingSpec(max_steps=3),
-        generation=GenerationSpec(max_new_tokens=4),
         metadata=MetadataSpec(author="test", description="grpo test"),
     )
     settings = Settings(recipe=recipe, config=Config())
@@ -108,27 +111,29 @@ def test_ppo_generation_with_value_model() -> None:
     recipe = Recipe(
         name="ppo-test",
         task="text_generation",
-        algorithm={"_component_": "PPO", "clip_range": 0.2, "value_coeff": 0.5, "ppo_epochs": 2},
-        models={
-            "policy": RLModelSpec(
-                class_path="tests.e2e.test_rl_generation.TinyGenLM",
-                optimizer={"_component_": "AdamW", "lr": 1e-3},
-            ),
-            "value": RLModelSpec(
-                class_path="tests.e2e.test_rl_generation.TinyGenLM",
-                optimizer={"_component_": "AdamW", "lr": 1e-3},
-                freeze=False,
-            ),
-            "reference": RLModelSpec(
-                class_path="tests.e2e.test_rl_generation.TinyGenLM",
-            ),
-            "reward": RLModelSpec(
-                class_path="tests.e2e.test_rl_generation.TinyGenLM",
-            ),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={"_component_": "PPO", "clip_range": 0.2, "value_coeff": 0.5, "ppo_epochs": 2},
+            models={
+                "policy": RLModelSpec(
+                    class_path="tests.e2e.test_rl_generation.TinyGenLM",
+                    optimizer={"_component_": "AdamW", "lr": 1e-3},
+                ),
+                "value": RLModelSpec(
+                    class_path="tests.e2e.test_rl_generation.TinyGenLM",
+                    optimizer={"_component_": "AdamW", "lr": 1e-3},
+                    freeze=False,
+                ),
+                "reference": RLModelSpec(
+                    class_path="tests.e2e.test_rl_generation.TinyGenLM",
+                ),
+                "reward": RLModelSpec(
+                    class_path="tests.e2e.test_rl_generation.TinyGenLM",
+                ),
+            },
+            generation=RLGenerationSpec(max_new_tokens=4),
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
         training=TrainingSpec(max_steps=2),
-        generation=GenerationSpec(max_new_tokens=4),
         metadata=MetadataSpec(author="test", description="ppo test"),
     )
     settings = Settings(recipe=recipe, config=Config())

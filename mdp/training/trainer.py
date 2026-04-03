@@ -18,13 +18,13 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler, autocast
-from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
     STRATEGY_MAP,
+    backward_and_step,
     create_expert_parallel,
     create_strategy,
     detect_device,
@@ -203,7 +203,7 @@ class Trainer:
         if self.max_steps:
             return self.max_steps
         steps_per_epoch = len(self.train_loader) // self.grad_accum_steps
-        return steps_per_epoch * (self.epochs or 1)
+        return int(steps_per_epoch * (self.epochs or 1))
 
     # ── Callback dispatch ──
 
@@ -253,7 +253,7 @@ class Trainer:
         """학습을 실행하고 최종 메트릭을 반환한다."""
         # Expert Parallelism (전략 setup 전에 적용 — hook 설치 + expert 분배)
         if self.expert_parallel is not None:
-            if self.strategy is not None and not dist.is_initialized():
+            if self.strategy is not None and not torch.distributed.is_initialized():
                 # EP는 process group이 필요하므로, 전략이 초기화하게 한다.
                 # 대부분의 전략은 setup() 첫 줄에서 init_process_group()을 호출한다.
                 # EP를 먼저 적용하려면 process group이 먼저 있어야 하므로,
@@ -290,7 +290,17 @@ class Trainer:
         baseline_info = None
         mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
 
-        max_epochs = self.epochs or sys.maxsize
+        if self.epochs is not None:
+            max_epochs = int(self.epochs) + (1 if self.epochs != int(self.epochs) else 0)
+            self._total_batch_budget = int(len(self.train_loader) * self.epochs)
+        else:
+            max_epochs = sys.maxsize
+            self._total_batch_budget = None
+        # Resume 시 이미 처리된 배치를 반영
+        self._batches_consumed = (
+            self.start_epoch * len(self.train_loader) + self._resume_step_in_epoch
+        )
+
         with mlflow_ctx:
             if self._is_main_process:
                 self._log_mlflow_params()
@@ -407,46 +417,43 @@ class Trainer:
                 continue
             if self.max_steps and self.global_step >= self.max_steps:
                 break
+            if self._total_batch_budget is not None and self._batches_consumed >= self._total_batch_budget:
+                break
 
             batch = self._move_to_device(batch)
             self._fire("on_batch_start", step=step)
 
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
                 loss = self._compute_loss(batch)
-                loss = loss / self.grad_accum_steps
 
-            if not torch.isfinite(loss):
-                logger.warning("NaN/Inf loss detected at step %d, skipping", step)
-                self.optimizer.zero_grad(set_to_none=True)
+            step_schedulers = (
+                {"model": self.scheduler}
+                if self.scheduler is not None and self.scheduler_interval == "step"
+                else {}
+            )
+            result = backward_and_step(
+                losses={"model": loss},
+                optimizers={"model": self.optimizer},
+                schedulers=step_schedulers,
+                scaler=self.scaler,
+                trainable_models={"model": self.model},
+                grad_accum_steps=self.grad_accum_steps,
+                at_accum_boundary=(step + 1) % self.grad_accum_steps == 0,
+                grad_clip_norm=self.grad_clip_norm,
+            )
+            if result is None:
                 continue
-
-            self.scaler.scale(loss).backward()
-
-            if (step + 1) % self.grad_accum_steps == 0:
-                self.scaler.unscale_(self.optimizer)
-                if self.grad_clip_norm is not None:
-                    clip_grad_norm_(
-                        self.model.parameters(), self.grad_clip_norm
-                    )
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad(set_to_none=True)
-
-                if (
-                    self.scheduler is not None
-                    and self.scheduler_interval == "step"
-                ):
-                    self.scheduler.step()
-
+            if result:
                 self.global_step += 1
 
-            actual_loss = loss.item() * self.grad_accum_steps
+            actual_loss = loss.item()
             total_loss += actual_loss
             num_batches += 1
+            self._batches_consumed += 1
 
             if (step + 1) % self.grad_accum_steps == 0:
                 self._fire(
-                    "on_batch_end", step=step, epoch=epoch,
+                    "on_batch_end", step=self.global_step, epoch=epoch,
                     global_step=self.global_step,
                     metrics={"loss": actual_loss},
                 )
@@ -473,7 +480,7 @@ class Trainer:
 
     def _compute_loss(self, batch: dict[str, Any]) -> torch.Tensor:
         if self.loss_fn is not None:
-            outputs = self.model.forward(batch)
+            outputs = self.model(batch)
             logits = outputs.get("logits", outputs.get("output"))
             labels = batch.get("labels", batch.get("label"))
             if logits is None:

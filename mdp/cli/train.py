@@ -41,7 +41,7 @@ def _run_distributed(settings, nproc: int) -> dict:
         json.dump(settings.model_dump(), f, ensure_ascii=False, default=str)
         settings_path = f.name
 
-    result_path = settings_path.replace(".json", "_result.json")
+    result_path = str(Path(settings_path).with_suffix("")) + "_result.json"
     entry_script = Path(__file__).resolve().parent / "_torchrun_entry.py"
 
     cmd = [
@@ -53,14 +53,18 @@ def _run_distributed(settings, nproc: int) -> dict:
     ]
     logger.info("torchrun command: %s", " ".join(cmd))
 
-    subprocess.run(cmd, check=True)
+    try:
+        subprocess.run(cmd, check=True)
 
-    # rank-0이 저장한 결과를 읽는다
-    result_file = Path(result_path)
-    if result_file.exists():
-        with open(result_file) as f:
-            return json.load(f)
-    return {}
+        # rank-0이 저장한 결과를 읽는다
+        result_file = Path(result_path)
+        if result_file.exists():
+            with open(result_file) as f:
+                return json.load(f)
+        return {}
+    finally:
+        Path(settings_path).unlink(missing_ok=True)
+        Path(result_path).unlink(missing_ok=True)
 
 
 def run_train(recipe_path: str, config_path: str) -> None:

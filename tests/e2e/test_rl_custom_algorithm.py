@@ -15,6 +15,7 @@ from mdp.settings.schema import (
     DataSpec,
     MetadataSpec,
     RLModelSpec,
+    RLSpec,
     Recipe,
     Settings,
     TrainingSpec,
@@ -102,21 +103,23 @@ def test_custom_weighted_ntp_via_rl_train() -> None:
     recipe = Recipe(
         name="weighted-ntp-test",
         task="text_generation",
-        algorithm={
-            "_component_": "tests.e2e.test_rl_custom_algorithm.SimpleWeightedCELoss",
-            "weight_scale": 2.0,
-        },
-        models={
-            "policy": RLModelSpec(
-                class_path="tests.e2e.test_rl_custom_algorithm.TinyLM",
-                optimizer={"_component_": "AdamW", "lr": 1e-3},
-            ),
-            "critic": RLModelSpec(
-                class_path="tests.e2e.test_rl_custom_algorithm.TinyLM",
-                # optimizer 없음 → frozen
-            ),
-        },
-        data=DataSpec(source="/tmp/fake"),
+        rl=RLSpec(
+            algorithm={
+                "_component_": "tests.e2e.test_rl_custom_algorithm.SimpleWeightedCELoss",
+                "weight_scale": 2.0,
+            },
+            models={
+                "policy": RLModelSpec(
+                    class_path="tests.e2e.test_rl_custom_algorithm.TinyLM",
+                    optimizer={"_component_": "AdamW", "lr": 1e-3},
+                ),
+                "critic": RLModelSpec(
+                    class_path="tests.e2e.test_rl_custom_algorithm.TinyLM",
+                    # optimizer 없음 → frozen
+                ),
+            },
+        ),
+        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
         training=TrainingSpec(max_steps=5),
         metadata=MetadataSpec(author="test", description="custom weighted-ntp test"),
     )

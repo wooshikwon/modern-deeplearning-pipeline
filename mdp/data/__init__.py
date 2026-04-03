@@ -3,7 +3,7 @@
 from mdp.data.collators import PreferenceCollator
 from mdp.data.dataloader import create_dataloaders, _load_source, _rename_columns
 from mdp.data.loader import load_data
-from mdp.data.tokenizer import build_tokenizer, derive_label_strategy
+from mdp.data.tokenizer import build_tokenizer
 from mdp.data.transforms import build_transforms
 
 __all__ = [
@@ -12,7 +12,6 @@ __all__ = [
     "load_data",
     "build_tokenizer",
     "build_transforms",
-    "derive_label_strategy",
     "_load_source",
     "_rename_columns",
 ]

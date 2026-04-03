@@ -21,43 +21,6 @@ LABEL_ALIGN = "align"  # token_classification (sub-word alignment)
 LABEL_NONE = "none"  # feature_extraction, image-only 등
 
 
-def derive_label_strategy(fields: dict[str, str] | None) -> str:
-    """fields 딕셔너리로부터 label_strategy를 파생한다.
-
-    Args:
-        fields: ``{role: column_name}`` 매핑. ``None``이면 ``LABEL_NONE``.
-
-    Returns:
-        label strategy 상수 문자열.
-    """
-    if not fields:
-        return LABEL_NONE
-
-    roles = set(fields.keys())
-
-    # chosen + rejected → preference (pairwise ranking, 최우선)
-    if "chosen" in roles and "rejected" in roles:
-        return LABEL_PREFERENCE
-
-    # target 역할이 있으면 seq2seq
-    if "target" in roles:
-        return LABEL_SEQ2SEQ
-
-    # token_labels 역할이 있으면 alignment
-    if "token_labels" in roles:
-        return LABEL_ALIGN
-
-    # text + label → classification (labels 복사)
-    if "text" in roles and "label" in roles:
-        return LABEL_COPY
-
-    # text가 있으면 causal (text_generation, multimodal 포함)
-    if "text" in roles:
-        return LABEL_CAUSAL
-
-    return LABEL_NONE
-
-
 def build_tokenizer(
     config: dict[str, Any] | None,
     label_strategy: str = LABEL_CAUSAL,

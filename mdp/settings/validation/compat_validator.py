@@ -97,7 +97,10 @@ class CompatValidator:
             return
 
         strategy = distributed.get("strategy", "")
-        if isinstance(strategy, str) and strategy.lower().startswith("fsdp"):
+        strategy_name = strategy
+        if isinstance(strategy, dict):
+            strategy_name = strategy.get("_component_", "")
+        if isinstance(strategy_name, str) and strategy_name.lower().startswith("fsdp"):
             result.errors.append(
                 "FSDP와 QLoRA(4bit)는 호환되지 않습니다. "
                 "대안: (1) LoRA 사용, (2) DDP 전략 사용, "

@@ -16,13 +16,14 @@ from pydantic import BaseModel, Field
 
 
 class TrainResult(BaseModel):
-    """mdp train --format json 출력 스키마.
+    """mdp train / rl-train --format json 출력 스키마.
 
     데이터 출처:
     - metrics, total_epochs, total_steps, stopped_reason, duration_seconds
-      → Trainer.train() 반환 dict
+      → Trainer.train() / RLTrainer.train() 반환 dict
     - checkpoint_dir, output_dir → Settings.config.storage
     - monitoring → Trainer._maybe_compute_baseline() 반환값
+    - algorithm → RLTrainer.train() 반환 dict (SFT에서는 None)
     """
 
     checkpoint_dir: str | None = None
@@ -33,6 +34,7 @@ class TrainResult(BaseModel):
     stopped_reason: str | None = None
     duration_seconds: float | None = None
     monitoring: dict[str, Any] | None = None
+    algorithm: str | None = None
 
 
 # ── mdp inference ──

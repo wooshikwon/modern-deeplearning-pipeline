@@ -8,6 +8,7 @@ model:
     hidden_dim: 16
 
 data:
+  label_strategy: "none"
   source: /tmp/fake
   fields:
     image: pixel_values
