@@ -1,6 +1,6 @@
 """Trainer 통합 경로 테스트: precision, validation 주기, warmup, callback 시점.
 
-7 tests:
+8 tests:
 - test_bf16_precision: bf16 autocast 학습 완료
 - test_step_based_validation: val_check_unit="step" 에폭 내 검증
 - test_fractional_epoch_validation: val_check_interval=0.5 에폭당 2회 검증
@@ -8,6 +8,7 @@
 - test_warmup_ratio_creates_sequential_scheduler: warmup_ratio → SequentialLR
 - test_warmup_mutual_exclusion: warmup_steps + warmup_ratio → ValueError
 - test_baseline_info_safe_on_exception: 학습 예외 시 NameError 없이 전파
+- test_device_map_model_rejected: device_map 분산 모델 학습 진입 차단
 """
 
 from __future__ import annotations
@@ -202,4 +203,19 @@ def test_baseline_info_safe_on_exception() -> None:
 
     # 예외가 RuntimeError로 전파되어야 하고, NameError가 아니어야 한다
     with pytest.raises(RuntimeError, match="Intentional crash"):
+        trainer.train()
+
+
+def test_device_map_model_rejected() -> None:
+    """hf_device_map이 있는 모델로 train() 호출 시 RuntimeError."""
+    settings = make_test_settings(epochs=1)
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    model.hf_device_map = {"": 0}  # accelerate dispatch 흔적 모사
+    train_loader = ListDataLoader(make_vision_batches(2, 4, 2, 8))
+
+    trainer = Trainer(settings=settings, model=model, train_loader=train_loader)
+    trainer.device = torch.device("cpu")
+    trainer.amp_enabled = False
+
+    with pytest.raises(RuntimeError, match="device_map"):
         trainer.train()

@@ -41,11 +41,10 @@ def _select_collator(
         return None
 
     if tokenizer is None:
-        from transformers import AutoTokenizer
-
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_config["pretrained"])
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
+        raise ValueError(
+            "_select_collator: tokenizer 인스턴스가 필요합니다. "
+            "caller는 tokenizer를 사전 생성하여 전달해야 합니다."
+        )
 
     if label_strategy == LABEL_PREFERENCE:
         from mdp.data.collators import PreferenceCollator
@@ -70,8 +69,10 @@ def _select_collator(
 
         return DataCollatorForTokenClassification(tokenizer=tokenizer)
     else:
-        # LABEL_NONE (이미지 등): 기본 torch collate 사용
-        return None
+        # LABEL_NONE: tokenizer가 있으면 가변 길이 시퀀스이므로 padding 필요
+        from transformers import DataCollatorWithPadding
+
+        return DataCollatorWithPadding(tokenizer=tokenizer)
 
 
 # ── Source loading ──
@@ -164,7 +165,7 @@ def create_dataloaders(
     streaming: bool = False,
     data_files: str | dict[str, str] | None = None,
     fmt: str = "auto",
-    label_strategy: str = "none",
+    label_strategy: str = "unlabeled",
     aug_config: dict[str, Any] | None = None,
     tokenizer_config: dict[str, Any] | None = None,
     loader_config: dict[str, Any] | None = None,
@@ -254,9 +255,10 @@ def create_dataloaders(
     )
     train_ds = _load_source(source, split=split, **load_kwargs)
     train_ds = _rename_columns(train_ds, fields)
+    raw_columns = list(fields.keys()) if fields else None
     train_ds = load_data(
         train_ds, transform=train_transform, tokenize_fn=tokenize_fn,
-        streaming=streaming,
+        streaming=streaming, raw_columns=raw_columns,
     )
 
     train_sampler = None
@@ -291,7 +293,7 @@ def create_dataloaders(
             val_ds = _rename_columns(val_ds, fields)
             val_ds = load_data(
                 val_ds, transform=val_transform, tokenize_fn=tokenize_fn,
-                streaming=streaming,
+                streaming=streaming, raw_columns=raw_columns,
             )
         except (ValueError, FileNotFoundError, KeyError):
             val_ds = None

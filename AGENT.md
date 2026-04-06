@@ -109,17 +109,18 @@ callbacks: [...]                # _component_ 패턴 리스트
 evaluation:
   metrics: [...]                # _component_ 패턴 리스트
 
-# RL 전용 (mdp rl-train)
-algorithm:                      # _component_ 패턴 (DPO, GRPO, PPO)
-models:                         # 역할별 모델 정의
-  policy: {model: ..., optimizer: ..., scheduler: ...}
-  reference: {model: ...}       # frozen (optimizer 없음)
-  value: {model: ..., optimizer: ...}  # PPO 전용
-  reward: {model: ...}          # frozen
-generation:                     # GRPO/PPO 전용
-  max_new_tokens: int
-  temperature: float
-  group_size: int               # GRPO K개 응답
+# RL 전용 (mdp rl-train) — rl: 키 아래에 중첩
+rl:
+  algorithm:                    # _component_ 패턴 (DPO, GRPO, PPO)
+  models:                       # 역할별 모델 정의
+    policy: {model: ..., optimizer: ..., scheduler: ...}
+    reference: {model: ...}     # frozen (optimizer 없음)
+    value: {model: ..., optimizer: ...}  # PPO 전용
+    reward: {model: ...}        # frozen
+  generation:                   # GRPO/PPO 전용
+    max_new_tokens: int
+    temperature: float
+    group_size: int             # GRPO K개 응답
 
 metadata:
   author: str
@@ -442,13 +443,14 @@ storage:
 
 ```json
 {
+  "run_id": "abc123...",
   "checkpoint_dir": "...",
   "metrics": {"val_loss": 0.12, "val_accuracy": 0.95},
   "total_epochs": 27,
   "total_steps": 12600,
   "stopped_reason": "early_stopped | completed | max_steps_reached",
   "duration_seconds": 3600.5,
-  "monitoring": {"drift_detected": false, "severity_level": "none"}
+  "monitoring": {"baseline_saved": true, "baseline_path": "mlruns/.../baseline.json"}
 }
 ```
 
@@ -456,6 +458,7 @@ storage:
 
 ```json
 {
+  "run_id": "abc123...",
   "output_path": "./output/predictions.parquet",
   "task": "text_generation",
   "monitoring": {"drift_detected": true, "severity_level": "watch", "alerts": [...]}

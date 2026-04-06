@@ -25,46 +25,66 @@ class Factory:
         self.resolver = ComponentResolver()
         self._cache: dict[str, Any] = {}
 
+    _SENTINEL = object()
+
     def _get_or_create(self, key: str, creator: Callable) -> Any:
         """캐시에서 key를 찾고, 없으면 creator()를 호출하여 캐싱한다."""
-        if key not in self._cache:
-            instance = creator()
-            if instance is not None:
-                self._cache[key] = instance
-            return instance
-        return self._cache[key]
+        cached = self._cache.get(key, self._SENTINEL)
+        if cached is not self._SENTINEL:
+            return cached
+        instance = creator()
+        if instance is not None:
+            self._cache[key] = instance
+        return instance
 
     # ── Phase 2: 모델 생성 ──
 
     def create_model(self, skip_base_check: bool = False) -> nn.Module:
         """Recipe의 model 설정에 따라 모델을 생성한다.
 
-        순서: pretrained 로딩 → head 교체 → adapter 적용.
+        순서: pretrained 로딩 → MoE 감지 → head 교체 → BaseModel 검증 → adapter 적용.
         QLoRA는 양자화+로딩+어댑터가 결합된 특수 경로를 탄다.
         """
         return self._get_or_create("model", lambda: self._build_model(skip_base_check=skip_base_check))
 
     def _build_model(self, skip_base_check: bool = False) -> nn.Module:
         recipe = self.settings.recipe
-        model_spec = recipe.model
-        adapter_spec = recipe.adapter
+        return self._assemble_model(
+            model_spec=recipe.model,
+            head_config=recipe.head,
+            adapter_spec=recipe.adapter,
+            skip_base_check=skip_base_check,
+        )
 
+    def _assemble_model(
+        self,
+        model_spec: Any,
+        head_config: dict[str, Any] | None = None,
+        adapter_spec: Any | None = None,
+        skip_base_check: bool = False,
+    ) -> nn.Module:
+        """모델 스펙으로부터 5단계 조립을 수행한다.
+
+        1. Pretrained 로딩 (또는 class_path 인스턴스화)
+        2. MoE 감지 + moe_info 모델 인스턴스 부착
+        3. Head 교체 (head_config가 있을 때)
+        4. BaseModel 검증 (pretrained=None인 커스텀 모델)
+        5. Adapter 적용 (adapter_spec가 있을 때)
+
+        QLoRA는 1+5를 한 번에 수행하는 특수 경로를 탄다.
+        """
         # QLoRA 특수 경로: 양자화 + 로딩 + 어댑터가 한 번에
         if adapter_spec is not None and adapter_spec.method == "qlora":
-            if recipe.head is not None:
-                logger.warning(
-                    "QLoRA는 head가 내장된 모델(AutoModelFor* 등)만 지원합니다. "
-                    "Recipe의 head 설정은 적용되지 않습니다."
-                )
             return self._build_qlora_model(model_spec, adapter_spec)
 
         # 일반 경로
         # 단계 1: pretrained 로딩
         model = self._load_pretrained(model_spec)
 
-        # MoE 감지
+        # 단계 2: MoE 감지
         if self._is_moe_model(model):
             moe_info = self._extract_moe_info(model)
+            model._moe_info = moe_info
             self._cache["moe_info"] = moe_info
             logger.info(
                 "MoE 모델 감지: %s experts, top-%s",
@@ -72,23 +92,23 @@ class Factory:
                 moe_info.get("top_k", "?"),
             )
 
-        # 단계 2: head 교체 (설정이 있을 때만)
-        if recipe.head is not None:
-            head_config = dict(recipe.head)
-            target_attr = head_config.pop("_target_attr", None)
-            head = self.resolver.resolve(head_config)
+        # 단계 3: head 교체 (설정이 있을 때만)
+        if head_config is not None:
+            hc = dict(head_config)
+            target_attr = hc.pop("_target_attr", None)
+            head = self.resolver.resolve(hc)
             self._attach_head(model, head, target_attr)
 
-        # 커스텀 모델(pretrained 없음)은 BaseModel 상속 필수 — adapter 래핑 전에 검사
+        # 단계 4: BaseModel 검증 (pretrained=None인 커스텀 모델)
         from mdp.models.base import BaseModel
-        if not skip_base_check and recipe.model.pretrained is None and not isinstance(model, BaseModel):
+        if not skip_base_check and model_spec.pretrained is None and not isinstance(model, BaseModel):
             raise TypeError(
                 f"{model.__class__.__name__}이 BaseModel을 상속하지 않습니다. "
                 "커스텀 모델은 BaseModel을 상속하여 forward, training_step, "
                 "validation_step을 구현하세요. HF 모델이라면 pretrained: hf://... 를 사용하세요."
             )
 
-        # 단계 3: adapter 적용 (설정이 있을 때만, QLoRA는 위에서 처리)
+        # 단계 5: adapter 적용 (설정이 있을 때만, QLoRA는 위에서 처리)
         if adapter_spec is not None and adapter_spec.method != "qlora":
             from mdp.models.adapters import apply_adapter
 
@@ -229,8 +249,12 @@ class Factory:
 
     # ── RL: 복수 모델 생성 ──
 
-    def create_models(self) -> dict[str, nn.Module]:
-        """RL Recipe의 models 설정에 따라 역할별 모델을 생성한다."""
+    def create_models(self, skip_base_check: bool = False) -> dict[str, nn.Module]:
+        """RL Recipe의 models 설정에 따라 역할별 모델을 생성한다.
+
+        각 모델은 SFT와 동일한 5단계 조립을 거친다:
+        pretrained 로딩 → MoE 감지 → head 교체 → BaseModel 검증 → adapter 적용.
+        """
         def _create() -> dict[str, nn.Module]:
             recipe = self.settings.recipe
             if recipe.rl is None:
@@ -238,11 +262,12 @@ class Factory:
 
             models = {}
             for name, spec in recipe.rl.models.items():
-                model = self._load_pretrained(spec)
-                if spec.adapter is not None:
-                    from mdp.models.adapters import apply_adapter
-                    adapter_config = spec.adapter.model_dump(exclude_none=True)
-                    model = apply_adapter(model, adapter_config)
+                model = self._assemble_model(
+                    model_spec=spec,
+                    head_config=getattr(spec, "head", None),
+                    adapter_spec=spec.adapter,
+                    skip_base_check=skip_base_check,
+                )
                 models[name] = model
             return models
 
@@ -266,14 +291,4 @@ class Factory:
 
         return self._get_or_create("trainer", _create)
 
-    def create_callbacks(self) -> list:
-        """Recipe의 callbacks 설정에서 콜백 리스트를 생성한다."""
-        callbacks = []
-        for cfg in self.settings.recipe.callbacks:
-            try:
-                cb = self.resolver.resolve(cfg)
-                callbacks.append(cb)
-            except Exception as e:
-                logger.warning("콜백 생성 실패: %s", e)
-        return callbacks
 

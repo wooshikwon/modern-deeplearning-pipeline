@@ -6,10 +6,6 @@ model:
   pretrained: hf://Qwen/Qwen2.5-7B
   torch_dtype: bfloat16
 
-head:
-  _component_: CausalLMHead
-  _target_attr: lm_head
-
 adapter:
   method: qlora
   r: 64

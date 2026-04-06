@@ -118,7 +118,8 @@ def run_batch_inference(
     dev = _detect_device(device)
     logger.info("Running batch inference on %s (task=%s)", dev, task)
 
-    model = model.to(dev)
+    if not hasattr(model, "hf_device_map"):
+        model = model.to(dev)
     model.eval()
 
     all_records: list[dict[str, Any]] = []

@@ -28,6 +28,7 @@ language = [
 serving = [
     "torchserve>=0.9",
     "onnxruntime>=1.16",
+    "accelerate>=0.26",
 ]
 cloud = [
     "skypilot>=0.5",

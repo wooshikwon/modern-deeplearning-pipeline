@@ -6,7 +6,7 @@ YAML 구조와 1:1 대응. 구조적 유효성(필드 존재, 타입 일치)만 
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -27,6 +27,7 @@ class ModelSpec(BaseModel):
 class RLModelSpec(ModelSpec):
     """RL 학습용 모델 명세. ModelSpec + 모델별 optimizer/scheduler + freeze."""
 
+    head: dict[str, Any] | None = None
     adapter: AdapterSpec | None = None
     optimizer: dict[str, Any] | None = None  # None이면 frozen
     scheduler: dict[str, Any] | None = None
@@ -53,15 +54,22 @@ class DataloaderSpec(BaseModel):
     num_workers: int = 4
     pin_memory: bool = True
     persistent_workers: bool = True
-    prefetch_factor: int = 2
+    prefetch_factor: int | None = 2
     drop_last: bool = True
+
+    @model_validator(mode="after")
+    def _fix_persistent_workers(self) -> "DataloaderSpec":
+        if self.num_workers == 0:
+            self.persistent_workers = False
+            self.prefetch_factor = None
+        return self
 
 
 class DataSpec(BaseModel):
     """데이터 파이프라인. source로 데이터를 지정하고, format/fields로 스키마를 맞춘다."""
 
     source: str  # HF Hub 이름, 또는 로컬 파일/디렉토리 경로
-    label_strategy: str = "none"  # "preference" | "causal" | "seq2seq" | "copy" | "align" | "none"
+    label_strategy: str = "unlabeled"  # "preference" | "causal" | "seq2seq" | "copy" | "align" | "unlabeled"
     fields: dict[str, str] = Field(default_factory=dict)  # {role: column_name}
     format: str = "auto"  # auto | csv | json | parquet | imagefolder
     split: str | dict[str, Any] = "train"
@@ -84,7 +92,7 @@ class TrainingSpec(BaseModel):
     gradient_clip_max_norm: float | None = None
     gradient_checkpointing: bool = False
     val_check_interval: float = 1.0
-    val_check_unit: str = "epoch"  # "epoch" or "step"
+    val_check_unit: Literal["epoch", "step"] = "epoch"
     compile: str | bool = False
 
 
@@ -230,6 +238,8 @@ class ServingConfig(BaseModel):
     max_batch_size: int = 1
     instance_count: int = 1
     batch_window_ms: float = 50.0  # 동적 배칭 시간 창 (ms)
+    device_map: str | None = None  # "auto", "balanced", "sequential"
+    max_memory: dict[str, str] | None = None  # {"0": "24GiB", "1": "40GiB"}
 
 
 class JobConfig(BaseModel):

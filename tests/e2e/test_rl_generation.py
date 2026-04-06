@@ -112,7 +112,7 @@ def test_ppo_generation_with_value_model() -> None:
         name="ppo-test",
         task="text_generation",
         rl=RLSpec(
-            algorithm={"_component_": "PPO", "clip_range": 0.2, "value_coeff": 0.5, "ppo_epochs": 2},
+            algorithm={"_component_": "PPO", "clip_range": 0.2, "value_coeff": 0.5, "mini_epochs": 2},
             models={
                 "policy": RLModelSpec(
                     class_path="tests.e2e.test_rl_generation.TinyGenLM",

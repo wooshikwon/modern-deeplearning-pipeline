@@ -37,7 +37,7 @@ class SimpleWeightedCELoss:
     def __init__(self, weight_scale: float = 1.0):
         self.weight_scale = weight_scale
 
-    def __call__(self, trainable_out, frozen_out, batch):
+    def compute_loss(self, trainable_out, frozen_out, batch):
         # policy logits
         policy_logits = trainable_out["policy"]["logits"]
         # critic "value" — logits의 첫 번째 차원을 value로 사용 (단순화)

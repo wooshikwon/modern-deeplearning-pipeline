@@ -96,18 +96,25 @@ class DeepSpeedStrategy(BaseStrategy):
     def setup_models(
         self, models: dict[str, nn.Module], device: torch.device,
         trainable_names: set[str] | None = None,
+        optimizers: dict[str, torch.optim.Optimizer] | None = None,
     ) -> dict[str, nn.Module]:
         import deepspeed
 
         trainable_names = trainable_names or set()
+        optimizers = optimizers or {}
         wrapped = {}
         for name, model in models.items():
             if name in trainable_names:
                 self.ds_config["train_micro_batch_size_per_gpu"] = self.batch_size
-                engine, *_ = deepspeed.initialize(
-                    model=model, model_parameters=model.parameters(),
-                    config=dict(self.ds_config),
-                )
+                init_kwargs: dict[str, Any] = {
+                    "model": model,
+                    "model_parameters": model.parameters(),
+                    "config": dict(self.ds_config),
+                }
+                opt = optimizers.get(name)
+                if opt is not None:
+                    init_kwargs["optimizer"] = opt
+                engine, *_ = deepspeed.initialize(**init_kwargs)
                 wrapped[name] = engine
             else:
                 wrapped[name] = model.to(device)

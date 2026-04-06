@@ -18,6 +18,42 @@ from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
 
+
+def setup_amp(
+    precision: str, device: torch.device,
+) -> tuple[bool, torch.dtype, GradScaler]:
+    """AMP/GradScaler를 설정한다. Trainer/RLTrainer 공용."""
+    scaler_device = device.type
+    if precision == "fp16":
+        amp_enabled = True
+        amp_dtype = torch.float16
+        if device.type == "mps":
+            logger.warning("MPS에서 fp16은 GradScaler를 지원하지 않습니다. bf16을 권장합니다.")
+            scaler = GradScaler(scaler_device, enabled=False)
+        else:
+            scaler = GradScaler(scaler_device, enabled=True)
+    elif precision == "bf16":
+        amp_enabled = True
+        amp_dtype = torch.bfloat16
+        scaler = GradScaler(scaler_device, enabled=False)
+    else:  # fp32
+        amp_enabled = False
+        amp_dtype = torch.float32
+        scaler = GradScaler(scaler_device, enabled=False)
+    return amp_enabled, amp_dtype, scaler
+
+
+def create_callbacks(configs: list[dict[str, Any]], resolver: Any) -> list:
+    """Recipe의 callbacks 설정에서 콜백 리스트를 생성한다."""
+    callbacks = []
+    for cfg in configs:
+        try:
+            callbacks.append(resolver.resolve(cfg))
+        except Exception as e:
+            logger.warning("콜백 생성 실패: %s", e)
+    return callbacks
+
+
 STRATEGY_MAP: dict[str, str] = {
     "ddp": "mdp.training.strategies.ddp.DDPStrategy",
     "fsdp": "mdp.training.strategies.fsdp.FSDPStrategy",

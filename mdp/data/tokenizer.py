@@ -18,7 +18,7 @@ LABEL_CAUSAL = "causal"  # text_generation (multimodal 포함)
 LABEL_SEQ2SEQ = "seq2seq"  # seq2seq (text → target)
 LABEL_COPY = "copy"  # text_classification (labels 그대로 통과)
 LABEL_ALIGN = "align"  # token_classification (sub-word alignment)
-LABEL_NONE = "none"  # feature_extraction, image-only 등
+LABEL_NONE = "unlabeled"  # feature_extraction, image-only 등
 
 
 def build_tokenizer(
@@ -33,7 +33,6 @@ def build_tokenizer(
         tokenizer:
           pretrained: "gpt2"
           max_length: 512
-          padding: "max_length"
           truncation: true
 
     Args:
@@ -44,7 +43,7 @@ def build_tokenizer(
             - ``"seq2seq"``: labels = tokenizer(text_target=...).
             - ``"copy"``: labels 그대로 통과.
             - ``"align"``: sub-word label alignment.
-            - ``"none"``: label 생성 안 함.
+            - ``"unlabeled"``: label 생성 안 함.
 
     Returns:
         ``tokenize_fn(examples: dict) -> dict`` 또는 ``None``.
@@ -143,7 +142,7 @@ def build_tokenizer(
                 encoded["labels"] = examples["label"]
 
         elif label_strategy == LABEL_ALIGN:
-            all_labels = examples.get("labels", examples.get("ner_tags", []))
+            all_labels = examples.get("token_labels", [])
             aligned_labels = []
             for i, label_seq in enumerate(all_labels):
                 word_ids = encoded.word_ids(batch_index=i)

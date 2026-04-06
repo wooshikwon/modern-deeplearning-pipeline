@@ -246,7 +246,7 @@ def test_ppo_multi_loss() -> None:
         name="ppo-test",
         task="text_generation",
         rl=RLSpec(
-            algorithm={"_component_": "PPO", "clip_range": 0.2, "ppo_epochs": 1},
+            algorithm={"_component_": "PPO", "clip_range": 0.2, "mini_epochs": 1},
             models={
                 "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
                 "value": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}, freeze=False),

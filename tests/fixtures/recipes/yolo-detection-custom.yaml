@@ -14,7 +14,7 @@ head:
   num_classes: 20
 
 data:
-  label_strategy: "none"
+  label_strategy: "unlabeled"
   source: /data/voc2012
   fields:
     image: image

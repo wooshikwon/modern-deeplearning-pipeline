@@ -67,8 +67,8 @@ class TestResume:
         assert state_path.exists()
 
         state = json.loads(state_path.read_text())
-        assert state["epoch"] == 3, (
-            f"Expected epoch=3 (epoch+1), got {state['epoch']}"
+        assert state["epoch"] == 2, (
+            f"Expected epoch=2 (저장 시점의 epoch, 0-indexed), got {state['epoch']}"
         )
 
     def test_resume_continues_from_correct_epoch(self, tmp_path) -> None:
@@ -223,8 +223,8 @@ class TestResume:
 
         # train() 호출 시 _maybe_resume가 실행되어 epoch/step 복원
         result = trainer.train()
-        # epoch 1에서 시작하여 3까지 = 2 에폭 학습
-        assert result["total_epochs"] == 2
+        # epoch 1 저장 + step_in_epoch 없음 → start_epoch=2, range(2,3) = 1 에폭
+        assert result["total_epochs"] == 1
         assert trainer.global_step > 3
 
     def test_step_level_resume_skips_processed_batches(self, tmp_path) -> None:

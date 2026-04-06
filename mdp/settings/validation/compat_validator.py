@@ -85,13 +85,6 @@ class CompatValidator:
     @staticmethod
     def _check_fsdp_qlora(settings: Settings, result: ValidationResult) -> None:
         """3. FSDP + QLoRA 비호환 검증."""
-        adapter = settings.recipe.adapter
-        if adapter is None:
-            return
-
-        if not is_qlora(adapter):
-            return
-
         distributed = settings.config.compute.distributed
         if distributed is None:
             return
@@ -100,12 +93,27 @@ class CompatValidator:
         strategy_name = strategy
         if isinstance(strategy, dict):
             strategy_name = strategy.get("_component_", "")
-        if isinstance(strategy_name, str) and strategy_name.lower().startswith("fsdp"):
+        if not (isinstance(strategy_name, str) and strategy_name.lower().startswith("fsdp")):
+            return
+
+        # SFT 최상위 adapter
+        adapter = settings.recipe.adapter
+        if adapter is not None and is_qlora(adapter):
             result.errors.append(
                 "FSDP와 QLoRA(4bit)는 호환되지 않습니다. "
                 "대안: (1) LoRA 사용, (2) DDP 전략 사용, "
                 "(3) DeepSpeed ZeRO-3 사용"
             )
+
+        # RL per-model adapter
+        if settings.recipe.rl is not None:
+            for name, spec in settings.recipe.rl.models.items():
+                if spec.adapter is not None and is_qlora(spec.adapter):
+                    result.errors.append(
+                        f"FSDP와 rl.models.{name}.adapter의 QLoRA(4bit)는 호환되지 않습니다. "
+                        "대안: (1) LoRA 사용, (2) DDP 전략 사용, "
+                        "(3) DeepSpeed ZeRO-3 사용"
+                    )
 
     @staticmethod
     def _check_moe_distributed(settings: Settings, result: ValidationResult) -> None:

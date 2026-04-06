@@ -163,7 +163,7 @@ class SettingsFactory:
         result.errors.extend(cat_result.errors)
 
         # Business: head-task 호환성 + adapter 제약 (data/distributed 제외)
-        biz_result = BusinessValidator.validate_partial(settings, checks=["head_task", "adapter"])
+        biz_result = BusinessValidator.validate_partial(settings, checks=["head_task", "adapter", "rl_models"])
         result.errors.extend(biz_result.errors)
         for w in biz_result.warnings:
             logger.warning(w)

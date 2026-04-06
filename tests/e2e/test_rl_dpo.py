@@ -49,7 +49,7 @@ def test_dpo_loss_computation() -> None:
     }
 
     dpo = DPOLoss(beta=0.1)
-    losses = dpo(trainable_out, frozen_out, batch)
+    losses = dpo.compute_loss(trainable_out, frozen_out, batch)
 
     assert "policy" in losses
     assert torch.isfinite(losses["policy"])

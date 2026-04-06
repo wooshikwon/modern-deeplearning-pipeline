@@ -1,4 +1,4 @@
-"""RL alignment loss 함수 — DPO, weighted-NTP, GRPO, PPO."""
+"""RL alignment loss 함수 — DPO, GRPO, PPO."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ class DPOLoss:
     def __init__(self, beta: float = 0.1) -> None:
         self.beta = beta
 
-    def __call__(
+    def compute_loss(
         self,
         trainable_out: dict[str, Any],
         frozen_out: dict[str, Any],
@@ -197,13 +197,13 @@ class GRPOLoss:
         self,
         clip_range: float = 0.2,
         kl_coeff: float = 0.1,
-        ppo_epochs: int = 1,
+        mini_epochs: int = 1,
     ) -> None:
         self.clip_range = clip_range
         self.kl_coeff = kl_coeff
-        self.ppo_epochs = ppo_epochs
+        self.mini_epochs = mini_epochs
 
-    def __call__(
+    def compute_loss(
         self,
         trainable_out: dict[str, Any],
         frozen_out: dict[str, Any],
@@ -270,15 +270,15 @@ class PPOLoss:
         kl_coeff: float = 0.1,
         value_coeff: float = 0.5,
         gae_lambda: float = 0.95,
-        ppo_epochs: int = 4,
+        mini_epochs: int = 4,
     ) -> None:
         self.clip_range = clip_range
         self.kl_coeff = kl_coeff
         self.value_coeff = value_coeff
         self.gae_lambda = gae_lambda
-        self.ppo_epochs = ppo_epochs
+        self.mini_epochs = mini_epochs
 
-    def __call__(
+    def compute_loss(
         self,
         trainable_out: dict[str, Any],
         frozen_out: dict[str, Any],

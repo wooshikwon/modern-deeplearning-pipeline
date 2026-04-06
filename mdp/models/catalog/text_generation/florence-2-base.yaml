@@ -14,11 +14,6 @@ supported_tasks:
   - object_detection
   - image_classification
 
-default_head:
-  task: text_generation
-  _component_: CausalLMHead
-  hidden_dim: 768
-
 input_spec:
   image:
     channels: 3

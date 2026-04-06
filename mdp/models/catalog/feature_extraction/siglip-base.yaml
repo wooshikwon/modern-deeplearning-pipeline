@@ -14,7 +14,7 @@ supported_tasks:
 default_head:
   task: feature_extraction
   _component_: DualEncoderHead
-  hidden_dim: 768
+  projection_dim: 768
 
 input_spec:
   image:

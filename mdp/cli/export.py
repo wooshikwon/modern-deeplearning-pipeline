@@ -80,11 +80,14 @@ def run_export(
         if not is_json_mode():
             typer.echo(f"내보내기 완료: {output_dir}")
         else:
-            emit_result(build_result(
-                command="export",
+            from mdp.cli.schemas import ExportResult
+            result = ExportResult(
                 output_dir=str(output_dir),
                 model_class=type(target).__name__,
                 merged=True,
+            )
+            emit_result(build_result(
+                command="export", **result.model_dump(exclude_none=True),
             ))
 
     except typer.Exit:

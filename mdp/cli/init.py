@@ -70,14 +70,14 @@ def _list_models_for_task(task: str) -> list[dict[str, Any]]:
 
 _TASK_DEFAULT_LABEL_STRATEGY: dict[str, str] = {
     "image_classification": "copy",
-    "object_detection": "none",
-    "semantic_segmentation": "none",
+    "object_detection": "unlabeled",
+    "semantic_segmentation": "unlabeled",
     "text_classification": "copy",
     "token_classification": "align",
     "text_generation": "causal",
     "seq2seq": "seq2seq",
-    "image_generation": "none",
-    "feature_extraction": "none",
+    "image_generation": "unlabeled",
+    "feature_extraction": "unlabeled",
 }
 
 
@@ -121,7 +121,7 @@ def _build_recipe_from_catalog(
     # data 섹션
     data: dict[str, Any] = {
         "source": "???",
-        "label_strategy": _TASK_DEFAULT_LABEL_STRATEGY.get(task, "none"),
+        "label_strategy": _TASK_DEFAULT_LABEL_STRATEGY.get(task, "unlabeled"),
     }
     required_fields = preset.required_fields if preset else frozenset()
 

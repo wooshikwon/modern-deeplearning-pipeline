@@ -32,8 +32,16 @@ class GenerateHandler:
         self.generation_config = recipe.generation or {}
         if hasattr(self.generation_config, "model_dump"):
             self.generation_config = self.generation_config.model_dump(exclude_none=True)
+        self._lock = asyncio.Lock()
 
     async def handle(self, raw_input: dict) -> StreamingResponse:
+        # locked()로 atomic 503 — race window 제거
+        if self._lock.locked():
+            from starlette.responses import JSONResponse
+            return JSONResponse({"error": "concurrent generation not allowed"}, status_code=503)
+        await self._lock.acquire()
+
+        # lock 획득 성공 — 이후 모든 해제는 generator finally에서
         text = raw_input.get("text", "")
         input_ids = self.tokenizer(text, return_tensors="pt").input_ids.to(self._device)
 
@@ -47,13 +55,35 @@ class GenerateHandler:
             "do_sample": self.generation_config.get("do_sample", True),
         }
 
-        thread = threading.Thread(target=self.model.generate, kwargs=gen_kwargs)
+        # thread wrapper: 예외 캡처 + sentinel 주입으로 deadlock 방지
+        thread_exc: list[BaseException | None] = [None]
+
+        def _generate():
+            try:
+                self.model.generate(**gen_kwargs)
+            except BaseException as e:
+                thread_exc[0] = e
+                # sentinel 주입 — streamer iterator 탈출
+                q = getattr(streamer, "text_queue", getattr(streamer, "queue", None))
+                if q is not None:
+                    q.put(streamer.stop_signal)
+
+        thread = threading.Thread(target=_generate, daemon=True)
         thread.start()
 
+        # generator가 lock + thread 라이프사이클을 소유
         async def event_stream():
-            for token_text in streamer:
-                yield f"data: {json.dumps({'token': token_text})}\n\n"
-            yield "data: [DONE]\n\n"
+            try:
+                for token_text in streamer:
+                    if thread_exc[0] is not None:
+                        break
+                    yield f"data: {json.dumps({'token': token_text})}\n\n"
+                if thread_exc[0] is not None:
+                    yield f"data: {json.dumps({'error': str(thread_exc[0])})}\n\n"
+                yield "data: [DONE]\n\n"
+            finally:
+                thread.join(timeout=30)
+                self._lock.release()
 
         return StreamingResponse(event_stream(), media_type="text/event-stream")
 

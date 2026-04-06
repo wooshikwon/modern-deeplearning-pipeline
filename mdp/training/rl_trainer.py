@@ -16,16 +16,19 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
     backward_and_step,
+    create_callbacks,
     create_expert_parallel,
     create_strategy,
     detect_device,
+    setup_amp,
 )
 
 logger = logging.getLogger(__name__)
@@ -62,20 +65,7 @@ class RLTrainer:
         self.grad_clip_norm = training.gradient_clip_max_norm
 
         # AMP
-        precision = training.precision
-        scaler_device = self.device.type
-        if precision == "fp16":
-            self.amp_enabled = True
-            self.amp_dtype = torch.float16
-            self.scaler = GradScaler(scaler_device, enabled=True)
-        elif precision == "bf16":
-            self.amp_enabled = True
-            self.amp_dtype = torch.bfloat16
-            self.scaler = GradScaler(scaler_device, enabled=False)
-        else:
-            self.amp_enabled = False
-            self.amp_dtype = torch.float32
-            self.scaler = GradScaler(scaler_device, enabled=False)
+        self.amp_enabled, self.amp_dtype, self.scaler = setup_amp(training.precision, self.device)
 
         # 모델 분리: trainable vs frozen
         self.trainable: dict[str, nn.Module] = {}
@@ -121,7 +111,7 @@ class RLTrainer:
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Callbacks
-        self.callbacks = self._create_callbacks(recipe.callbacks)
+        self.callbacks = create_callbacks(recipe.callbacks, self.resolver)
 
         # Validation
         self.val_check_interval = getattr(training, "val_check_interval", 0)
@@ -129,6 +119,7 @@ class RLTrainer:
 
         # State
         self.global_step = 0
+        self.epoch_counter = 0
         self.last_metrics: dict[str, float] = {}
         self._recipe_dict = settings.recipe.model_dump()
         self._generation_kwargs: dict[str, Any] = {}
@@ -138,15 +129,6 @@ class RLTrainer:
             return self.max_steps
         steps_per_epoch = len(self.train_loader) // self.grad_accum_steps
         return int(steps_per_epoch * (self.epochs or 1))
-
-    def _create_callbacks(self, configs: list[dict[str, Any]]) -> list:
-        callbacks = []
-        for cfg in configs:
-            try:
-                callbacks.append(self.resolver.resolve(cfg))
-            except Exception as e:
-                logger.warning(f"콜백 생성 실패: {e}")
-        return callbacks
 
     def _fire(self, hook_name: str, **kwargs: Any) -> None:
         needs_ep_gather = (
@@ -444,13 +426,14 @@ class RLTrainer:
             model_dir = ckpt_dir / name
             model_dir.mkdir(parents=True, exist_ok=True)
 
-            unwrapped = getattr(model, "module", model)
             if self.strategy is not None and hasattr(self.strategy, "save_checkpoint"):
-                self.strategy.save_checkpoint(unwrapped, model_dir / "model.safetensors")
-            elif hasattr(unwrapped, "save_pretrained"):
-                unwrapped.save_pretrained(model_dir)
+                self.strategy.save_checkpoint(model, model_dir / "model.safetensors")
             else:
-                torch.save(unwrapped.state_dict(), model_dir / "model.pt")
+                unwrapped = getattr(model, "module", model)
+                if hasattr(unwrapped, "save_pretrained"):
+                    unwrapped.save_pretrained(model_dir)
+                else:
+                    torch.save(unwrapped.state_dict(), model_dir / "model.pt")
 
             if name in self.optimizers:
                 torch.save(self.optimizers[name].state_dict(), model_dir / "optimizer.pt")
@@ -459,9 +442,12 @@ class RLTrainer:
 
         (ckpt_dir / "trainer_state.json").write_text(json.dumps({
             "global_step": self.global_step,
+            "epoch_counter": self.epoch_counter,
         }))
         if self.scaler.is_enabled():
             torch.save(self.scaler.state_dict(), ckpt_dir / "scaler.pt")
+        import yaml
+        (ckpt_dir / "recipe.yaml").write_text(yaml.dump(self._recipe_dict, allow_unicode=True))
 
     def _maybe_resume(self) -> None:
         """체크포인트에서 모든 모델 상태를 복원한다."""
@@ -518,6 +504,7 @@ class RLTrainer:
         if state_path.exists():
             state = json.loads(state_path.read_text())
             self.global_step = state.get("global_step", 0)
+            self.epoch_counter = state.get("epoch_counter", 0)
 
         scaler_path = ckpt_dir / "scaler.pt"
         if scaler_path.exists() and self.scaler.is_enabled():
@@ -539,11 +526,16 @@ class RLTrainer:
             self.policy = self.expert_parallel.setup(self.policy, self.device)
             self.trainable["policy"] = self.policy
 
+        # Frozen 모델을 policy와 동일 dtype으로 캐스팅 (fp32/bf16/fp16 불일치 방지)
+        if self.amp_enabled:
+            for name in self.frozen:
+                self.frozen[name] = self.frozen[name].to(dtype=self.amp_dtype)
+
         # Strategy setup
         if self.strategy is not None:
             trainable_names = set(self.trainable.keys())
             all_models = {**self.trainable, **self.frozen}
-            wrapped = self.strategy.setup_models(all_models, self.device, trainable_names)
+            wrapped = self.strategy.setup_models(all_models, self.device, trainable_names, optimizers=self.optimizers)
             for name in self.trainable:
                 self.trainable[name] = wrapped[name]
             for name in self.frozen:
@@ -558,22 +550,33 @@ class RLTrainer:
 
         # Gap 5: Resume from checkpoint
         self._maybe_resume()
+        sampler = getattr(self.train_loader, "sampler", None)
+        if sampler is not None and hasattr(sampler, "set_epoch"):
+            sampler.set_epoch(self.epoch_counter)
 
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
         start_time = time.time()
 
         mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
+        mlflow_run_id: str | None = None
 
         device_type = self.device.type if self.device.type != "mps" else "cpu"
-        epoch_counter = 0
         train_iter = iter(self.train_loader)
         total_loss = 0.0
         num_steps = 0
         _epoch_steps = int(len(self.train_loader) * (self.epochs or 1))
-        max_steps = self.max_steps or _epoch_steps
+        max_steps = min(self.max_steps, _epoch_steps) if self.max_steps else _epoch_steps
 
         needs_gen = getattr(self.algorithm, "needs_generation", False)
+        if needs_gen and self.grad_accum_steps > 1:
+            logger.warning(
+                "Generation path에서 grad_accum_steps=%d → 1로 강제합니다. "
+                "force_step=True로 매 mini-epoch마다 optimizer step을 실행하므로 "
+                "gradient accumulation이 무의미합니다.",
+                self.grad_accum_steps,
+            )
+            self.grad_accum_steps = 1
 
         gen_config = self.settings.recipe.rl.generation if self.settings.recipe.rl else None
         self._generation_kwargs = {}
@@ -582,12 +585,14 @@ class RLTrainer:
 
         batch_idx = 0
 
-        with mlflow_ctx:
+        with mlflow_ctx as mlflow_run:
             if self._is_main_process:
+                if mlflow_run is not None and hasattr(mlflow_run, "info"):
+                    mlflow_run_id = mlflow_run.info.run_id
                 self._log_mlflow_params()
 
             try:
-                self._fire("on_epoch_start", epoch=0)
+                self._fire("on_epoch_start", epoch=self.epoch_counter)
 
                 while self.global_step < max_steps:
                     if self._should_stop():
@@ -596,33 +601,72 @@ class RLTrainer:
                     try:
                         batch = next(train_iter)
                     except StopIteration:
-                        epoch_counter += 1
-                        self._fire("on_epoch_end", epoch=epoch_counter - 1, metrics={"loss": total_loss / max(num_steps, 1)})
+                        # Epoch-final: 잔여 gradient flush (offline path only)
+                        # generation path는 grad_accum_steps=1이므로 잔여 없음
+                        if not needs_gen and num_steps > 0 and num_steps % self.grad_accum_steps != 0:
+                            for name, opt in self.optimizers.items():
+                                self.scaler.unscale_(opt)
+                                if self.grad_clip_norm is not None and name in self.trainable:
+                                    clip_grad_norm_(self.trainable[name].parameters(), self.grad_clip_norm)
+                            has_inf = any(
+                                torch.isinf(p.grad).any() or torch.isnan(p.grad).any()
+                                for m in self.trainable.values()
+                                for p in m.parameters()
+                                if p.grad is not None
+                            )
+                            if has_inf:
+                                logger.warning("NaN/Inf gradient in residual flush, skipping step")
+                                for opt in self.optimizers.values():
+                                    opt.zero_grad(set_to_none=True)
+                                self.scaler.update()
+                            else:
+                                for name, opt in self.optimizers.items():
+                                    self.scaler.step(opt)
+                                    sched = self.schedulers.get(name)
+                                    if sched is not None:
+                                        sched.step()
+                                self.scaler.update()
+                                for opt in self.optimizers.values():
+                                    opt.zero_grad(set_to_none=True)
+                                self.global_step += 1
+                                self._fire(
+                                    "on_batch_end", step=self.global_step,
+                                    epoch=self.epoch_counter,
+                                    global_step=self.global_step,
+                                    metrics={"loss": step_loss},
+                                    model=self.policy,
+                                    optimizer=self.optimizers["policy"],
+                                    scheduler=self.schedulers.get("policy"),
+                                )
+
+                        self._fire("on_epoch_end", epoch=self.epoch_counter, metrics={"loss": total_loss / max(num_steps, 1)})
+                        self.epoch_counter += 1
 
                         # Epoch-based validation
                         if (
                             self.val_loader is not None
                             and self.val_check_interval > 0
                             and self.val_check_unit == "epoch"
-                            and epoch_counter > 0
-                            and epoch_counter % int(self.val_check_interval) == 0
+                            and self.epoch_counter > 0
+                            and self.epoch_counter % int(self.val_check_interval) == 0
                         ):
-                            self._fire("on_validation_start", epoch=epoch_counter)
+                            self._fire("on_validation_start", epoch=self.epoch_counter)
                             val_metrics = self._run_rl_validation()
-                            self._fire("on_validation_end", epoch=epoch_counter, metrics=val_metrics)
+                            self._fire("on_validation_end", epoch=self.epoch_counter, metrics=val_metrics)
                             self.last_metrics.update(val_metrics)
 
-                        self._fire("on_epoch_start", epoch=epoch_counter)
+                        self._fire("on_epoch_start", epoch=self.epoch_counter)
 
-                        # Gap 4: 분산 학습 시 에폭 경계에서 sampler 셔플 갱신
+                        # 분산 학습 시 에폭 경계에서 sampler 셔플 갱신
                         sampler = getattr(self.train_loader, "sampler", None)
                         if sampler is not None and hasattr(sampler, "set_epoch"):
-                            sampler.set_epoch(epoch_counter)
+                            sampler.set_epoch(self.epoch_counter)
                         train_iter = iter(self.train_loader)
+                        batch_idx = 0
                         batch = next(train_iter)
 
                     batch = self._move_to_device(batch)
-                    self._fire("on_batch_start", step=batch_idx)
+                    self._fire("on_batch_start", step=self.global_step)
 
                     if needs_gen:
                         step_loss = self._train_step_generation(batch, device_type)
@@ -630,6 +674,8 @@ class RLTrainer:
                         step_loss = self._train_step_offline(batch, device_type, batch_idx)
 
                     batch_idx += 1
+                    if step_loss is None:
+                        continue
                     total_loss += step_loss
                     num_steps += 1
 
@@ -638,7 +684,8 @@ class RLTrainer:
 
                     if batch_idx % self.grad_accum_steps == 0:
                         self._fire(
-                            "on_batch_end", step=batch_idx,
+                            "on_batch_end", step=self.global_step,
+                            epoch=self.epoch_counter,
                             global_step=self.global_step,
                             metrics={"loss": step_loss},
                             model=self.policy,
@@ -654,9 +701,9 @@ class RLTrainer:
                         and self.global_step > 0
                         and self.global_step % self.val_check_interval == 0
                     ):
-                        self._fire("on_validation_start", epoch=epoch_counter)
+                        self._fire("on_validation_start", epoch=self.epoch_counter)
                         val_metrics = self._run_rl_validation()
-                        self._fire("on_validation_end", epoch=epoch_counter, metrics=val_metrics)
+                        self._fire("on_validation_end", epoch=self.epoch_counter, metrics=val_metrics)
                         self.last_metrics.update(val_metrics)
 
             finally:
@@ -691,23 +738,53 @@ class RLTrainer:
             "metrics": metrics,
             "training_duration_seconds": training_duration,
             "total_steps": self.global_step,
-            "total_epochs": epoch_counter,
+            "total_epochs": self.epoch_counter,
             "stopped_reason": stopped_reason,
             "algorithm": type(self.algorithm).__name__,
         }
         if monitoring is not None:
             result["monitoring"] = monitoring
+        if mlflow_run_id is not None:
+            result["run_id"] = mlflow_run_id
         return result
 
     # ── Step 실행 ──
 
+    def _forward_preference(self, models: dict[str, nn.Module], batch: dict) -> dict[str, dict]:
+        """Preference 배치를 chosen/rejected로 분리하여 causal forward 2회 호출."""
+        out = {}
+        for name, m in models.items():
+            chosen_out = self._forward_model(
+                m,
+                {"input_ids": batch["chosen_input_ids"],
+                 "attention_mask": batch.get("chosen_attention_mask")},
+                role=name,
+            )
+            rejected_out = self._forward_model(
+                m,
+                {"input_ids": batch["rejected_input_ids"],
+                 "attention_mask": batch.get("rejected_attention_mask")},
+                role=name,
+            )
+            out[name] = {
+                "chosen_logits": chosen_out["logits"],
+                "rejected_logits": rejected_out["logits"],
+            }
+        return out
+
     def _train_step_offline(self, batch: dict, device_type: str, batch_idx: int) -> float:
-        """DPO / weighted-NTP — 데이터가 이미 완성된 경로."""
+        """DPO — 데이터가 이미 완성된 경로."""
+        is_preference = "chosen_input_ids" in batch
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
-            with torch.no_grad():
-                frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
-            trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
-            losses = self.algorithm(trainable_out, frozen_out, batch)
+            if is_preference:
+                with torch.no_grad():
+                    frozen_out = self._forward_preference(self.frozen, batch)
+                trainable_out = self._forward_preference(self.trainable, batch)
+            else:
+                with torch.no_grad():
+                    frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
+                trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
+            losses = self.algorithm.compute_loss(trainable_out, frozen_out, batch)
 
         result = backward_and_step(
             losses=losses,
@@ -719,6 +796,8 @@ class RLTrainer:
             at_accum_boundary=(batch_idx + 1) % self.grad_accum_steps == 0,
             grad_clip_norm=self.grad_clip_norm,
         )
+        if result is None:
+            return None
         if result is True:
             self.global_step += 1
         return losses.get("policy", list(losses.values())[0]).item()
@@ -780,16 +859,16 @@ class RLTrainer:
         }
 
         # 4. Mini-epoch update
-        ppo_epochs = getattr(self.algorithm, "ppo_epochs", 1)
+        mini_epochs = getattr(self.algorithm, "mini_epochs", 1)
         last_loss = 0.0
         all_nan = True
-        for _ in range(ppo_epochs):
+        for _ in range(mini_epochs):
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
                 trainable_out = {
                     name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask}, role=name)
                     for name, m in self.trainable.items()
                 }
-                losses = self.algorithm(trainable_out, frozen_out, gen_batch)
+                losses = self.algorithm.compute_loss(trainable_out, frozen_out, gen_batch)
 
             result = backward_and_step(
                 losses=losses,
@@ -802,12 +881,14 @@ class RLTrainer:
                 grad_clip_norm=self.grad_clip_norm,
                 force_step=True,
             )
-            if result is not None:
-                all_nan = False
+            if result is None:
+                break
+            all_nan = False
             last_loss = losses.get("policy", list(losses.values())[0]).item()
 
-        if not all_nan:
-            self.global_step += 1
+        if all_nan:
+            return None
+        self.global_step += 1
         return last_loss
 
     def _compute_rewards(
@@ -859,28 +940,17 @@ class RLTrainer:
         return out
 
     def _forward_model(self, model: nn.Module, batch: dict, role: str = "policy") -> dict:
-        """배치 형태에 따라 모델 forward를 수행한다.
+        """Causal forward를 수행한다.
 
         role에 따라 출력 키가 달라진다:
-        - "policy", "reference" → {"logits": (batch, seq, vocab)} 또는 preference 형태
+        - "policy", "reference" → {"logits": (batch, seq, vocab)}
         - "value" → {"values": (batch, seq)} — scalar head 또는 LM head[:, :, 0]
         - "reward" → {"reward": (batch,)} 우선, fallback으로 {"logits": tensor}
+
+        Preference 배치(chosen/rejected)는 caller에서 분리하여 2회 호출한다.
         """
         result = {}
 
-        # preference 형태 (DPO)
-        if "chosen_input_ids" in batch:
-            result["chosen_logits"] = self._extract_logits(model(
-                input_ids=batch["chosen_input_ids"],
-                attention_mask=batch.get("chosen_attention_mask"),
-            ))
-        if "rejected_input_ids" in batch:
-            result["rejected_logits"] = self._extract_logits(model(
-                input_ids=batch["rejected_input_ids"],
-                attention_mask=batch.get("rejected_attention_mask"),
-            ))
-
-        # causal 형태
         if "input_ids" in batch:
             out = model(
                 input_ids=batch["input_ids"],

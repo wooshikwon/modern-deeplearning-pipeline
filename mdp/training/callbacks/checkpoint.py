@@ -217,10 +217,11 @@ class ModelCheckpoint(BaseCallback):
                     epoch = kwargs.get("epoch", 0)
                     recipe_dict = kwargs.get("recipe_dict")
                     scaler = kwargs.get("scaler")
+                    step_in_epoch = kwargs.get("step_in_epoch", 0)
                     self.save_checkpoint(
                         model, optimizer, scheduler, epoch, global_step, metrics,
                         strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
-                        step_in_epoch=step + 1,
+                        step_in_epoch=step_in_epoch,
                     )
 
     def on_validation_end(
@@ -251,7 +252,7 @@ class ModelCheckpoint(BaseCallback):
         scaler = kwargs.get("scaler")
 
         ckpt_path = self.save_checkpoint(
-            model, optimizer, scheduler, epoch + 1, global_step, metrics,
+            model, optimizer, scheduler, epoch, global_step, metrics,
             strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
         )
 

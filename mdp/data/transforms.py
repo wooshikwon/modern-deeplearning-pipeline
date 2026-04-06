@@ -62,11 +62,15 @@ def build_transforms(config: dict[str, Any] | None) -> Any:
                     f"지원: {list(_DTYPE_MAP.keys())}"
                 )
 
-        transform_cls = getattr(v2, transform_type, None)
-        if transform_cls is None:
-            raise AttributeError(
-                f"torchvision.transforms.v2에 '{transform_type}'이(가) 없습니다"
-            )
+        if "." in transform_type:
+            from mdp.settings.resolver import ComponentResolver
+            transform_cls = ComponentResolver.import_class(transform_type)
+        else:
+            transform_cls = getattr(v2, transform_type, None)
+            if transform_cls is None:
+                raise AttributeError(
+                    f"torchvision.transforms.v2에 '{transform_type}'이(가) 없습니다"
+                )
 
         transforms_list.append(transform_cls(**params))
 

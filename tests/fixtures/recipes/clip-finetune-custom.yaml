@@ -12,7 +12,7 @@ head:
   _target_attr: head
 
 data:
-  label_strategy: "none"
+  label_strategy: "unlabeled"
   source: "gs://my-bucket/clip-data/{00000..00099}.tar"
   streaming: true
   fields:

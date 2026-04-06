@@ -143,6 +143,7 @@ class FSDPStrategy(BaseStrategy):
     def setup_models(
         self, models: dict[str, nn.Module], device: torch.device,
         trainable_names: set[str] | None = None,
+        optimizers: dict[str, torch.optim.Optimizer] | None = None,
     ) -> dict[str, nn.Module]:
         import torch.distributed as dist
         from torch.distributed.fsdp import (

@@ -35,6 +35,7 @@ class TrainResult(BaseModel):
     duration_seconds: float | None = None
     monitoring: dict[str, Any] | None = None
     algorithm: str | None = None
+    run_id: str | None = None
 
 
 # ── mdp inference ──
@@ -52,6 +53,7 @@ class InferenceResult(BaseModel):
 
     output_path: str | None = None
     task: str | None = None
+    run_id: str | None = None
     monitoring: dict[str, Any] | None = None
     evaluation_metrics: dict[str, Any] | None = None
 
@@ -83,6 +85,23 @@ class EstimateResult(BaseModel):
     total_mem_gb: float | None = None
     suggested_gpus: int | None = None
     suggested_strategy: str | None = None
+
+
+# ── mdp export ──
+
+
+class ExportResult(BaseModel):
+    """mdp export --format json 출력 스키마.
+
+    데이터 출처:
+    - output_dir → 내보내기 대상 디렉토리
+    - model_class → type(target).__name__
+    - merged → adapter merge 여부
+    """
+
+    output_dir: str | None = None
+    model_class: str | None = None
+    merged: bool = True
 
 
 # ── mdp list ──

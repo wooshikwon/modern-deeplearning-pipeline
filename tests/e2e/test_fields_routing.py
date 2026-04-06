@@ -41,7 +41,7 @@ class TestLabelStrategyConstants:
         assert LABEL_SEQ2SEQ == "seq2seq"
         assert LABEL_COPY == "copy"
         assert LABEL_ALIGN == "align"
-        assert LABEL_NONE == "none"
+        assert LABEL_NONE == "unlabeled"
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +75,7 @@ class TestLoaderRouting:
 
     def test_none_strategy_for_image(self) -> None:
         """LABEL_NONE is for image-only or feature extraction."""
-        assert LABEL_NONE == "none"
+        assert LABEL_NONE == "unlabeled"
 
     def test_seq2seq_strategy_value(self) -> None:
         """LABEL_SEQ2SEQ is for text-to-text tasks."""
@@ -108,7 +108,6 @@ class TestTaskValidation:
         errors, warnings = validate_task_fields(
             "text_generation",
             {"text": "content"},
-            {"tokenizer": True},
         )
         assert errors == []
 
@@ -117,7 +116,6 @@ class TestTaskValidation:
         errors, warnings = validate_task_fields(
             "text_generation",
             {"image": "path"},
-            {"tokenizer": True},
         )
         assert len(errors) > 0
         assert any("text" in e for e in errors)
@@ -127,7 +125,6 @@ class TestTaskValidation:
         errors, warnings = validate_task_fields(
             "nonexistent_task",
             {"text": "content"},
-            {"tokenizer": True},
         )
         assert len(errors) == 1
         assert "알 수 없는 task" in errors[0]
@@ -221,7 +218,7 @@ class TestValSplit:
         """val_split="auto"(기본)는 기존 동작과 동일."""
         from mdp.settings.schema import DataSpec
 
-        spec = DataSpec(source="dummy", label_strategy="none")
+        spec = DataSpec(source="dummy", label_strategy="unlabeled")
         assert spec.val_split == "auto"
 
     def test_val_split_null_disables_validation(self) -> None:
@@ -241,6 +238,6 @@ class TestValSplit:
              patch("mdp.data.dataloader.build_transforms", return_value=(None, None)), \
              patch("mdp.data.dataloader.DataLoader") as mock_loader:
             mock_loader.return_value = MagicMock()
-            result = create_dataloaders(source="dummy", label_strategy="none", val_split=None)
+            result = create_dataloaders(source="dummy", label_strategy="unlabeled", val_split=None)
 
         assert "val" not in result

@@ -209,8 +209,9 @@ class MemoryEstimator:
     ) -> int:
         """활성화 메모리를 추정한다 (bytes).
 
-        Heuristic: 활성화 메모리 ~ param_count * batch_size * 2 bytes
-        (매우 대략적이며, 실제 아키텍처에 따라 크게 달라진다.)
+        Heuristic: 활성화 메모리 ~ param_count * sqrt(batch_size) * 2 bytes.
+        sqrt를 쓰는 이유: param_count가 이미 레이어 수를 반영하므로 batch_size를
+        그대로 곱하면 과대 추정됨. 매우 대략적이며 실제 아키텍처에 따라 크게 달라진다.
         gradient checkpointing 사용 시 ~1/3로 감소.
         """
         # 기본 추정: 파라미터 수 * 2 (fp16 활성화) * sqrt(batch_size)
@@ -239,9 +240,9 @@ class MemoryEstimator:
             import torch
 
             if torch.cuda.is_available():
-                mem = torch.cuda.get_device_properties(0).total_mem
+                mem = torch.cuda.get_device_properties(0).total_memory
                 return mem / (1024**3)
-        except (ImportError, RuntimeError):
+        except Exception:
             pass
 
         return _DEFAULT_GPU_VRAM_GB
@@ -263,11 +264,11 @@ class MemoryEstimator:
         if suggested_gpus <= 1:
             return "none"
 
-        if model_mem_gb < gpu_vram * 0.7:
+        if model_mem_gb <= gpu_vram * 0.7:
             # 모델이 단일 GPU에 여유있게 들어감 → DDP
             return "ddp"
 
-        if model_mem_gb < gpu_vram * 2:
+        if model_mem_gb <= gpu_vram * 2:
             # 모델이 2개 GPU에 분산 가능 → FSDP
             return "fsdp"
 

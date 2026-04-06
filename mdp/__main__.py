@@ -74,11 +74,12 @@ def inference(
     metrics: list[str] | None = typer.Option(None, "--metrics", help="평가 metric (예: Accuracy F1Score)"),
     output_format: str = typer.Option("parquet", "--output-format", help="결과 포맷: parquet|csv|jsonl"),
     output_dir: str = typer.Option("./output", "--output-dir", help="결과 저장 디렉토리"),
+    device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
 ):
     """배치 추론을 실행한다. --run-id 또는 --model-dir 중 하나를 지정."""
     from mdp.cli.inference import run_inference
 
-    run_inference(run_id, model_dir, data, fields, metrics, output_format, output_dir)
+    run_inference(run_id, model_dir, data, fields, metrics, output_format, output_dir, device_map=device_map)
 
 
 @app.command()
@@ -87,11 +88,13 @@ def serve(
     model_dir: str = typer.Option(None, "--model-dir", help="로컬 모델 디렉토리 (mdp export 결과)"),
     port: int = typer.Option(8000, "--port", help="서버 포트"),
     host: str = typer.Option("0.0.0.0", "--host", help="바인드 주소"),
+    device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
+    max_memory: str = typer.Option(None, "--max-memory", help='GPU별 최대 메모리 (JSON): \'{"0":"24GiB","1":"40GiB"}\''),
 ):
     """모델을 REST API로 서빙한다. --run-id 또는 --model-dir 중 하나를 지정."""
     from mdp.cli.serve import run_serve
 
-    run_serve(run_id, model_dir, port, host)
+    run_serve(run_id, model_dir, port, host, device_map=device_map, max_memory=max_memory)
 
 
 @app.command()

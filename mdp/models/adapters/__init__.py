@@ -69,8 +69,11 @@ def apply_adapter(
         if model is None:
             raise ValueError("PrefixTuning에는 model이 필요합니다")
         from mdp.models.adapters.prefix_tuning import apply_prefix_tuning
-        if "r" in config:
-            config["num_virtual_tokens"] = config.pop("r")
+        r = config.pop("r", None)
+        if r is not None:
+            config["num_virtual_tokens"] = r
+        elif "num_virtual_tokens" not in config:
+            raise ValueError("prefix_tuning에는 r (num_virtual_tokens) 설정이 필요합니다")
         for k in ("dropout", "target_modules", "modules_to_save", "alpha"):
             config.pop(k, None)
         result = apply_prefix_tuning(model, **config)

@@ -17,6 +17,8 @@ def run_serve(
     model_dir: str | None = None,
     port: int = 8000,
     host: str = "0.0.0.0",
+    device_map: str | None = None,
+    max_memory: str | None = None,
 ) -> None:
     """모델을 REST API로 서빙한다.
 
@@ -49,8 +51,35 @@ def run_serve(
         from mdp.serving.server import create_handler, create_app
         from mdp.serving.model_loader import reconstruct_model
 
+        # device_map 결정: CLI > config > None
+        serving_config = None
+        try:
+            from mdp.settings.factory import SettingsFactory
+            _settings = SettingsFactory().from_artifact(str(source_dir))
+            serving_config = _settings.config.serving
+        except Exception:
+            pass
+
+        effective_device_map = device_map
+        if effective_device_map is None and serving_config is not None:
+            effective_device_map = serving_config.device_map
+
+        effective_max_memory = None
+        if max_memory is not None:
+            import json
+            try:
+                effective_max_memory = json.loads(max_memory)
+            except json.JSONDecodeError as e:
+                raise typer.BadParameter(f"--max-memory: 올바른 JSON이 아닙니다: {e}")
+        elif serving_config is not None and serving_config.max_memory is not None:
+            effective_max_memory = serving_config.max_memory
+
         # adapter면 merge, full이면 그대로
-        model, settings = reconstruct_model(source_dir, merge=True)
+        model, settings = reconstruct_model(
+            source_dir, merge=True,
+            device_map=effective_device_map,
+            max_memory=effective_max_memory,
+        )
         recipe = settings.recipe
 
         model.eval()
@@ -61,14 +90,16 @@ def run_serve(
         if not is_json_mode():
             typer.echo(f"서빙 시작: http://{host}:{port}")
             typer.echo(f"  모델: {recipe.name} (task: {recipe.task})")
+            if effective_device_map is not None:
+                typer.echo(f"  device_map: {effective_device_map}")
             typer.echo(f"  /predict — 추론 엔드포인트")
             typer.echo(f"  /health  — 헬스 체크")
 
         if is_json_mode():
+            from mdp.cli.schemas import ServeResult
+            result = ServeResult(run_id=run_id, port=port)
             emit_result(build_result(
-                command="serve", status="starting",
-                run_id=run_id,
-                port=port,
+                command="serve", **result.model_dump(exclude_none=True),
             ))
 
         uvicorn.run(app, host=host, port=port)

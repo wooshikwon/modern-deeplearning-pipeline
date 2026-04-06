@@ -53,9 +53,9 @@ def test_health_endpoint(tmp_path: Path) -> None:
     model, settings = reconstruct_model(artifact_dir)
     model.eval()
 
-    from mdp.serving.handlers import BatchHandler
+    from mdp.serving.handlers import PredictHandler
 
-    handler = BatchHandler(model, None, None, settings.recipe)
+    handler = PredictHandler(model, None, None, settings.recipe)
     app = create_app(handler, settings.recipe)
 
     from starlette.testclient import TestClient
@@ -71,7 +71,7 @@ def test_health_endpoint(tmp_path: Path) -> None:
 def test_predict_endpoint_classification(tmp_path: Path) -> None:
     """/predict가 classification 입력을 처리하고 결과를 반환하는지.
 
-    BatchHandler는 batch_loop(asyncio task)으로 비동기 처리하므로,
+    PredictHandler는 batch_loop(asyncio task)으로 비동기 처리하므로,
     직접 _preprocess → model forward를 동기적으로 검증한다.
     """
     from mdp.serving.model_loader import reconstruct_model
@@ -80,9 +80,9 @@ def test_predict_endpoint_classification(tmp_path: Path) -> None:
     model, settings = reconstruct_model(artifact_dir)
     model.eval()
 
-    from mdp.serving.handlers import BatchHandler
+    from mdp.serving.handlers import PredictHandler
 
-    handler = BatchHandler(model, None, None, settings.recipe)
+    handler = PredictHandler(model, None, None, settings.recipe)
 
     # _preprocess가 transform/tokenizer 없이 raw dict를 그대로 반환하는지
     raw_input = {"pixel_values": torch.randn(1, 3, 8, 8)}

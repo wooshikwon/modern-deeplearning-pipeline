@@ -18,6 +18,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 from torch.amp import GradScaler, autocast
+from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from mdp.settings.resolver import ComponentResolver
@@ -25,9 +26,11 @@ from mdp.settings.schema import Settings
 from mdp.training._common import (
     STRATEGY_MAP,
     backward_and_step,
+    create_callbacks,
     create_expert_parallel,
     create_strategy,
     detect_device,
+    setup_amp,
 )
 from mdp.training.callbacks.base import BaseCallback
 
@@ -67,24 +70,7 @@ class Trainer:
         self.val_check_unit = training.val_check_unit
 
         # AMP setup
-        scaler_device = self.device.type
-        precision = training.precision
-        if precision == "fp16":
-            self.amp_enabled = True
-            self.amp_dtype = torch.float16
-            if self.device.type == "mps":
-                logger.warning("MPS에서 fp16은 GradScaler를 지원하지 않습니다. bf16을 권장합니다.")
-                self.scaler = GradScaler(scaler_device, enabled=False)
-            else:
-                self.scaler = GradScaler(scaler_device, enabled=True)
-        elif precision == "bf16":
-            self.amp_enabled = True
-            self.amp_dtype = torch.bfloat16
-            self.scaler = GradScaler(scaler_device, enabled=False)
-        else:  # fp32
-            self.amp_enabled = False
-            self.amp_dtype = torch.float32
-            self.scaler = GradScaler(scaler_device, enabled=False)
+        self.amp_enabled, self.amp_dtype, self.scaler = setup_amp(training.precision, self.device)
 
         # Components
         self.optimizer = self._create_optimizer(recipe.optimizer)
@@ -92,7 +78,7 @@ class Trainer:
             recipe.scheduler
         )
         self.loss_fn = self._create_loss(recipe.loss)
-        self.callbacks = self._create_callbacks(recipe.callbacks)
+        self.callbacks = create_callbacks(recipe.callbacks, self.resolver)
         self.strategy = create_strategy(settings, self.resolver)
         self.expert_parallel = create_expert_parallel(settings)
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
@@ -187,18 +173,6 @@ class Trainer:
             return None
         return self.resolver.resolve(config)
 
-    def _create_callbacks(
-        self, configs: list[dict[str, Any]]
-    ) -> list[BaseCallback]:
-        callbacks = []
-        for cfg in configs:
-            try:
-                cb = self.resolver.resolve(cfg)
-                callbacks.append(cb)
-            except Exception as e:
-                logger.warning(f"콜백 생성 실패: {e}")
-        return callbacks
-
     def _estimate_total_steps(self) -> int:
         if self.max_steps:
             return self.max_steps
@@ -263,6 +237,13 @@ class Trainer:
                 _dist.init_process_group(backend=backend)
             self.model = self.expert_parallel.setup(self.model, self.device)
 
+        # Guard: device_map 모델은 학습 불가
+        if hasattr(self.model, "hf_device_map"):
+            raise RuntimeError(
+                "device_map으로 분산 배치된 모델은 학습에 사용할 수 없습니다. "
+                "device_map은 추론/서빙 전용이며, 학습에는 DDP/FSDP 전략을 사용하세요."
+            )
+
         # Strategy setup (DDP/FSDP/DeepSpeed wrapping)
         if self.strategy is not None:
             self.model = self.strategy.setup(self.model, self.device, optimizer=self.optimizer)
@@ -289,6 +270,7 @@ class Trainer:
         last_epoch = self.start_epoch
         baseline_info = None
         mlflow_ctx = self._start_mlflow_run() if self._is_main_process else nullcontext()
+        mlflow_run_id: str | None = None
 
         if self.epochs is not None:
             max_epochs = int(self.epochs) + (1 if self.epochs != int(self.epochs) else 0)
@@ -301,8 +283,10 @@ class Trainer:
             self.start_epoch * len(self.train_loader) + self._resume_step_in_epoch
         )
 
-        with mlflow_ctx:
+        with mlflow_ctx as mlflow_run:
             if self._is_main_process:
+                if mlflow_run is not None and hasattr(mlflow_run, "info"):
+                    mlflow_run_id = mlflow_run.info.run_id
                 self._log_mlflow_params()
 
             try:
@@ -376,6 +360,8 @@ class Trainer:
         }
         if baseline_info is not None:
             result["monitoring"] = baseline_info
+        if mlflow_run_id is not None:
+            result["run_id"] = mlflow_run_id
 
         return result
 
@@ -421,7 +407,7 @@ class Trainer:
                 break
 
             batch = self._move_to_device(batch)
-            self._fire("on_batch_start", step=step)
+            self._fire("on_batch_start", step=self.global_step)
 
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
                 loss = self._compute_loss(batch)
@@ -455,6 +441,7 @@ class Trainer:
                 self._fire(
                     "on_batch_end", step=self.global_step, epoch=epoch,
                     global_step=self.global_step,
+                    step_in_epoch=step + 1,
                     metrics={"loss": actual_loss},
                 )
 
@@ -469,12 +456,47 @@ class Trainer:
                 and (step + 1) < steps_in_epoch  # 에폭 마지막 step은 아래에서 처리
             ):
                 self._run_validation(epoch)
-                self.model.train()
+
+        # 에폭 마지막: 잔여 gradient flush + on_batch_end 발화
+        # 루프 내에서 마지막 배치의 backward는 이미 수행됨 (at_accum_boundary=False).
+        # gradient가 누적된 상태이므로 optimizer step만 실행한다.
+        if num_batches > 0 and num_batches % self.grad_accum_steps != 0:
+            step_schedulers = (
+                {"model": self.scheduler}
+                if self.scheduler is not None and self.scheduler_interval == "step"
+                else {}
+            )
+            self.scaler.unscale_(self.optimizer)
+            # NaN/Inf guard: unscale 후 gradient에 inf/NaN이 있으면 step을 건너뛴다
+            has_inf = any(
+                torch.isinf(p.grad).any() or torch.isnan(p.grad).any()
+                for p in self.model.parameters()
+                if p.grad is not None
+            )
+            if has_inf:
+                logger.warning("NaN/Inf gradient in residual flush, skipping step")
+                self.optimizer.zero_grad(set_to_none=True)
+                self.scaler.update()
+            else:
+                if self.grad_clip_norm is not None:
+                    clip_grad_norm_(self.model.parameters(), self.grad_clip_norm)
+                self.scaler.step(self.optimizer)
+                sched = step_schedulers.get("model")
+                if sched is not None:
+                    sched.step()
+                self.scaler.update()
+                self.optimizer.zero_grad(set_to_none=True)
+                self.global_step += 1
+                self._fire(
+                    "on_batch_end", step=self.global_step, epoch=epoch,
+                    global_step=self.global_step,
+                    step_in_epoch=num_batches,
+                    metrics={"loss": actual_loss},
+                )
 
         # mid-epoch 모드: 에폭 끝에서도 1회 검증 (마지막 구간 커버)
         if val_every_n > 0 and self.val_loader is not None:
             self._run_validation(epoch)
-            self.model.train()
 
         return total_loss / max(num_batches, 1)
 
@@ -484,7 +506,7 @@ class Trainer:
             logits = outputs.get("logits", outputs.get("output"))
             labels = batch.get("labels", batch.get("label"))
             if logits is None:
-                raise ValueError("model.forward()가 'logits' 키를 반환하지 않았습니다")
+                raise ValueError("model.forward()가 'logits' 또는 'output' 키를 반환하지 않았습니다")
             if labels is None:
                 raise ValueError("배치에 'labels' 키가 없습니다")
             return self.loss_fn(logits, labels)
@@ -525,19 +547,19 @@ class Trainer:
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
             outputs = self.model(batch)
 
-        # Try outputs["loss"], outputs.loss, then loss_fn(logits, labels)
-        if isinstance(outputs, dict) and "loss" in outputs:
-            loss = outputs["loss"]
-        elif hasattr(outputs, "loss") and outputs.loss is not None:
-            loss = outputs.loss
-        elif self.loss_fn is not None:
-            logits = outputs.get("logits", outputs.get("output")) if isinstance(outputs, dict) else getattr(outputs, "logits", None)
+        # Priority matches _compute_loss: loss_fn first, then outputs["loss"]/outputs.loss
+        if self.loss_fn is not None:
+            logits = outputs.get("logits", outputs.get("output")) if isinstance(outputs, dict) else (getattr(outputs, "logits", None) or getattr(outputs, "output", None))
             labels = batch.get("labels", batch.get("label"))
             if logits is not None and labels is not None:
                 loss = self.loss_fn(logits, labels)
             else:
                 logger.warning("_validate_fallback: logits 또는 labels를 찾을 수 없습니다")
                 return {}
+        elif isinstance(outputs, dict) and "loss" in outputs:
+            loss = outputs["loss"]
+        elif hasattr(outputs, "loss") and outputs.loss is not None:
+            loss = outputs.loss
         else:
             logger.warning("_validate_fallback: loss를 계산할 수 없습니다")
             return {}
@@ -626,9 +648,15 @@ class Trainer:
         state_path = ckpt_path / "trainer_state.json"
         if state_path.exists():
             state = json.loads(state_path.read_text())
-            self.start_epoch = state.get("epoch", 0)
+            saved_epoch = state.get("epoch", 0)
             self.global_step = state.get("global_step", 0)
             self._resume_step_in_epoch = state.get("step_in_epoch", 0)
+            # epoch 필드는 "저장 시점의 epoch". step_in_epoch이 0이면
+            # 에폭 끝 checkpoint이므로 다음 에폭부터 재개.
+            if self._resume_step_in_epoch == 0:
+                self.start_epoch = saved_epoch + 1
+            else:
+                self.start_epoch = saved_epoch
 
         # EP: checkpoint에서 전체 expert를 로드한 후, 비담당 expert를 다시 분배
         if self.expert_parallel is not None:

@@ -116,6 +116,7 @@ def run_train(recipe_path: str, config_path: str) -> None:
                 stopped_reason=train_result.get("stopped_reason"),
                 duration_seconds=train_result.get("training_duration_seconds"),
                 monitoring=train_result.get("monitoring"),
+                run_id=train_result.get("run_id"),
             )
             emit_result(build_result(
                 command="train", **result.model_dump(exclude_none=True),

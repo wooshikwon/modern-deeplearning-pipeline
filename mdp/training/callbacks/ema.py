@@ -102,6 +102,6 @@ class EMACallback(BaseCallback):
 
         trainable = [p for p in self._model.parameters() if p.requires_grad]
         for shadow, param in zip(self._shadow_params, trainable):
-            param.data.copy_(shadow)
+            param.data.copy_(shadow.to(param.device))
 
         logger.info("EMACallback: copied EMA weights back to model.")

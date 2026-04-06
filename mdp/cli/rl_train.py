@@ -29,9 +29,9 @@ def _detect_gpu_count() -> int:
 
 def _run_single(settings) -> dict:
     """단일 GPU/CPU RL 학습을 실행한다."""
-    from mdp.cli._torchrun_entry import run_rl_training
+    from mdp.cli._torchrun_entry import run_training
 
-    return run_rl_training(settings)
+    return run_training(settings)
 
 
 def _run_distributed(settings, nproc: int) -> dict:
@@ -124,7 +124,9 @@ def run_rl_train(recipe_path: str, config_path: str) -> None:
                 total_steps=train_result.get("total_steps"),
                 stopped_reason=train_result.get("stopped_reason"),
                 duration_seconds=train_result.get("training_duration_seconds"),
+                monitoring=train_result.get("monitoring"),
                 algorithm=train_result.get("algorithm"),
+                run_id=train_result.get("run_id"),
             )
             emit_result(build_result(
                 command="rl-train", **result.model_dump(exclude_none=True),

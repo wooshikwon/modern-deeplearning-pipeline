@@ -55,14 +55,6 @@ def _validate_data_interface(
 # ── MLflow artifact 조회 ──
 
 
-def _download_model(run_id: str) -> Path:
-    """MLflow run에서 model artifact를 다운로드한다."""
-    import mlflow
-
-    path = mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model")
-    return Path(path)
-
-
 def _resolve_baseline_path(model_path: Path) -> Path | None:
     """체크포인트 또는 artifact 디렉토리에서 baseline 파일을 찾는다."""
     candidates = [
@@ -115,6 +107,7 @@ def run_inference(
     metric_names: list[str] | None = None,
     output_format: str = "parquet",
     output_dir: str = "./output",
+    device_map: str | None = None,
 ) -> None:
     """배치 추론 + (선택) 평가.
 
@@ -150,7 +143,9 @@ def run_inference(
         # 1. 모델 소스 결정 (already resolved above)
 
         # 2. 모델 재구성 + 가중치 로드 (adapter면 merge)
-        model, settings = reconstruct_model(model_path, merge=True)
+        model, settings = reconstruct_model(
+            model_path, merge=True, device_map=device_map,
+        )
 
         # 3. 데이터 로드 + 필드 검증
         recipe_data = settings.recipe.data
@@ -167,7 +162,8 @@ def run_inference(
         if recipe_data.augmentation:
             val_transform = build_transforms(recipe_data.augmentation.get("val"))
         tokenize_fn = build_tokenizer(recipe_data.tokenizer, label_strategy=label_strategy)
-        test_ds = load_data(test_ds, transform=val_transform, tokenize_fn=tokenize_fn)
+        raw_columns = list(fields.keys()) if fields else None
+        test_ds = load_data(test_ds, transform=val_transform, tokenize_fn=tokenize_fn, raw_columns=raw_columns)
 
         # DataLoader
         dl_config = recipe_data.dataloader.model_dump() if recipe_data.dataloader else {}

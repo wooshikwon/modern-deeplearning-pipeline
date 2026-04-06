@@ -213,8 +213,9 @@ def compute_baseline(
 
     if _ec_enabled:
         try:
-            # 1. Find penultimate layer
-            layers = list(model.children())
+            # 1. Find penultimate layer (DDP/FSDP wrapper를 벗긴 후 탐색)
+            unwrapped = getattr(model, "module", model)
+            layers = list(unwrapped.children())
             target_layer = layers[-2] if len(layers) >= 2 else layers[-1]
 
             # 2. Register forward hook to capture activations
@@ -224,8 +225,10 @@ def compute_baseline(
             def _hook_fn(
                 module: torch.nn.Module,
                 input: Any,
-                output: torch.Tensor,
+                output: Any,
             ) -> None:
+                if isinstance(output, (tuple, list)):
+                    output = output[0]
                 hook_output["features"] = output
 
             handle = target_layer.register_forward_hook(_hook_fn)
@@ -366,7 +369,10 @@ def compare_baselines(
     Returns
     -------
     dict
-        ``{"drift_detected": bool, "drift_score": float, "alerts": [str]}``
+        ``{"drift_detected": bool, "drift_score": float, "alerts": [str],
+        "severity_level": str, "embedding_drift": dict (optional)}``
+        ``severity_level``은 "none", "watch", "alert", "retrain" 중 하나.
+        ``embedding_drift``는 embedding centroid 비교가 수행된 경우에만 포함된다.
     """
     # Defaults
     entropy_threshold: float = 2.0

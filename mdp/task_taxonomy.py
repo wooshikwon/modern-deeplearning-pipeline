@@ -15,7 +15,6 @@ class TaskPreset:
     """task별 검증 프리셋."""
 
     required_fields: frozenset[str]
-    required_config: frozenset[str]
     default_head: str | None
     default_metric: str | None
 
@@ -23,55 +22,46 @@ class TaskPreset:
 TASK_PRESETS: dict[str, TaskPreset] = {
     "image_classification": TaskPreset(
         required_fields=frozenset({"image", "label"}),
-        required_config=frozenset({"augmentation"}),
         default_head="ClassificationHead",
         default_metric="accuracy",
     ),
     "object_detection": TaskPreset(
         required_fields=frozenset({"image", "label"}),
-        required_config=frozenset({"augmentation"}),
         default_head="DetectionHead",
         default_metric="mAP",
     ),
     "semantic_segmentation": TaskPreset(
         required_fields=frozenset({"image", "label"}),
-        required_config=frozenset({"augmentation"}),
         default_head="SegmentationHead",
         default_metric="mIoU",
     ),
     "text_classification": TaskPreset(
         required_fields=frozenset({"text", "label"}),
-        required_config=frozenset({"tokenizer"}),
         default_head="ClassificationHead",
         default_metric="accuracy",
     ),
     "token_classification": TaskPreset(
         required_fields=frozenset({"text", "token_labels"}),
-        required_config=frozenset({"tokenizer"}),
         default_head="TokenClassificationHead",
         default_metric="f1",
     ),
     "text_generation": TaskPreset(
         required_fields=frozenset({"text"}),
-        required_config=frozenset({"tokenizer"}),
         default_head="CausalLMHead",
         default_metric="perplexity",
     ),
     "seq2seq": TaskPreset(
         required_fields=frozenset({"text", "target"}),
-        required_config=frozenset({"tokenizer"}),
         default_head="Seq2SeqLMHead",
         default_metric="bleu",
     ),
     "image_generation": TaskPreset(
         required_fields=frozenset({"image", "text"}),
-        required_config=frozenset({"augmentation", "tokenizer"}),
         default_head=None,
         default_metric="fid",
     ),
     "feature_extraction": TaskPreset(
         required_fields=frozenset(),
-        required_config=frozenset(),
         default_head=None,
         default_metric=None,
     ),
@@ -79,21 +69,20 @@ TASK_PRESETS: dict[str, TaskPreset] = {
 
 
 def validate_task_fields(
-    task: str, fields: dict[str, str], data_config: dict[str, bool],
+    task: str, fields: dict[str, str],
 ) -> tuple[list[str], list[str]]:
-    """task 선언과 fields/config의 일관성을 검증한다.
+    """task 선언과 fields의 일관성을 검증한다.
 
     Returns:
         (errors, warnings) 튜플.
         errors: 필수 fields 누락 등 학습 불가 문제.
-        warnings: 필수 config 누락 등 품질 문제.
+        warnings: 현재 빈 리스트 (config 검증은 fields role 기반으로 이관).
     """
     preset = TASK_PRESETS.get(task)
     if preset is None:
         return [f"알 수 없는 task: '{task}'. 지원: {list(TASK_PRESETS.keys())}"], []
 
     errors = []
-    warnings = []
     declared_fields = set(fields.keys()) if fields else set()
 
     for req in preset.required_fields:
@@ -102,10 +91,4 @@ def validate_task_fields(
                 f"task '{task}'에 필요한 fields.{req}가 선언되지 않았습니다."
             )
 
-    for req in preset.required_config:
-        if not data_config.get(req):
-            warnings.append(
-                f"task '{task}'에 필요한 data.{req} 설정이 없습니다."
-            )
-
-    return errors, warnings
+    return errors, []

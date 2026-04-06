@@ -84,6 +84,7 @@ def _list_tasks() -> None:
     catalog_by_task = _load_catalog_by_task()
 
     if is_json_mode():
+        from mdp.cli.schemas import ListTasksResult
         tasks = []
         for task_name, preset in TASK_PRESETS.items():
             models = catalog_by_task.get(task_name, [])
@@ -94,7 +95,8 @@ def _list_tasks() -> None:
                 "default_metric": preset.default_metric,
                 "compatible_models": [m.get("name", "?") for m in models],
             })
-        emit_result(build_result(command="list", what="tasks", tasks=tasks))
+        result = ListTasksResult(tasks=tasks)
+        emit_result(build_result(command="list", **result.model_dump()))
         return
 
     from rich.console import Console
@@ -129,7 +131,9 @@ def _list_models(task_filter: str | None = None) -> None:
     models = _load_models(task_filter)
 
     if is_json_mode():
-        emit_result(build_result(command="list", what="models", models=models))
+        from mdp.cli.schemas import ListModelsResult
+        result = ListModelsResult(models=models)
+        emit_result(build_result(command="list", **result.model_dump()))
         return
 
     from rich.console import Console
@@ -173,7 +177,9 @@ def _list_callbacks() -> None:
     names = sorted(callback_names)
 
     if is_json_mode():
-        emit_result(build_result(command="list", what="callbacks", callbacks=names))
+        from mdp.cli.schemas import ListCallbacksResult
+        result = ListCallbacksResult(callbacks=names)
+        emit_result(build_result(command="list", **result.model_dump()))
         return
 
     from rich.console import Console
@@ -202,7 +208,9 @@ _STRATEGIES = [
 
 def _list_strategies() -> None:
     if is_json_mode():
-        emit_result(build_result(command="list", what="strategies", strategies=_STRATEGIES))
+        from mdp.cli.schemas import ListStrategiesResult
+        result = ListStrategiesResult(strategies=_STRATEGIES)
+        emit_result(build_result(command="list", **result.model_dump()))
         return
 
     from rich.console import Console

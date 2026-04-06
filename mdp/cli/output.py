@@ -64,8 +64,9 @@ def build_result(
         "status": status,
         "command": command,
         "timestamp": datetime.datetime.now(tz=datetime.timezone.utc).isoformat(),
-        "error": error,
     }
+    if error is not None:
+        result["error"] = error
     result.update(kwargs)
     return result
 

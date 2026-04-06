@@ -48,12 +48,17 @@ async def _parse_request(request: Any, fields: dict, task: str) -> dict:
         form = await request.form()
         result = {}
         for role, col in (fields or {}).items():
-            if role == "image" and col in form:
-                upload = form[col]
+            if col not in form:
+                continue
+            if role == "image":
                 from PIL import Image
                 import io
+                upload = form[col]
                 image = Image.open(io.BytesIO(await upload.read())).convert("RGB")
                 result["image"] = image
+            else:
+                upload = form[col]
+                result[role] = upload if isinstance(upload, str) else (await upload.read()).decode("utf-8")
         return result
 
     body = await request.json()
@@ -77,6 +82,11 @@ def create_handler(
     transform = _load_transform(recipe)
 
     if recipe.task in ("text_generation", "seq2seq"):
+        if tokenizer is None:
+            raise ValueError(
+                f"'{recipe.task}' 태스크에는 tokenizer가 필수입니다. "
+                "model_dir에 tokenizer 파일이 있거나 recipe.data.tokenizer를 설정하세요."
+            )
         return GenerateHandler(model, tokenizer, recipe)
     else:
         return PredictHandler(model, tokenizer, transform, recipe, serving_config=serving_config)

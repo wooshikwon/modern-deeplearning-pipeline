@@ -36,7 +36,8 @@ _YAML_PAIRS = [
     ("vit-lora-cifar10.yaml", "local-single-gpu.yaml"),
     ("gpt2-finetune-text.yaml", "remote-4gpu-ddp.yaml"),
     ("yolo-detection-custom.yaml", "local-single-gpu-detection.yaml"),
-    ("clip-finetune-custom.yaml", "cloud-gcp-8gpu.yaml"),
+    ("clip-finetune-custom.yaml", "local-single-gpu.yaml"),
+    ("gpt2-finetune-text.yaml", "cloud-gcp-8gpu.yaml"),
     ("qwen25-qlora-instruct.yaml", "multi-node-2x4gpu-deepspeed.yaml"),
 ]
 
@@ -254,3 +255,84 @@ def test_vision_task_tokenizer_warning() -> None:
 
     result = BusinessValidator.validate_partial(settings, checks=["task_fields"])
     assert any("tokenizer" in w for w in result.warnings)
+
+
+# ---------------------------------------------------------------------------
+# BusinessValidator — streaming + distributed
+# ---------------------------------------------------------------------------
+
+
+def test_streaming_distributed_error() -> None:
+    """streaming=True + distributed는 비호환 에러를 발생시킨다."""
+    recipe = Recipe.model_construct(
+        name="test-streaming",
+        task="image_classification",
+        model=ModelSpec(class_path="test.Model"),
+        head=None,
+        adapter=None,
+        data=DataSpec.model_construct(
+            source="test-dataset",
+            fields={},
+            format="auto",
+            split="train",
+            streaming=True,
+        ),
+        training=TrainingSpec(epochs=1),
+        optimizer={"_component_": "torch.optim.SGD", "lr": 0.01},
+        scheduler=None,
+        loss=None,
+        evaluation=None,
+        generation=None,
+        monitoring=MonitoringSpec(),
+        callbacks=[],
+        metadata=MetadataSpec(author="test", description="test"),
+    )
+    config = Config.model_construct(
+        environment={"name": "local"},
+        compute=ComputeConfig(distributed={"strategy": "ddp"}),
+        mlflow=None,
+        storage=None,
+        serving=None,
+        job=None,
+    )
+    settings = Settings.model_construct(recipe=recipe, config=config)
+    result = BusinessValidator().validate(settings)
+    assert any("streaming" in e for e in result.errors)
+
+
+def test_streaming_non_data_parallel_ok() -> None:
+    """streaming=True + tensor parallelism(비 data parallel)은 허용된다."""
+    recipe = Recipe.model_construct(
+        name="test-streaming-tp",
+        task="text_generation",
+        model=ModelSpec(class_path="test.Model"),
+        head=None,
+        adapter=None,
+        data=DataSpec.model_construct(
+            source="test-dataset",
+            fields={},
+            format="auto",
+            split="train",
+            streaming=True,
+        ),
+        training=TrainingSpec(epochs=1),
+        optimizer={"_component_": "torch.optim.SGD", "lr": 0.01},
+        scheduler=None,
+        loss=None,
+        evaluation=None,
+        generation=None,
+        monitoring=MonitoringSpec(),
+        callbacks=[],
+        metadata=MetadataSpec(author="test", description="test"),
+    )
+    config = Config.model_construct(
+        environment={"name": "local"},
+        compute=ComputeConfig(distributed={"strategy": "tensor_parallel"}),
+        mlflow=None,
+        storage=None,
+        serving=None,
+        job=None,
+    )
+    settings = Settings.model_construct(recipe=recipe, config=config)
+    result = BusinessValidator().validate(settings)
+    assert not any("streaming" in e for e in result.errors)
