@@ -114,12 +114,9 @@ def run_inference(
     --run-id 또는 --model-dir 중 하나를 지정.
     """
     from mdp.cli.schemas import InferenceResult
-    from mdp.data import _load_source, _rename_columns
-    from mdp.data.loader import load_data
-    from mdp.data.tokenizer import build_tokenizer
-    from mdp.data.transforms import build_transforms
     from mdp.serving.inference import run_batch_inference
     from mdp.serving.model_loader import reconstruct_model
+    from mdp.settings.resolver import ComponentResolver
     from torch.utils.data import DataLoader
 
     try:
@@ -140,30 +137,36 @@ def run_inference(
         typer.echo(f"데이터: {data_source}")
 
     try:
-        # 1. 모델 소스 결정 (already resolved above)
-
-        # 2. 모델 재구성 + 가중치 로드 (adapter면 merge)
+        # 1. 모델 재구성 + 가중치 로드 (adapter면 merge)
         model, settings = reconstruct_model(
             model_path, merge=True, device_map=device_map,
         )
 
-        # 3. 데이터 로드 + 필드 검증
+        # 3. 데이터 로드 — inference는 --data CLI 인자로 별도 데이터를 받음
+        # Recipe의 DataSpec.dataset 설정에서 source만 교체하여 동일 전처리 적용
         recipe_data = settings.recipe.data
-        fields = _resolve_fields(recipe_data.fields, cli_fields)
+        resolver = ComponentResolver()
 
-        test_ds = _load_source(data_source, split="train")
-        columns = test_ds.column_names if hasattr(test_ds, "column_names") else []
-        _validate_data_interface(fields, columns)
-        test_ds = _rename_columns(test_ds, fields)
+        # inference용 dataset: Recipe dataset 설정을 복사하되 source를 CLI 인자로 교체
+        inference_ds_config = dict(recipe_data.dataset)
+        inference_ds_config["source"] = data_source
+        inference_ds_config["split"] = "train"  # inference 데이터는 단일 split
+        # CLI fields override 적용
+        if cli_fields:
+            override_fields = {}
+            for pair in cli_fields:
+                if "=" in pair:
+                    role, col = pair.split("=", 1)
+                    override_fields[role] = col
+            inference_ds_config["fields"] = override_fields
 
-        # 전처리
-        label_strategy = recipe_data.label_strategy
-        val_transform = None
-        if recipe_data.augmentation:
-            val_transform = build_transforms(recipe_data.augmentation.get("val"))
-        tokenize_fn = build_tokenizer(recipe_data.tokenizer, label_strategy=label_strategy)
-        raw_columns = list(fields.keys()) if fields else None
-        test_ds = load_data(test_ds, transform=val_transform, tokenize_fn=tokenize_fn, raw_columns=raw_columns)
+        test_ds = resolver.resolve(inference_ds_config)
+
+        # 필드 검증 (가능한 경우)
+        columns = test_ds._ds.column_names if hasattr(test_ds, "_ds") and hasattr(test_ds._ds, "column_names") else []
+        inferred_fields = inference_ds_config.get("fields")
+        if inferred_fields:
+            _validate_data_interface(inferred_fields, columns)
 
         # DataLoader
         dl_config = recipe_data.dataloader.model_dump() if recipe_data.dataloader else {}

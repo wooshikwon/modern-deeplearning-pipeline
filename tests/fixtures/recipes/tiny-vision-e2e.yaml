@@ -8,11 +8,14 @@ model:
     hidden_dim: 16
 
 data:
-  label_strategy: "unlabeled"
-  source: /tmp/fake
-  fields:
-    image: pixel_values
-    label: labels
+  dataset:
+    _component_: ImageClassificationDataset
+    source: /tmp/fake
+    fields:
+      image: pixel_values
+      label: labels
+  collator:
+    _component_: VisionCollator
   dataloader:
     batch_size: 4
     num_workers: 0

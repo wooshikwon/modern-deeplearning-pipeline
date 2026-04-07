@@ -742,15 +742,13 @@ class Trainer:
                     save_file(target.state_dict(), output_dir / "model.safetensors")
 
                 # tokenizer 저장
-                tokenizer_config = recipe.data.tokenizer
-                if tokenizer_config:
-                    pretrained = tokenizer_config.get("pretrained") if isinstance(tokenizer_config, dict) else getattr(tokenizer_config, "pretrained", None)
-                    if pretrained:
-                        try:
-                            from transformers import AutoTokenizer
-                            AutoTokenizer.from_pretrained(pretrained).save_pretrained(output_dir)
-                        except Exception as e:
-                            logger.warning(f"토크나이저 저장 실패 (무시): {e}")
+                tokenizer_name = recipe.data.collator.get("tokenizer") if isinstance(recipe.data.collator, dict) else None
+                if tokenizer_name:
+                    try:
+                        from transformers import AutoTokenizer
+                        AutoTokenizer.from_pretrained(tokenizer_name).save_pretrained(output_dir)
+                    except Exception as e:
+                        logger.warning(f"토크나이저 저장 실패 (무시): {e}")
 
                 # recipe.yaml 복사
                 recipe_src = checkpoint_dir / "recipe.yaml"
@@ -809,7 +807,7 @@ class Trainer:
                 "task": recipe.task,
                 "model_class": recipe.model.class_path,
                 "pretrained": recipe.model.pretrained or "none",
-                "dataset_source": recipe.data.source,
+                "dataset_source": recipe.data.dataset.get("source", "unknown"),
                 "batch_size": recipe.data.dataloader.batch_size,
                 "epochs": self.epochs or 0,
                 "max_steps": self.max_steps or 0,

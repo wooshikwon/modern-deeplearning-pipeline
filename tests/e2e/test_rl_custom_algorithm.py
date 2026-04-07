@@ -119,7 +119,10 @@ def test_custom_weighted_ntp_via_rl_train() -> None:
                 ),
             },
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
+        ),
         training=TrainingSpec(max_steps=5),
         metadata=MetadataSpec(author="test", description="custom weighted-ntp test"),
     )

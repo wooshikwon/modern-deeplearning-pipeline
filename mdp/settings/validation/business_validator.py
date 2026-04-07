@@ -228,13 +228,13 @@ class BusinessValidator:
     def _check_streaming_distributed(
         settings: Settings, result: ValidationResult
     ) -> None:
-        """3b. streaming + data parallelism 비호환 검증."""
-        distributed = settings.config.compute.distributed
-        if distributed is None:
-            return
-        streaming = getattr(settings.recipe.data, "streaming", False)
-        if not streaming:
-            return
+        """3b. streaming + data parallelism 비호환 검증.
+
+        _component_ 기반 DataSpec에서는 streaming이 Dataset init_args에 있으므로
+        스키마 레벨에서 감지할 수 없다. Dataset 클래스가 런타임에 처리한다.
+        """
+        # streaming 필드가 DataSpec에서 제거되었으므로 이 검증은 건너뛴다.
+        return
 
         strategy = distributed.get("strategy", "")
         strategy_name = strategy
@@ -258,78 +258,37 @@ class BusinessValidator:
     def _check_task_fields(
         settings: Settings, result: ValidationResult
     ) -> None:
-        """4. task-fields 정합성 검증.
+        """4. task 유효성 검증.
 
-        fields role 기반 양방향 검증:
-        - 정방향: text role이 있는데 tokenizer가 없으면 경고
-        - 역방향: text role이 없는데 tokenizer가 있으면 경고
+        _component_ 기반 DataSpec에서는 fields가 Dataset init_args에 있으므로
+        task-fields 양방향 검증을 수행하지 않는다. task 이름 유효성만 확인한다.
         """
-        from mdp.task_taxonomy import validate_task_fields
+        from mdp.task_taxonomy import TASK_PRESETS
 
         recipe = settings.recipe
-        data = recipe.data
-
-        errors, warnings = validate_task_fields(recipe.task, data.fields)
-        result.errors.extend(errors)
-        result.warnings.extend(warnings)
-
-        # fields role 기반 양방향 검증
-        text_roles = {"text", "target", "chosen", "rejected"}
-        has_text_field = any(role in data.fields for role in text_roles)
-        image_roles = {"image"}
-        has_image_field = any(role in data.fields for role in image_roles)
-
-        # 정방향: role이 있는데 config가 없으면 경고
-        if has_text_field and data.tokenizer is None:
+        if recipe.task not in TASK_PRESETS:
             result.warnings.append(
-                "data.fields에 text 역할이 있지만 data.tokenizer가 설정되지 않았습니다."
-            )
-        if has_image_field and data.augmentation is None:
-            result.warnings.append(
-                "data.fields에 image 역할이 있지만 data.augmentation이 설정되지 않았습니다."
-            )
-
-        # 역방향: config가 있는데 role이 없으면 경고
-        if not has_text_field and data.tokenizer is not None:
-            result.warnings.append(
-                "data.fields에 text 역할이 없어 tokenizer가 사용되지 않습니다. "
-                "data.tokenizer 설정을 제거하면 불필요한 로딩을 방지할 수 있습니다."
-            )
-        if not has_image_field and data.augmentation is not None:
-            result.warnings.append(
-                "data.fields에 image 역할이 없어 augmentation이 사용되지 않습니다. "
-                "data.augmentation 설정을 제거하면 불필요한 로딩을 방지할 수 있습니다."
+                f"알 수 없는 task '{recipe.task}'. "
+                f"등록된 task: {list(TASK_PRESETS.keys())}"
             )
 
     @staticmethod
     def _check_label_strategy_fields(
         settings: Settings, result: ValidationResult
     ) -> None:
-        """5. label_strategy-fields 정합성 검증."""
-        strategy = settings.recipe.data.label_strategy
-        fields = settings.recipe.data.fields
-        declared = set(fields.keys()) if fields else set()
+        """5. data.dataset/collator _component_ 존재 검증.
 
-        REQUIRED_FIELDS: dict[str, list[str]] = {
-            "preference": ["chosen", "rejected"],
-            "seq2seq": ["text", "target"],
-            "align": ["text", "token_labels"],
-            "copy": ["text", "label"],
-            "causal": ["text"],
-            "unlabeled": [],
-        }
-
-        required = REQUIRED_FIELDS.get(strategy)
-        if required is None:
+        label_strategy 제거 후, dataset과 collator가 _component_ 키를 갖는지만 확인한다.
+        세부 fields 검증은 Dataset/Collator 클래스의 __init__이 책임진다.
+        """
+        data = settings.recipe.data
+        if "_component_" not in data.dataset:
             result.errors.append(
-                f"알 수 없는 label_strategy: '{strategy}'. "
-                f"허용: {list(REQUIRED_FIELDS.keys())}"
+                "data.dataset에 '_component_' 키가 없습니다. "
+                "예: {_component_: HuggingFaceDataset, source: wikitext, ...}"
             )
-            return
-
-        for field in required:
-            if field not in declared:
-                result.errors.append(
-                    f"label_strategy '{strategy}'에 필요한 fields.{field}가 "
-                    f"선언되지 않았습니다."
-                )
+        if "_component_" not in data.collator:
+            result.errors.append(
+                "data.collator에 '_component_' 키가 없습니다. "
+                "예: {_component_: CausalLMCollator, tokenizer: gpt2}"
+            )

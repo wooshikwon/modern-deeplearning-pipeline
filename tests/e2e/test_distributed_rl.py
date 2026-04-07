@@ -158,7 +158,10 @@ def _dpo_worker_main(result_dir: str) -> None:
                     ),
                 },
             ),
-            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+            data=DataSpec(
+                dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+                collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+            ),
             training=TrainingSpec(max_steps=3),
             metadata=MetadataSpec(author="test", description="dpo dist test"),
         )
@@ -267,7 +270,10 @@ def _grpo_worker_main(result_dir: str) -> None:
                 },
                 generation=RLGenerationSpec(max_new_tokens=4),
             ),
-            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+            data=DataSpec(
+                dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+                collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+            ),
             training=TrainingSpec(max_steps=2),
             metadata=MetadataSpec(author="test", description="grpo dist test"),
         )

@@ -34,7 +34,10 @@ def _create_model_artifact(tmp_path: Path) -> Path:
             "class_path": "tests.e2e.models.TinyVisionModel",
             "init_args": {"num_classes": 2, "hidden_dim": 16},
         },
-        "data": {"source": "/tmp/fake", "fields": {"image": "pixel_values", "label": "labels"}},
+        "data": {
+            "dataset": {"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            "collator": {"_component_": "mdp.data.collators.ClassificationCollator", "tokenizer": "gpt2"},
+        },
         "training": {"epochs": 1},
         "optimizer": {"_component_": "AdamW", "lr": 1e-3},
         "metadata": {"author": "test", "description": "serve test"},

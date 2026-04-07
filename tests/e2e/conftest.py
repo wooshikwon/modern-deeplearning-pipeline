@@ -6,7 +6,6 @@ from mdp.settings.schema import (
     Config,
     DataSpec,
     MetadataSpec,
-    ModelSpec,
     Recipe,
     Settings,
     TrainingSpec,
@@ -33,8 +32,11 @@ def make_test_settings(
     recipe = Recipe(
         name=name,
         task=task,
-        model=ModelSpec(class_path=model_class),
-        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
+        model={"class_path": model_class},
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
+        ),
         training=TrainingSpec(
             epochs=epochs,
             max_steps=max_steps,

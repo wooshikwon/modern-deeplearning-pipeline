@@ -66,19 +66,28 @@ class DataloaderSpec(BaseModel):
 
 
 class DataSpec(BaseModel):
-    """데이터 파이프라인. source로 데이터를 지정하고, format/fields로 스키마를 맞춘다."""
+    """데이터 파이프라인. dataset과 collator를 _component_ 패턴으로 명시한다.
 
-    source: str  # HF Hub 이름, 또는 로컬 파일/디렉토리 경로
-    label_strategy: str = "unlabeled"  # "preference" | "causal" | "seq2seq" | "copy" | "align" | "unlabeled"
-    fields: dict[str, str] = Field(default_factory=dict)  # {role: column_name}
-    format: str = "auto"  # auto | csv | json | parquet | imagefolder
-    split: str | dict[str, Any] = "train"
-    subset: str | None = None
-    streaming: bool = False
-    data_files: str | dict[str, str] | None = None
-    tokenizer: dict[str, Any] | None = None
-    augmentation: dict[str, Any] | None = None
-    val_split: str | None = "auto"  # "auto" = 자동 추론, null = 비활성화, 문자열 = 직접 지정
+    기존 source/label_strategy/tokenizer/augmentation 고정 스키마를 제거하고,
+    모든 데이터 컴포넌트를 _component_ 패턴으로 통일한다.
+
+    Example::
+
+        data:
+          dataset:
+            _component_: HuggingFaceDataset
+            source: wikitext
+            split: train
+          collator:
+            _component_: CausalLMCollator
+            tokenizer: gpt2
+          dataloader:
+            batch_size: 32
+    """
+
+    dataset: dict[str, Any]                          # _component_ 필수
+    collator: dict[str, Any]                         # _component_ 필수
+    val_dataset: dict[str, Any] | None = None        # _component_, None이면 validation 비활성
     dataloader: DataloaderSpec = Field(default_factory=DataloaderSpec)
 
 

@@ -20,19 +20,28 @@ adapter:
     - embed_tokens
 
 data:
-  label_strategy: "causal"
-  source: HuggingFaceH4/ultrachat_200k
-  format: auto
-  fields:
-    text: text
-  split:
-    train: "train_sft"
-    val: "test_sft"
-  tokenizer:
-    pretrained: Qwen/Qwen2.5-7B
+  dataset:
+    _component_: HuggingFaceDataset
+    source: HuggingFaceH4/ultrachat_200k
+    split: train_sft
+    format: auto
+    fields:
+      text: text
+    tokenizer: Qwen/Qwen2.5-7B
     max_length: 2048
-    padding: max_length
-    truncation: true
+  val_dataset:
+    _component_: HuggingFaceDataset
+    source: HuggingFaceH4/ultrachat_200k
+    split: test_sft
+    format: auto
+    fields:
+      text: text
+    tokenizer: Qwen/Qwen2.5-7B
+    max_length: 2048
+  collator:
+    _component_: CausalLMCollator
+    tokenizer: Qwen/Qwen2.5-7B
+    max_length: 2048
   dataloader:
     batch_size: 2
     num_workers: 4

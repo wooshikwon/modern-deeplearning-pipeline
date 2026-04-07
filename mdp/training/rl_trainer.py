@@ -531,6 +531,14 @@ class RLTrainer:
             for name in self.frozen:
                 self.frozen[name] = self.frozen[name].to(dtype=self.amp_dtype)
 
+        # Guard: device_map 모델은 학습 불가 (trainer.py와 대칭)
+        for _name, _m in {**self.trainable, **self.frozen}.items():
+            if hasattr(_m, "hf_device_map"):
+                raise RuntimeError(
+                    f"device_map으로 분산 배치된 모델({_name})은 학습에 사용할 수 없습니다. "
+                    "device_map은 추론/서빙 전용이며, 학습에는 DDP/FSDP 전략을 사용하세요."
+                )
+
         # Strategy setup
         if self.strategy is not None:
             trainable_names = set(self.trainable.keys())

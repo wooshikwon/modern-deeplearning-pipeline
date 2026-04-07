@@ -220,7 +220,7 @@ class Factory:
     def create_dataloaders(self) -> dict:
         """train/val DataLoader를 생성한다.
 
-        DataSpec을 분해하여 create_dataloaders에 전달한다.
+        DataSpec의 dataset/collator/val_dataset을 _component_로 resolve한다.
         """
         def _create() -> dict:
             from mdp.data.dataloader import create_dataloaders
@@ -230,19 +230,11 @@ class Factory:
             distributed = self.settings.config.compute.distributed is not None
 
             return create_dataloaders(
-                source=data.source,
-                fields=data.fields or None,
-                split=data.split,
-                subset=data.subset,
-                streaming=data.streaming,
-                data_files=data.data_files,
-                fmt=data.format,
-                label_strategy=data.label_strategy,
-                aug_config=data.augmentation,
-                tokenizer_config=data.tokenizer,
-                loader_config=data.dataloader.model_dump(),
+                dataset_config=data.dataset,
+                collator_config=data.collator,
+                dataloader_config=data.dataloader.model_dump(),
+                val_dataset_config=data.val_dataset,
                 distributed=distributed,
-                val_split=data.val_split,
             )
 
         return self._get_or_create("dataloaders", _create)
@@ -272,23 +264,3 @@ class Factory:
             return models
 
         return self._get_or_create("models", _create)
-
-    # ── Phase 4: 학습 ──
-
-    def create_trainer(self) -> Any:
-        """Trainer를 생성한다."""
-        def _create() -> Any:
-            from mdp.training.trainer import Trainer
-
-            model = self.create_model()
-            loaders = self.create_dataloaders()
-            return Trainer(
-                settings=self.settings,
-                model=model,
-                train_loader=loaders["train"],
-                val_loader=loaders.get("val"),
-            )
-
-        return self._get_or_create("trainer", _create)
-
-

@@ -211,33 +211,35 @@ class TestInitWithCatalog:
 # ---------------------------------------------------------------------------
 
 
-class TestValSplit:
-    """Verify val_split schema defaults and semantics."""
+class TestValDataset:
+    """Verify val_dataset schema defaults and semantics."""
 
-    def test_val_split_auto_default(self) -> None:
-        """val_split="auto"(기본)는 기존 동작과 동일."""
+    def test_val_dataset_default_none(self) -> None:
+        """val_dataset=None(기본)이면 validation 비활성."""
         from mdp.settings.schema import DataSpec
 
-        spec = DataSpec(source="dummy", label_strategy="unlabeled")
-        assert spec.val_split == "auto"
+        spec = DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "dummy", "split": "train"},
+            collator={"_component_": "mdp.data.collators.VisionCollator"},
+        )
+        assert spec.val_dataset is None
 
-    def test_val_split_null_disables_validation(self) -> None:
-        """val_split=None이면 create_dataloaders가 val DataLoader를 생성하지 않는다."""
+    def test_val_dataset_none_no_val_loader(self) -> None:
+        """val_dataset=None이면 create_dataloaders가 val DataLoader를 생성하지 않는다."""
         from unittest.mock import patch, MagicMock
 
         from mdp.data.dataloader import create_dataloaders
 
-        # Mock _load_source to return a fake dataset
         fake_ds = MagicMock()
-        fake_ds.column_names = ["text"]
         fake_ds.__len__ = lambda self: 4
 
-        with patch("mdp.data.dataloader._load_source", return_value=fake_ds), \
-             patch("mdp.data.dataloader.load_data", return_value=fake_ds), \
-             patch("mdp.data.dataloader.build_tokenizer", return_value=None), \
-             patch("mdp.data.dataloader.build_transforms", return_value=(None, None)), \
+        with patch("mdp.settings.resolver.ComponentResolver.resolve", return_value=fake_ds), \
              patch("mdp.data.dataloader.DataLoader") as mock_loader:
             mock_loader.return_value = MagicMock()
-            result = create_dataloaders(source="dummy", label_strategy="unlabeled", val_split=None)
+            result = create_dataloaders(
+                dataset_config={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "dummy"},
+                collator_config={"_component_": "mdp.data.collators.VisionCollator"},
+                val_dataset_config=None,
+            )
 
         assert "val" not in result

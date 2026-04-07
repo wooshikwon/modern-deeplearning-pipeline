@@ -2,7 +2,7 @@ name: vit-lora-cifar10
 task: image_classification
 
 model:
-  class_path: mdp.models.vision.ViTClassifier
+  class_path: torchvision.models.resnet50
   pretrained: hf://google/vit-base-patch16-224
   init_args:
     image_size: 224
@@ -25,44 +25,38 @@ adapter:
     - v_proj
 
 data:
-  label_strategy: "unlabeled"
-  source: cifar10
-  fields:
-    image: image
-    label: label
-  split:
-    train: "train"
-    val: "test"
-  augmentation:
-    train:
-      backend: torchvision
-      steps:
-        - type: RandomResizedCrop
-          params:
-            size: 224
-            scale: [0.8, 1.0]
-        - type: RandomHorizontalFlip
-          params:
-            p: 0.5
-        - type: ToTensor
-        - type: Normalize
-          params:
-            mean: [0.485, 0.456, 0.406]
-            std: [0.229, 0.224, 0.225]
-    eval:
-      backend: torchvision
-      steps:
-        - type: Resize
-          params:
-            size: 256
-        - type: CenterCrop
-          params:
-            size: 224
-        - type: ToTensor
-        - type: Normalize
-          params:
-            mean: [0.485, 0.456, 0.406]
-            std: [0.229, 0.224, 0.225]
+  dataset:
+    _component_: ImageClassificationDataset
+    source: cifar10
+    split: train
+    fields: {image: image, label: label}
+    augmentation:
+      - type: RandomResizedCrop
+        params: {size: 224, scale: [0.8, 1.0]}
+      - type: RandomHorizontalFlip
+        params: {p: 0.5}
+      - type: ToTensor
+      - type: Normalize
+        params:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+  val_dataset:
+    _component_: ImageClassificationDataset
+    source: cifar10
+    split: test
+    fields: {image: image, label: label}
+    augmentation:
+      - type: Resize
+        params: {size: 256}
+      - type: CenterCrop
+        params: {size: 224}
+      - type: ToTensor
+      - type: Normalize
+        params:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
+  collator:
+    _component_: VisionCollator
   dataloader:
     batch_size: 64
     num_workers: 4

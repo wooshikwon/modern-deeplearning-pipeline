@@ -2,28 +2,29 @@ name: gpt2-custom-finetune
 task: text_generation
 
 model:
-  class_path: mdp.models.language.CausalLM
+  class_path: transformers.AutoModelForCausalLM
   pretrained: hf://gpt2
 
-head:
-  _component_: CausalLMHead
-  _target_attr: lm_head
-
 data:
-  label_strategy: "causal"
-  source: wikitext
-  subset: wikitext-103-v1
-  format: text
-  fields:
-    text: text
-  split:
-    train: "train"
-    val: "validation"
-  tokenizer:
-    pretrained: gpt2
+  dataset:
+    _component_: HuggingFaceDataset
+    source: wikitext
+    subset: wikitext-103-v1
+    split: train
+    fields: {text: text}
+    tokenizer: gpt2
     max_length: 1024
-    padding: max_length
-    truncation: true
+  val_dataset:
+    _component_: HuggingFaceDataset
+    source: wikitext
+    subset: wikitext-103-v1
+    split: validation
+    fields: {text: text}
+    tokenizer: gpt2
+    max_length: 1024
+  collator:
+    _component_: CausalLMCollator
+    tokenizer: gpt2
   dataloader:
     batch_size: 8
     num_workers: 4

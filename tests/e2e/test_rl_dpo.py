@@ -115,7 +115,10 @@ def test_rl_trainer_dpo() -> None:
                 ),
             },
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+        ),
         training=TrainingSpec(max_steps=3),
         metadata=MetadataSpec(author="test", description="dpo test"),
     )
@@ -153,7 +156,10 @@ def test_rl_recipe_validation() -> None:
                     "reference": RLModelSpec(class_path="x"),
                 },
             ),
-            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+            data=DataSpec(
+                dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+                collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+            ),
             training=TrainingSpec(max_steps=1),
             metadata=MetadataSpec(author="test", description="test"),
         )
@@ -207,7 +213,10 @@ def test_dpo_validation_produces_preference_accuracy() -> None:
                 ),
             },
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+        ),
         training=TrainingSpec(max_steps=4, val_check_interval=2, val_check_unit="step"),
         metadata=MetadataSpec(author="test", description="dpo val test"),
     )

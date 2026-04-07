@@ -14,16 +14,14 @@ head:
   num_classes: 20
 
 data:
-  label_strategy: "unlabeled"
-  source: /data/voc2012
-  fields:
-    image: image
-    label: label
-  split:
-    train: "train"
-    val: "val"
-  augmentation:
-    train:
+  dataset:
+    _component_: ImageClassificationDataset
+    source: /data/voc2012
+    split: train
+    fields:
+      image: image
+      label: label
+    augmentation:
       backend: torchvision
       steps:
         - type: RandomHorizontalFlip
@@ -48,7 +46,14 @@ data:
           params:
             mean: [0.485, 0.456, 0.406]
             std: [0.229, 0.224, 0.225]
-    eval:
+  val_dataset:
+    _component_: ImageClassificationDataset
+    source: /data/voc2012
+    split: val
+    fields:
+      image: image
+      label: label
+    augmentation:
       backend: torchvision
       steps:
         - type: Resize
@@ -59,6 +64,8 @@ data:
           params:
             mean: [0.485, 0.456, 0.406]
             std: [0.229, 0.224, 0.225]
+  collator:
+    _component_: VisionCollator
   dataloader:
     batch_size: 16
     num_workers: 8

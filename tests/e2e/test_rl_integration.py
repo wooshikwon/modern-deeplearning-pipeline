@@ -79,7 +79,10 @@ def _dpo_settings(max_steps=3, precision="fp32", **overrides):
                 "reference": RLModelSpec(),
             },
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+        ),
         training=TrainingSpec(max_steps=max_steps, precision=precision, **overrides),
         metadata=MetadataSpec(author="test", description="test"),
     )
@@ -101,7 +104,10 @@ def _grpo_settings(max_steps=3):
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+        ),
         training=TrainingSpec(max_steps=max_steps),
         metadata=MetadataSpec(author="test", description="test"),
     )
@@ -255,7 +261,10 @@ def test_ppo_multi_loss() -> None:
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+        ),
         training=TrainingSpec(max_steps=2),
         metadata=MetadataSpec(author="test", description="test"),
     )
@@ -282,7 +291,10 @@ def test_rl_export_serve_flow(tmp_path) -> None:
         "name": "rl-serve-test",
         "task": "text_generation",
         "model": {"class_path": "tests.e2e.test_rl_integration.TinyLM"},
-        "data": {"source": "/tmp/fake", "label_strategy": "causal"},
+        "data": {
+            "dataset": {"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            "collator": {"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
+        },
         "training": {"max_steps": 1},
         "metadata": {"author": "test", "description": "test"},
     }
@@ -315,7 +327,10 @@ def test_rl_policy_optimizer_required() -> None:
                     "reference": RLModelSpec(),
                 },
             ),
-            data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+            data=DataSpec(
+                dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+                collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+            ),
             training=TrainingSpec(max_steps=1),
             metadata=MetadataSpec(author="test", description="test"),
         )
@@ -347,7 +362,10 @@ def test_custom_algorithm_causal_data() -> None:
                 "critic": RLModelSpec(),
             },
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="preference"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+        ),
         training=TrainingSpec(max_steps=3),
         metadata=MetadataSpec(author="test", description="test"),
     )

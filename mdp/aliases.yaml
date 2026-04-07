@@ -36,3 +36,13 @@ strategy:
   DDPStrategy: mdp.training.strategies.ddp.DDPStrategy
   FSDPStrategy: mdp.training.strategies.fsdp.FSDPStrategy
   DeepSpeedStrategy: mdp.training.strategies.deepspeed.DeepSpeedStrategy
+dataset:
+  HuggingFaceDataset: mdp.data.datasets.HuggingFaceDataset
+  ImageClassificationDataset: mdp.data.datasets.ImageClassificationDataset
+collator:
+  CausalLMCollator: mdp.data.collators.CausalLMCollator
+  PreferenceCollator: mdp.data.collators.PreferenceCollator
+  Seq2SeqCollator: mdp.data.collators.Seq2SeqCollator
+  ClassificationCollator: mdp.data.collators.ClassificationCollator
+  TokenClassificationCollator: mdp.data.collators.TokenClassificationCollator
+  VisionCollator: mdp.data.collators.VisionCollator

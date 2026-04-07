@@ -118,47 +118,30 @@ def _build_recipe_from_catalog(
         head_config["num_classes"] = "???"
         recipe["head"] = head_config
 
-    # data 섹션
+    # data 섹션 — _component_ 패턴
     data: dict[str, Any] = {
-        "source": "???",
-        "label_strategy": _TASK_DEFAULT_LABEL_STRATEGY.get(task, "unlabeled"),
+        "dataset": {
+            "_component_": "mdp.data.datasets.HuggingFaceDataset",
+            "source": "???",
+            "split": "train",
+        },
     }
-    required_fields = preset.required_fields if preset else frozenset()
 
-    # fields
-    fields: dict[str, str] = {}
-    for f in sorted(required_fields):
-        fields[f] = f
-    if fields:
-        data["fields"] = fields
+    # collator 결정: task에 따라 적절한 collator 선택
+    label_strategy = _TASK_DEFAULT_LABEL_STRATEGY.get(task, "unlabeled")
+    if label_strategy == "causal":
+        collator_component = "mdp.data.collators.CausalLMCollator"
+    elif label_strategy == "seq2seq":
+        collator_component = "mdp.data.collators.Seq2SeqCollator"
+    else:
+        collator_component = "mdp.data.collators.ClassificationCollator"
 
-    # augmentation (image 필요 시)
-    if "image" in required_fields:
-        height = input_spec.get("height", 224) if isinstance(input_spec, dict) else 224
-        width = input_spec.get("width", 224) if isinstance(input_spec, dict) else 224
-        data["augmentation"] = {
-            "train": {
-                "steps": [
-                    {"type": "RandomResizedCrop", "params": {"size": [height, width]}},
-                    {"type": "RandomHorizontalFlip"},
-                    {"type": "ToDtype", "params": {"dtype": "float32", "scale": True}},
-                    {"type": "Normalize", "params": {
-                        "mean": [0.485, 0.456, 0.406],
-                        "std": [0.229, 0.224, 0.225],
-                    }},
-                ],
-            },
-        }
-
-    # tokenizer (text 필요 시)
-    if "text" in required_fields or "target" in required_fields or "token_labels" in required_fields:
-        max_length = 512
-        if isinstance(input_spec, dict):
-            max_length = input_spec.get("max_length", 512)
-        data["tokenizer"] = {
-            "pretrained": tokenizer_pretrained,
-            "max_length": max_length,
-        }
+    collator: dict[str, Any] = {"_component_": collator_component}
+    if tokenizer_pretrained:
+        collator["tokenizer"] = tokenizer_pretrained
+    else:
+        collator["tokenizer"] = "gpt2"
+    data["collator"] = collator
 
     data["dataloader"] = {"batch_size": 32, "num_workers": 4}
     recipe["data"] = data
@@ -238,21 +221,13 @@ def _default_recipe_yaml() -> str:
             num_classes: 10
 
         data:
-          source: ./data/cifar10
-          label_strategy: copy
-          fields:
-            image: image
-            label: label
-          augmentation:
-            train:
-              steps:
-                - type: RandomResizedCrop
-                  params: {size: [224, 224]}
-                - type: RandomHorizontalFlip
-                - type: ToDtype
-                  params: {dtype: float32, scale: true}
-                - type: Normalize
-                  params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+          dataset:
+            _component_: mdp.data.datasets.HuggingFaceDataset
+            source: ./data/cifar10
+            split: train
+          collator:
+            _component_: mdp.data.collators.ClassificationCollator
+            tokenizer: gpt2
           dataloader:
             batch_size: 32
             num_workers: 4

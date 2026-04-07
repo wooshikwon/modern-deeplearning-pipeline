@@ -1,8 +1,111 @@
-"""커스텀 Collator — 기본 HuggingFace collator로 처리할 수 없는 데이터 구조용."""
+"""Collator 래퍼 — _component_ 패턴으로 주입 가능한 Collator 모음.
+
+각 Collator는 ``__init__(tokenizer, max_length, ...)`` + ``__call__(batch) -> dict`` 인터페이스를 따른다.
+내부적으로 HuggingFace의 DataCollator를 래핑하거나, 커스텀 collation 로직을 구현한다.
+"""
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
+
+
+# ── CausalLM ──
+
+
+class CausalLMCollator:
+    """Causal Language Modeling용 collator.
+
+    ``DataCollatorForLanguageModeling(mlm=False)``를 래핑한다.
+    """
+
+    def __init__(self, tokenizer: str, max_length: int = 2048, **kwargs: Any) -> None:
+        from transformers import AutoTokenizer, DataCollatorForLanguageModeling
+
+        tok = AutoTokenizer.from_pretrained(tokenizer)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        self.tokenizer = tok
+        self._inner = DataCollatorForLanguageModeling(tokenizer=tok, mlm=False)
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._inner(features)
+
+
+# ── Seq2Seq ──
+
+
+class Seq2SeqCollator:
+    """Seq2Seq(encoder-decoder) 모델용 collator."""
+
+    def __init__(self, tokenizer: str, max_length: int = 2048, **kwargs: Any) -> None:
+        from transformers import AutoTokenizer, DataCollatorForSeq2Seq
+
+        tok = AutoTokenizer.from_pretrained(tokenizer)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        self.tokenizer = tok
+        self._inner = DataCollatorForSeq2Seq(tokenizer=tok)
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._inner(features)
+
+
+# ── Classification (text) ──
+
+
+class ClassificationCollator:
+    """텍스트 분류용 collator — DataCollatorWithPadding 래핑."""
+
+    def __init__(self, tokenizer: str, **kwargs: Any) -> None:
+        from transformers import AutoTokenizer, DataCollatorWithPadding
+
+        tok = AutoTokenizer.from_pretrained(tokenizer)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        self.tokenizer = tok
+        self._inner = DataCollatorWithPadding(tokenizer=tok)
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._inner(features)
+
+
+# ── Token Classification ──
+
+
+class TokenClassificationCollator:
+    """토큰 분류용 collator — DataCollatorForTokenClassification 래핑."""
+
+    def __init__(self, tokenizer: str, **kwargs: Any) -> None:
+        from transformers import AutoTokenizer, DataCollatorForTokenClassification
+
+        tok = AutoTokenizer.from_pretrained(tokenizer)
+        if tok.pad_token is None:
+            tok.pad_token = tok.eos_token
+        self.tokenizer = tok
+        self._inner = DataCollatorForTokenClassification(tokenizer=tok)
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        return self._inner(features)
+
+
+# ── Vision ──
+
+
+class VisionCollator:
+    """Vision(이미지) 데이터용 collator — torch default_collate 사용."""
+
+    def __init__(self, **kwargs: Any) -> None:
+        pass
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        from torch.utils.data.dataloader import default_collate
+        return default_collate(features)
+
+
+# ── Preference (기존) ──
 
 
 class PreferenceCollator:

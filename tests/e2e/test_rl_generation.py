@@ -81,7 +81,10 @@ def test_grpo_generation_loop() -> None:
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
+        ),
         training=TrainingSpec(max_steps=3),
         metadata=MetadataSpec(author="test", description="grpo test"),
     )
@@ -132,7 +135,10 @@ def test_ppo_generation_with_value_model() -> None:
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
-        data=DataSpec(source="/tmp/fake", label_strategy="causal"),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
+        ),
         training=TrainingSpec(max_steps=2),
         metadata=MetadataSpec(author="test", description="ppo test"),
     )

@@ -12,17 +12,17 @@ head:
   _target_attr: head
 
 data:
-  label_strategy: "unlabeled"
-  source: "gs://my-bucket/clip-data/{00000..00099}.tar"
-  streaming: true
-  fields:
-    image: image
-    text: text
-  split:
-    train: "train"
-    val: "val"
-  augmentation:
-    train:
+  dataset:
+    _component_: HuggingFaceDataset
+    source: "gs://my-bucket/clip-data/{00000..00099}.tar"
+    split: train
+    streaming: true
+    fields:
+      image: image
+      text: text
+    tokenizer: openai/clip-vit-base-patch32
+    max_length: 77
+    augmentation:
       backend: torchvision
       steps:
         - type: RandomResizedCrop
@@ -42,7 +42,17 @@ data:
           params:
             mean: [0.48145466, 0.4578275, 0.40821073]
             std: [0.26862954, 0.26130258, 0.27577711]
-    eval:
+  val_dataset:
+    _component_: HuggingFaceDataset
+    source: "gs://my-bucket/clip-data/{00000..00099}.tar"
+    split: val
+    streaming: true
+    fields:
+      image: image
+      text: text
+    tokenizer: openai/clip-vit-base-patch32
+    max_length: 77
+    augmentation:
       backend: torchvision
       steps:
         - type: Resize
@@ -56,11 +66,8 @@ data:
           params:
             mean: [0.48145466, 0.4578275, 0.40821073]
             std: [0.26862954, 0.26130258, 0.27577711]
-  tokenizer:
-    pretrained: openai/clip-vit-base-patch32
-    max_length: 77
-    padding: max_length
-    truncation: true
+  collator:
+    _component_: VisionCollator
   dataloader:
     batch_size: 256
     num_workers: 8

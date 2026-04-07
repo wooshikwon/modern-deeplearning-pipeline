@@ -63,7 +63,10 @@ def test_estimate_gradient_checkpointing_reduces_activation() -> None:
             name="est-test",
             task="image_classification",
             model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
-            data=DataSpec(source="/tmp/fake", label_strategy="causal"),
+            data=DataSpec(
+                dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+                collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
+            ),
             training=TrainingSpec(epochs=1, gradient_checkpointing=grad_ckpt),
             optimizer={"_component_": "AdamW", "lr": 1e-3},
             metadata=MetadataSpec(author="test", description="test"),
