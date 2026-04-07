@@ -2,12 +2,12 @@ name: qwen25-7b-qlora-instruct
 task: text_generation
 
 model:
-  class_path: mdp.models.language.CausalLM
+  _component_: mdp.models.language.CausalLM
   pretrained: hf://Qwen/Qwen2.5-7B
   torch_dtype: bfloat16
 
 adapter:
-  method: qlora
+  _component_: QLoRA
   r: 64
   alpha: 128
   dropout: 0.1

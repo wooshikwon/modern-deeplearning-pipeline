@@ -50,36 +50,36 @@ class Factory:
     def _build_model(self, skip_base_check: bool = False) -> nn.Module:
         recipe = self.settings.recipe
         return self._assemble_model(
-            model_spec=recipe.model,
+            model_config=recipe.model,
             head_config=recipe.head,
-            adapter_spec=recipe.adapter,
+            adapter_config=recipe.adapter,
             skip_base_check=skip_base_check,
         )
 
     def _assemble_model(
         self,
-        model_spec: Any,
+        model_config: dict[str, Any],
         head_config: dict[str, Any] | None = None,
-        adapter_spec: Any | None = None,
+        adapter_config: dict[str, Any] | None = None,
         skip_base_check: bool = False,
     ) -> nn.Module:
-        """모델 스펙으로부터 5단계 조립을 수행한다.
+        """모델 dict로부터 5단계 조립을 수행한다.
 
-        1. Pretrained 로딩 (또는 class_path 인스턴스화)
+        1. Pretrained 로딩 (또는 _component_ 인스턴스화)
         2. MoE 감지 + moe_info 모델 인스턴스 부착
         3. Head 교체 (head_config가 있을 때)
-        4. BaseModel 검증 (pretrained=None인 커스텀 모델)
-        5. Adapter 적용 (adapter_spec가 있을 때)
+        4. BaseModel 검증 (pretrained가 없는 커스텀 모델)
+        5. Adapter 적용 (adapter_config가 있을 때)
 
         QLoRA는 1+5를 한 번에 수행하는 특수 경로를 탄다.
         """
         # QLoRA 특수 경로: 양자화 + 로딩 + 어댑터가 한 번에
-        if adapter_spec is not None and adapter_spec.method == "qlora":
-            return self._build_qlora_model(model_spec, adapter_spec)
+        if adapter_config is not None and self._is_qlora_adapter(adapter_config):
+            return self._build_qlora_model(model_config, adapter_config)
 
         # 일반 경로
         # 단계 1: pretrained 로딩
-        model = self._load_pretrained(model_spec)
+        model = self._load_pretrained(model_config)
 
         # 단계 2: MoE 감지
         if self._is_moe_model(model):
@@ -99,9 +99,9 @@ class Factory:
             head = self.resolver.resolve(hc)
             self._attach_head(model, head, target_attr)
 
-        # 단계 4: BaseModel 검증 (pretrained=None인 커스텀 모델)
+        # 단계 4: BaseModel 검증 (pretrained가 없는 커스텀 모델)
         from mdp.models.base import BaseModel
-        if not skip_base_check and model_spec.pretrained is None and not isinstance(model, BaseModel):
+        if not skip_base_check and model_config.get("pretrained") is None and not isinstance(model, BaseModel):
             raise TypeError(
                 f"{model.__class__.__name__}이 BaseModel을 상속하지 않습니다. "
                 "커스텀 모델은 BaseModel을 상속하여 forward, training_step, "
@@ -109,46 +109,47 @@ class Factory:
             )
 
         # 단계 5: adapter 적용 (설정이 있을 때만, QLoRA는 위에서 처리)
-        if adapter_spec is not None and adapter_spec.method != "qlora":
-            from mdp.models.adapters import apply_adapter
-
-            adapter_config = adapter_spec.model_dump(exclude_none=True)
-            model = apply_adapter(model, adapter_config)
+        if adapter_config is not None:
+            model = self.resolver.resolve(adapter_config, model)
 
         return model
 
-    def _load_pretrained(self, model_spec: Any) -> nn.Module:
+    def _load_pretrained(self, model_config: dict[str, Any]) -> nn.Module:
         """PretrainedResolver를 통해 pretrained 모델을 로딩한다."""
         from mdp.models.pretrained import PretrainedResolver
 
-        kwargs = dict(model_spec.init_args)
+        config = dict(model_config)
+        component = config.pop("_component_", None)
+        pretrained = config.pop("pretrained", None)
+        torch_dtype_str = config.pop("torch_dtype", None)
+        attn_impl = config.pop("attn_implementation", None)
 
-        # torch_dtype 처리
-        if model_spec.torch_dtype is not None:
+        kwargs = config  # 나머지는 전부 kwargs
+
+        if torch_dtype_str is not None:
             import torch
-            kwargs["torch_dtype"] = getattr(torch, model_spec.torch_dtype)
+            kwargs["torch_dtype"] = getattr(torch, torch_dtype_str)
+        if attn_impl is not None:
+            kwargs["attn_implementation"] = attn_impl
 
-        # attn_implementation 처리
-        if model_spec.attn_implementation is not None:
-            kwargs["attn_implementation"] = model_spec.attn_implementation
-
-        if model_spec.pretrained is not None:
+        if pretrained is not None:
             return PretrainedResolver.load(
-                model_spec.pretrained,
-                class_path=model_spec.class_path,
+                pretrained,
+                class_path=component,
                 **kwargs,
             )
-        else:
-            # pretrained 없음 → class_path에서 직접 인스턴스화 (랜덤 초기화)
-            klass = self.resolver.import_class(model_spec.class_path)
+        elif component is not None:
+            klass = self.resolver.import_class(
+                self.resolver._resolve_alias(component)
+            )
             return klass(**kwargs)
+        else:
+            raise ValueError("model에 _component_ 또는 pretrained가 필요합니다")
 
-    def _build_qlora_model(self, model_spec: Any, adapter_spec: Any) -> nn.Module:
+    def _build_qlora_model(self, model_config: dict[str, Any], adapter_config: dict[str, Any]) -> nn.Module:
         """QLoRA 특수 경로: 양자화 + 로딩 + 어댑터를 한 번에 수행한다."""
-        from mdp.models.adapters import apply_adapter
-
         # pretrained URI에서 identifier 추출
-        uri = model_spec.pretrained
+        uri = model_config.get("pretrained")
         if uri is None:
             raise ValueError("QLoRA에는 pretrained 모델 URI가 필요합니다")
 
@@ -158,18 +159,29 @@ class Factory:
         else:
             model_name = uri
 
-        adapter_config = adapter_spec.model_dump(exclude_none=True)
-        adapter_config["model_name_or_path"] = model_name
-        adapter_config["class_path"] = model_spec.class_path
+        ac = dict(adapter_config)
+        # _component_ 키 제거 — apply_qlora를 직접 호출하므로
+        ac.pop("_component_", None)
+        ac["model_name_or_path"] = model_name
+        ac["class_path"] = model_config.get("_component_", "transformers.AutoModelForCausalLM")
 
         # torch_dtype, attn_implementation 전달
-        if model_spec.torch_dtype is not None:
+        torch_dtype_str = model_config.get("torch_dtype")
+        if torch_dtype_str is not None:
             import torch
-            adapter_config["torch_dtype"] = getattr(torch, model_spec.torch_dtype)
-        if model_spec.attn_implementation is not None:
-            adapter_config["attn_implementation"] = model_spec.attn_implementation
+            ac["torch_dtype"] = getattr(torch, torch_dtype_str)
+        attn_impl = model_config.get("attn_implementation")
+        if attn_impl is not None:
+            ac["attn_implementation"] = attn_impl
 
-        return apply_adapter(None, adapter_config)
+        from mdp.models.adapters.qlora import apply_qlora
+        return apply_qlora(**ac)
+
+    def _is_qlora_adapter(self, adapter_config: dict[str, Any]) -> bool:
+        """adapter 설정이 QLoRA인지 판별한다."""
+        component = adapter_config.get("_component_", "")
+        resolved = self.resolver._resolve_alias(component) if component else ""
+        return resolved == "mdp.models.adapters.qlora.apply_qlora"
 
     @staticmethod
     def _attach_head(
@@ -254,10 +266,17 @@ class Factory:
 
             models = {}
             for name, spec in recipe.rl.models.items():
+                spec = dict(spec)  # 원본 변이 방지
+                head_config = spec.pop("head", None)
+                adapter_config = spec.pop("adapter", None)
+                # optimizer, scheduler는 RLTrainer가 처리 — Factory는 모델만
+                spec.pop("optimizer", None)
+                spec.pop("scheduler", None)
+                spec.pop("freeze", None)
                 model = self._assemble_model(
-                    model_spec=spec,
-                    head_config=getattr(spec, "head", None),
-                    adapter_spec=spec.adapter,
+                    model_config=spec,
+                    head_config=head_config,
+                    adapter_config=adapter_config,
                     skip_base_check=skip_base_check,
                 )
                 models[name] = model

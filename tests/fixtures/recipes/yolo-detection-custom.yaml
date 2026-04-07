@@ -2,11 +2,10 @@ name: yolov8-custom-detection
 task: object_detection
 
 model:
-  class_path: mdp.models.vision.YOLODetector
+  _component_: mdp.models.vision.YOLODetector
   pretrained: ultralytics://yolov8n
-  init_args:
-    conf_threshold: 0.25
-    iou_threshold: 0.45
+  conf_threshold: 0.25
+  iou_threshold: 0.45
 
 head:
   _component_: DetectionHead

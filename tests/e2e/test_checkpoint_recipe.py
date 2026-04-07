@@ -14,7 +14,7 @@ def test_checkpoint_saves_recipe(tmp_path) -> None:
     ckpt = ModelCheckpoint(dirpath=tmp_path)
     model = TinyVisionModel(num_classes=2, hidden_dim=16)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
-    recipe_dict = {"name": "test-exp", "task": "image_classification", "model": {"class_path": "test"}}
+    recipe_dict = {"name": "test-exp", "task": "image_classification", "model": {"_component_": "test"}}
 
     ckpt.save_checkpoint(model, optimizer, None, 0, 100, recipe_dict=recipe_dict)
 

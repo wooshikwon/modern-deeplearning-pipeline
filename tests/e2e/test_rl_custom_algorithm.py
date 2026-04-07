@@ -14,7 +14,6 @@ from mdp.settings.schema import (
     Config,
     DataSpec,
     MetadataSpec,
-    RLModelSpec,
     RLSpec,
     Recipe,
     Settings,
@@ -109,14 +108,14 @@ def test_custom_weighted_ntp_via_rl_train() -> None:
                 "weight_scale": 2.0,
             },
             models={
-                "policy": RLModelSpec(
-                    class_path="tests.e2e.test_rl_custom_algorithm.TinyLM",
-                    optimizer={"_component_": "AdamW", "lr": 1e-3},
-                ),
-                "critic": RLModelSpec(
-                    class_path="tests.e2e.test_rl_custom_algorithm.TinyLM",
+                "policy": {
+                    "_component_": "tests.e2e.test_rl_custom_algorithm.TinyLM",
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "critic": {
+                    "_component_": "tests.e2e.test_rl_custom_algorithm.TinyLM",
                     # optimizer 없음 → frozen
-                ),
+                },
             },
         ),
         data=DataSpec(

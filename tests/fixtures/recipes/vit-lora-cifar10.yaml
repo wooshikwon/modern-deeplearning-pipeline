@@ -2,11 +2,10 @@ name: vit-lora-cifar10
 task: image_classification
 
 model:
-  class_path: torchvision.models.resnet50
+  _component_: torchvision.models.resnet50
   pretrained: hf://google/vit-base-patch16-224
-  init_args:
-    image_size: 224
-    patch_size: 16
+  image_size: 224
+  patch_size: 16
 
 head:
   _component_: ClassificationHead
@@ -16,7 +15,7 @@ head:
   dropout: 0.1
 
 adapter:
-  method: lora
+  _component_: LoRA
   r: 16
   alpha: 32
   dropout: 0.05

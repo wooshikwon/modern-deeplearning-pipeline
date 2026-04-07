@@ -17,8 +17,6 @@ from mdp.settings.schema import (
     Config,
     DataSpec,
     MetadataSpec,
-    ModelSpec,
-    RLModelSpec,
     RLSpec,
     Recipe,
     Settings,
@@ -106,13 +104,13 @@ def test_rl_trainer_dpo() -> None:
         rl=RLSpec(
             algorithm={"_component_": "DPO", "beta": 0.1},
             models={
-                "policy": RLModelSpec(
-                    class_path="tests.e2e.test_rl_dpo.TinyLM",
-                    optimizer={"_component_": "AdamW", "lr": 1e-3},
-                ),
-                "reference": RLModelSpec(
-                    class_path="tests.e2e.test_rl_dpo.TinyLM",
-                ),
+                "policy": {
+                    "_component_": "tests.e2e.test_rl_dpo.TinyLM",
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "reference": {
+                    "_component_": "tests.e2e.test_rl_dpo.TinyLM",
+                },
             },
         ),
         data=DataSpec(
@@ -153,7 +151,7 @@ def test_rl_recipe_validation() -> None:
             rl=RLSpec(
                 algorithm={"_component_": "DPO"},
                 models={
-                    "reference": RLModelSpec(class_path="x"),
+                    "reference": {"_component_": "x"},
                 },
             ),
             data=DataSpec(
@@ -204,13 +202,13 @@ def test_dpo_validation_produces_preference_accuracy() -> None:
         rl=RLSpec(
             algorithm={"_component_": "DPO", "beta": 0.1},
             models={
-                "policy": RLModelSpec(
-                    class_path="tests.e2e.test_rl_dpo.TinyLM",
-                    optimizer={"_component_": "AdamW", "lr": 1e-3},
-                ),
-                "reference": RLModelSpec(
-                    class_path="tests.e2e.test_rl_dpo.TinyLM",
-                ),
+                "policy": {
+                    "_component_": "tests.e2e.test_rl_dpo.TinyLM",
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "reference": {
+                    "_component_": "tests.e2e.test_rl_dpo.TinyLM",
+                },
             },
         ),
         data=DataSpec(

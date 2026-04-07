@@ -16,7 +16,7 @@ class ValidationResult:
 
 def is_qlora(adapter: Any) -> bool:
     """adapter가 QLoRA인지 판별한다."""
-    return adapter.method == "qlora" or (
-        adapter.quantization is not None
-        and adapter.quantization.get("bits") == 4
-    )
+    if isinstance(adapter, dict):
+        component = adapter.get("_component_", "")
+        return component in ("QLoRA", "mdp.models.adapters.qlora.apply_qlora")
+    return False

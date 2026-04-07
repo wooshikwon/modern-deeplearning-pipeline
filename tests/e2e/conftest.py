@@ -32,7 +32,7 @@ def make_test_settings(
     recipe = Recipe(
         name=name,
         task=task,
-        model={"class_path": model_class},
+        model={"_component_": model_class},
         data=DataSpec(
             dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
             collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},

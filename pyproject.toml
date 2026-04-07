@@ -42,6 +42,9 @@ all = ["mdp[vision,language,serving,cloud,remote]"]
 [project.scripts]
 mdp = "mdp.__main__:app"
 
+[tool.setuptools.packages.find]
+include = ["mdp*"]
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"

@@ -31,8 +31,9 @@ def _create_model_artifact(tmp_path: Path) -> Path:
         "name": "serve-test",
         "task": "image_classification",
         "model": {
-            "class_path": "tests.e2e.models.TinyVisionModel",
-            "init_args": {"num_classes": 2, "hidden_dim": 16},
+            "_component_": "tests.e2e.models.TinyVisionModel",
+            "num_classes": 2,
+            "hidden_dim": 16,
         },
         "data": {
             "dataset": {"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},

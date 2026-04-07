@@ -61,7 +61,7 @@ class MemoryEstimator:
         recipe = settings.recipe
 
         # 파라미터 수 추정
-        param_count = self._estimate_param_count(recipe.model.class_path)
+        param_count = self._estimate_param_count(recipe.model.get("_component_", "unknown"))
         bytes_per_param = self._bytes_per_param(recipe.training.precision)
 
         # 1. 모델 메모리

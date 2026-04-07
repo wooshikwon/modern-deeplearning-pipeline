@@ -55,14 +55,14 @@ def test_estimate_precision_affects_memory() -> None:
 def test_estimate_gradient_checkpointing_reduces_activation() -> None:
     """gradient_checkpointing이 활성화 메모리를 줄이는지."""
     from mdp.settings.schema import (
-        Config, DataSpec, MetadataSpec, ModelSpec, Recipe, Settings, TrainingSpec,
+        Config, DataSpec, MetadataSpec, Recipe, Settings, TrainingSpec,
     )
 
     def _settings(grad_ckpt: bool) -> Settings:
         recipe = Recipe(
             name="est-test",
             task="image_classification",
-            model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel"),
+            model={"_component_": "tests.e2e.models.TinyVisionModel"},
             data=DataSpec(
                 dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
                 collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},

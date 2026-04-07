@@ -9,12 +9,10 @@ import pytest
 from mdp.settings.factory import SettingsFactory
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import (
-    AdapterSpec,
     ComputeConfig,
     Config,
     DataSpec,
     MetadataSpec,
-    ModelSpec,
     MonitoringSpec,
     Recipe,
     Settings,
@@ -76,14 +74,14 @@ def test_component_resolver_alias() -> None:
 def _make_minimal_settings(
     task: str = "image_classification",
     head: dict | None = None,
-    adapter: AdapterSpec | None = None,
+    adapter: dict | None = None,
     distributed: dict | None = None,
 ) -> Settings:
     """Build a minimal Settings object for validator tests."""
     recipe = Recipe.model_construct(
         name="test",
         task=task,
-        model=ModelSpec(class_path="test.Model"),
+        model={"_component_": "test.Model"},
         head=head,
         adapter=adapter,
         data=DataSpec.model_construct(
@@ -132,7 +130,7 @@ def test_compat_validator_fsdp_qlora() -> None:
     settings = _make_minimal_settings(
         task="text_generation",
         head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
-        adapter=AdapterSpec(method="qlora", r=16, alpha=32),
+        adapter={"_component_": "QLoRA", "r": 16, "alpha": 32, "quantization": {"bits": 4}},
         distributed={"strategy": "fsdp"},
     )
     result = CompatValidator().validate(settings)
@@ -166,7 +164,7 @@ def test_compat_fsdp_variant_detected() -> None:
     settings = _make_minimal_settings(
         task="text_generation",
         head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
-        adapter=AdapterSpec(method="qlora", r=16, alpha=32),
+        adapter={"_component_": "QLoRA", "r": 16, "alpha": 32, "quantization": {"bits": 4}},
         distributed={"strategy": "fsdp_full_shard"},
     )
     result = CompatValidator().validate(settings)
@@ -179,7 +177,7 @@ def test_compat_strategy_dict_no_crash() -> None:
     settings = _make_minimal_settings(
         task="text_generation",
         head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
-        adapter=AdapterSpec(method="qlora", r=16, alpha=32),
+        adapter={"_component_": "QLoRA", "r": 16, "alpha": 32, "quantization": {"bits": 4}},
         distributed={"strategy": {"_component_": "FSDPStrategy"}},
     )
     # dict strategy should not raise — validator checks isinstance(str)
@@ -198,7 +196,7 @@ def test_validate_partial_subset() -> None:
     settings = _make_minimal_settings(
         task="image_classification",
         head={"_component_": "mdp.models.heads.causal_lm.CausalLMHead"},
-        adapter=AdapterSpec(method="lora", r=8, alpha=16),
+        adapter={"_component_": "LoRA", "r": 8, "alpha": 16},
     )
     # adapter-only check should produce no errors (lora config is valid)
     adapter_result = BusinessValidator.validate_partial(settings, checks=["adapter"])

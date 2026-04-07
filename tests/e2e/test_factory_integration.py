@@ -13,11 +13,9 @@ import torch
 
 from mdp.factory.factory import Factory
 from mdp.settings.schema import (
-    AdapterSpec,
     Config,
     DataSpec,
     MetadataSpec,
-    ModelSpec,
     Recipe,
     Settings,
     TrainingSpec,
@@ -26,12 +24,12 @@ from mdp.settings.schema import (
 
 def _make_factory_settings(
     head: dict | None = None,
-    adapter: AdapterSpec | None = None,
+    adapter: dict | None = None,
 ) -> Settings:
     recipe = Recipe(
         name="factory-test",
         task="image_classification",
-        model=ModelSpec(class_path="tests.e2e.models.TinyVisionModel", init_args={"num_classes": 2, "hidden_dim": 16}),
+        model={"_component_": "tests.e2e.models.TinyVisionModel", "num_classes": 2, "hidden_dim": 16},
         head=head,
         adapter=adapter,
         data=DataSpec(
@@ -56,10 +54,10 @@ def test_factory_model_with_head_and_lora() -> None:
             "num_classes": 5,
             "hidden_dim": 16,
         },
-        adapter=AdapterSpec(
-            method="lora", r=4, alpha=8, dropout=0.0,
-            target_modules=["classifier"],
-        ),
+        adapter={
+            "_component_": "LoRA", "r": 4, "alpha": 8, "dropout": 0.0,
+            "target_modules": ["classifier"],
+        },
     )
     factory = Factory(settings)
     model = factory.create_model()
@@ -92,25 +90,26 @@ def test_factory_model_without_head() -> None:
 
 
 def test_factory_prefix_tuning_path() -> None:
-    """prefix_tuning adapter가 factory의 일반 경로를 통과하는지 확인.
+    """PrefixTuning adapter가 factory의 resolver 경로를 통과하는지 확인.
 
     PEFT PrefixTuning은 task_type이 필수라 TinyModel에서 직접 동작하지 않을 수 있다.
-    핵심 검증: factory가 method=="prefix_tuning"일 때 apply_adapter를 호출하는지 (method=="lora" 하드코딩이 아닌지).
+    핵심 검증: factory가 _component_=="PrefixTuning"일 때 resolver.resolve를 통해
+    apply_prefix_tuning을 호출하는지.
     """
     from unittest.mock import patch
 
     settings = _make_factory_settings(
-        adapter=AdapterSpec(method="prefix_tuning", r=4),
+        adapter={"_component_": "PrefixTuning", "r": 4},
     )
     factory = Factory(settings)
 
-    with patch("mdp.models.adapters.apply_adapter") as mock_apply:
+    with patch("mdp.models.adapters.prefix_tuning.apply_prefix_tuning") as mock_apply:
         mock_apply.return_value = factory._load_pretrained(settings.recipe.model)
         factory.create_model()
 
         mock_apply.assert_called_once()
-        call_config = mock_apply.call_args[0][1]  # 두 번째 positional arg
-        assert call_config["method"] == "prefix_tuning"
+        _, call_kwargs = mock_apply.call_args
+        assert call_kwargs.get("r") == 4 or mock_apply.call_args[1].get("r") == 4
 
 
 def test_log_trainable_params_plain_module() -> None:

@@ -36,6 +36,15 @@ strategy:
   DDPStrategy: mdp.training.strategies.ddp.DDPStrategy
   FSDPStrategy: mdp.training.strategies.fsdp.FSDPStrategy
   DeepSpeedStrategy: mdp.training.strategies.deepspeed.DeepSpeedStrategy
+adapter:
+  LoRA: mdp.models.adapters.lora.apply_lora
+  QLoRA: mdp.models.adapters.qlora.apply_qlora
+  PrefixTuning: mdp.models.adapters.prefix_tuning.apply_prefix_tuning
+model:
+  AutoModelForCausalLM: transformers.AutoModelForCausalLM
+  AutoModelForSeq2SeqLM: transformers.AutoModelForSeq2SeqLM
+  AutoModelForSequenceClassification: transformers.AutoModelForSequenceClassification
+  AutoModelForTokenClassification: transformers.AutoModelForTokenClassification
 dataset:
   HuggingFaceDataset: mdp.data.datasets.HuggingFaceDataset
   ImageClassificationDataset: mdp.data.datasets.ImageClassificationDataset

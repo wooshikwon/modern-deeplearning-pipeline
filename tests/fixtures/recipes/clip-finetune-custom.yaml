@@ -2,10 +2,9 @@ name: clip-custom-finetune
 task: feature_extraction
 
 model:
-  class_path: mdp.models.multimodal.CLIPModel
+  _component_: mdp.models.multimodal.CLIPModel
   pretrained: hf://openai/clip-vit-base-patch32
-  init_args:
-    projection_dim: 512
+  projection_dim: 512
 
 head:
   _component_: DualEncoderHead

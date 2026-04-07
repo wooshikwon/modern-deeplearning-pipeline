@@ -38,8 +38,9 @@ def _create_artifact(tmp_path: Path) -> Path:
         "name": "inference-test",
         "task": "image_classification",
         "model": {
-            "class_path": "tests.e2e.models.TinyVisionModel",
-            "init_args": {"num_classes": 2, "hidden_dim": 16},
+            "_component_": "tests.e2e.models.TinyVisionModel",
+            "num_classes": 2,
+            "hidden_dim": 16,
         },
         "data": {
             "dataset": {"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
@@ -106,4 +107,4 @@ def test_settings_factory_from_artifact(tmp_path: Path) -> None:
     settings = SettingsFactory().from_artifact(str(artifact_dir))
 
     assert settings.recipe.name == "inference-test"
-    assert settings.recipe.model.class_path == "tests.e2e.models.TinyVisionModel"
+    assert settings.recipe.model["_component_"] == "tests.e2e.models.TinyVisionModel"

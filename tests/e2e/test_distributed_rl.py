@@ -99,7 +99,6 @@ def _dpo_worker_main(result_dir: str) -> None:
             Config,
             DataSpec,
             MetadataSpec,
-            RLModelSpec,
             RLSpec,
             Recipe,
             Settings,
@@ -149,13 +148,13 @@ def _dpo_worker_main(result_dir: str) -> None:
             rl=RLSpec(
                 algorithm={"_component_": "DPO", "beta": 0.1},
                 models={
-                    "policy": RLModelSpec(
-                        class_path="__main__.TinyGenLM",
-                        optimizer={"_component_": "AdamW", "lr": 1e-3},
-                    ),
-                    "reference": RLModelSpec(
-                        class_path="__main__.TinyGenLM",
-                    ),
+                    "policy": {
+                        "_component_": "__main__.TinyGenLM",
+                        "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                    },
+                    "reference": {
+                        "_component_": "__main__.TinyGenLM",
+                    },
                 },
             ),
             data=DataSpec(
@@ -211,7 +210,6 @@ def _grpo_worker_main(result_dir: str) -> None:
             DataSpec,
             MetadataSpec,
             RLGenerationSpec,
-            RLModelSpec,
             RLSpec,
             Recipe,
             Settings,
@@ -257,16 +255,16 @@ def _grpo_worker_main(result_dir: str) -> None:
             rl=RLSpec(
                 algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
                 models={
-                    "policy": RLModelSpec(
-                        class_path="__main__.TinyGenLM",
-                        optimizer={"_component_": "AdamW", "lr": 1e-3},
-                    ),
-                    "reference": RLModelSpec(
-                        class_path="__main__.TinyGenLM",
-                    ),
-                    "reward": RLModelSpec(
-                        class_path="__main__.TinyGenLM",
-                    ),
+                    "policy": {
+                        "_component_": "__main__.TinyGenLM",
+                        "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                    },
+                    "reference": {
+                        "_component_": "__main__.TinyGenLM",
+                    },
+                    "reward": {
+                        "_component_": "__main__.TinyGenLM",
+                    },
                 },
                 generation=RLGenerationSpec(max_new_tokens=4),
             ),

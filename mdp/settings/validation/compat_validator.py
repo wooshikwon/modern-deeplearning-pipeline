@@ -108,7 +108,8 @@ class CompatValidator:
         # RL per-model adapter
         if settings.recipe.rl is not None:
             for name, spec in settings.recipe.rl.models.items():
-                if spec.adapter is not None and is_qlora(spec.adapter):
+                adapter = spec.get("adapter")
+                if adapter is not None and is_qlora(adapter):
                     result.errors.append(
                         f"FSDP와 rl.models.{name}.adapter의 QLoRA(4bit)는 호환되지 않습니다. "
                         "대안: (1) LoRA 사용, (2) DDP 전략 사용, "

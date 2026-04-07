@@ -20,7 +20,6 @@ from mdp.settings.schema import (
     GenerationSpec,
     RLGenerationSpec,
     MetadataSpec,
-    RLModelSpec,
     RLSpec,
     Recipe,
     Settings,
@@ -75,8 +74,8 @@ def _dpo_settings(max_steps=3, precision="fp32", **overrides):
         rl=RLSpec(
             algorithm={"_component_": "DPO", "beta": 0.1},
             models={
-                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-                "reference": RLModelSpec(),
+                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
+                "reference": {},
             },
         ),
         data=DataSpec(
@@ -98,9 +97,9 @@ def _grpo_settings(max_steps=3):
         rl=RLSpec(
             algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
             models={
-                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-                "reference": RLModelSpec(),
-                "reward": RLModelSpec(),
+                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
+                "reference": {},
+                "reward": {},
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
@@ -254,10 +253,10 @@ def test_ppo_multi_loss() -> None:
         rl=RLSpec(
             algorithm={"_component_": "PPO", "clip_range": 0.2, "mini_epochs": 1},
             models={
-                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-                "value": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}, freeze=False),
-                "reference": RLModelSpec(),
-                "reward": RLModelSpec(),
+                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
+                "value": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}, "freeze": False},
+                "reference": {},
+                "reward": {},
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
@@ -290,7 +289,7 @@ def test_rl_export_serve_flow(tmp_path) -> None:
     recipe_dict = {
         "name": "rl-serve-test",
         "task": "text_generation",
-        "model": {"class_path": "tests.e2e.test_rl_integration.TinyLM"},
+        "model": {"_component_": "tests.e2e.test_rl_integration.TinyLM"},
         "data": {
             "dataset": {"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
             "collator": {"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
@@ -323,8 +322,8 @@ def test_rl_policy_optimizer_required() -> None:
             rl=RLSpec(
                 algorithm={"_component_": "DPO"},
                 models={
-                    "policy": RLModelSpec(),  # optimizer 없음
-                    "reference": RLModelSpec(),
+                    "policy": {},  # optimizer 없음
+                    "reference": {},
                 },
             ),
             data=DataSpec(
@@ -358,8 +357,8 @@ def test_custom_algorithm_causal_data() -> None:
                 "weight_scale": 1.0,
             },
             models={
-                "policy": RLModelSpec(optimizer={"_component_": "AdamW", "lr": 1e-3}),
-                "critic": RLModelSpec(),
+                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
+                "critic": {},
             },
         ),
         data=DataSpec(

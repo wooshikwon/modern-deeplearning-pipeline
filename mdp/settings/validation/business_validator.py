@@ -89,7 +89,7 @@ class BusinessValidator:
 
         # 1b. head 교체 + adapter 사용 시 modules_to_save 경고
         adapter = recipe.adapter
-        if adapter is not None and not adapter.modules_to_save:
+        if adapter is not None and not adapter.get("modules_to_save"):
             result.warnings.append(
                 "head와 adapter를 함께 사용하지만 modules_to_save가 "
                 "비어 있습니다. head 파라미터가 학습되지 않을 수 있습니다."
@@ -97,34 +97,39 @@ class BusinessValidator:
 
     @staticmethod
     def _validate_single_adapter(
-        adapter: Any,
+        adapter: dict[str, Any],
         result: ValidationResult,
         prefix: str,
         torch_dtype: str | None,
         has_head: bool,
     ) -> None:
         """단일 adapter 설정을 검증한다. SFT/RL 양쪽에서 공용."""
-        if adapter.method in ("lora", "qlora", "prefix_tuning") and adapter.r is None:
+        component = adapter.get("_component_", "")
+        r = adapter.get("r")
+
+        if component and r is None:
             result.errors.append(
-                f"{prefix}: method '{adapter.method}'에는 r(rank)이 필수입니다."
+                f"{prefix}: adapter '{component}'에는 r(rank)이 필수입니다."
             )
 
-        if adapter.method == "prefix_tuning":
+        if component in ("PrefixTuning", "mdp.models.adapters.prefix_tuning.apply_prefix_tuning"):
             lora_only_fields = []
-            if adapter.alpha is not None:
+            if adapter.get("alpha") is not None:
                 lora_only_fields.append("alpha")
-            if adapter.dropout != 0.0:
+            if adapter.get("dropout", 0.0) != 0.0:
                 lora_only_fields.append("dropout")
-            if adapter.target_modules and adapter.target_modules != "all_linear":
+            target_modules = adapter.get("target_modules")
+            if target_modules and target_modules != "all_linear":
                 lora_only_fields.append("target_modules")
             if lora_only_fields:
                 result.warnings.append(
-                    f"{prefix}: prefix_tuning에서 {', '.join(lora_only_fields)}는 "
+                    f"{prefix}: PrefixTuning에서 {', '.join(lora_only_fields)}는 "
                     "사용되지 않습니다."
                 )
 
         if is_qlora(adapter):
-            if adapter.quantization is None or adapter.quantization.get("bits") is None:
+            quant = adapter.get("quantization")
+            if quant is None or (isinstance(quant, dict) and quant.get("bits") is None):
                 result.errors.append(
                     f"{prefix}: QLoRA에는 quantization.bits가 필수입니다."
                 )
@@ -156,7 +161,7 @@ class BusinessValidator:
         BusinessValidator._validate_single_adapter(
             adapter, result,
             prefix="adapter",
-            torch_dtype=settings.recipe.model.torch_dtype,
+            torch_dtype=settings.recipe.model.get("torch_dtype"),
             has_head=settings.recipe.head is not None,
         )
 
@@ -174,7 +179,7 @@ class BusinessValidator:
             prefix = f"rl.models.{name}"
 
             # head-task 호환성
-            head = getattr(spec, "head", None)
+            head = spec.get("head")
             if head is not None:
                 component_path = head.get("_component_")
                 if component_path is not None:
@@ -193,18 +198,20 @@ class BusinessValidator:
                             )
 
                 # head + adapter 시 modules_to_save 경고
-                if spec.adapter is not None and not spec.adapter.modules_to_save:
+                adapter = spec.get("adapter")
+                if adapter is not None and not adapter.get("modules_to_save"):
                     result.warnings.append(
                         f"{prefix}: head와 adapter를 함께 사용하지만 modules_to_save가 "
                         "비어 있습니다. head 파라미터가 학습되지 않을 수 있습니다."
                     )
 
             # adapter 검증
-            if spec.adapter is not None:
+            adapter = spec.get("adapter")
+            if adapter is not None:
                 BusinessValidator._validate_single_adapter(
-                    spec.adapter, result,
+                    adapter, result,
                     prefix=f"{prefix}.adapter",
-                    torch_dtype=spec.torch_dtype,
+                    torch_dtype=spec.get("torch_dtype"),
                     has_head=head is not None,
                 )
 

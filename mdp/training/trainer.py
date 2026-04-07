@@ -805,8 +805,8 @@ class Trainer:
             recipe = self.settings.recipe
             params: dict[str, Any] = {
                 "task": recipe.task,
-                "model_class": recipe.model.class_path,
-                "pretrained": recipe.model.pretrained or "none",
+                "model_class": recipe.model.get("_component_", "unknown"),
+                "pretrained": recipe.model.get("pretrained", "none"),
                 "dataset_source": recipe.data.dataset.get("source", "unknown"),
                 "batch_size": recipe.data.dataloader.batch_size,
                 "epochs": self.epochs or 0,
@@ -818,9 +818,9 @@ class Trainer:
 
             # Adapter
             if recipe.adapter is not None:
-                params["adapter_method"] = recipe.adapter.method
-                if recipe.adapter.r is not None:
-                    params["adapter_r"] = recipe.adapter.r
+                params["adapter_component"] = recipe.adapter.get("_component_", "unknown")
+                if recipe.adapter.get("r") is not None:
+                    params["adapter_r"] = recipe.adapter["r"]
 
             # Strategy
             dist = self.settings.config.compute.distributed

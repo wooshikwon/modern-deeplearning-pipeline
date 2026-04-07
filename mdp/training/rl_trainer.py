@@ -75,12 +75,12 @@ class RLTrainer:
 
         for name, spec in recipe.rl.models.items():
             model = models[name]
-            if spec.optimizer is not None:
+            if spec.get("optimizer") is not None:
                 self.trainable[name] = model
-                klass, kwargs = self.resolver.resolve_partial(spec.optimizer)
+                klass, kwargs = self.resolver.resolve_partial(spec["optimizer"])
                 self.optimizers[name] = klass(model.parameters(), **kwargs)
-                if spec.scheduler is not None:
-                    sched_config = dict(spec.scheduler)
+                if spec.get("scheduler") is not None:
+                    sched_config = dict(spec["scheduler"])
                     warmup_ratio = sched_config.pop("warmup_ratio", 0.0)
                     s_klass, s_kwargs = self.resolver.resolve_partial(sched_config)
                     scheduler = s_klass(self.optimizers[name], **s_kwargs)
@@ -306,18 +306,19 @@ class RLTrainer:
             params = {
                 "task": recipe.task,
                 "algorithm": type(self.algorithm).__name__,
-                "policy_class": policy_spec.class_path,
-                "policy_pretrained": policy_spec.pretrained or "none",
-                "dataset_source": recipe.data.source,
+                "policy_class": policy_spec.get("_component_", "unknown"),
+                "policy_pretrained": policy_spec.get("pretrained", "none"),
+                "dataset_source": recipe.data.dataset.get("source", "unknown"),
                 "batch_size": recipe.data.dataloader.batch_size,
                 "max_steps": self.max_steps or 0,
                 "precision": recipe.training.precision,
                 "policy_lr": self.optimizers["policy"].param_groups[0]["lr"],
             }
-            if policy_spec.adapter is not None:
-                params["adapter_method"] = policy_spec.adapter.method
-                if policy_spec.adapter.r is not None:
-                    params["adapter_r"] = policy_spec.adapter.r
+            policy_adapter = policy_spec.get("adapter")
+            if policy_adapter is not None:
+                params["adapter_component"] = policy_adapter.get("_component_", "unknown")
+                if policy_adapter.get("r") is not None:
+                    params["adapter_r"] = policy_adapter["r"]
             mlflow.log_params(params)
         except Exception as e:
             logger.warning(f"MLflow params 로깅 실패: {e}")

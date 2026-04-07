@@ -14,37 +14,6 @@ from pydantic import BaseModel, Field, model_validator
 # ── Recipe 스키마 ──
 
 
-class ModelSpec(BaseModel):
-    """모델 명세. class_path + pretrained URI 패턴."""
-
-    class_path: str = "transformers.AutoModelForCausalLM"
-    pretrained: str | None = None
-    torch_dtype: str | None = None
-    attn_implementation: str | None = None
-    init_args: dict[str, Any] = Field(default_factory=dict)
-
-
-class RLModelSpec(ModelSpec):
-    """RL 학습용 모델 명세. ModelSpec + 모델별 optimizer/scheduler + freeze."""
-
-    head: dict[str, Any] | None = None
-    adapter: AdapterSpec | None = None
-    optimizer: dict[str, Any] | None = None  # None이면 frozen
-    scheduler: dict[str, Any] | None = None
-    freeze: bool = True  # optimizer 없으면 True 강제
-
-
-class AdapterSpec(BaseModel):
-    """어댑터 명세. method로 lora/qlora/prefix_tuning 분기."""
-
-    method: str  # "lora", "qlora", "prefix_tuning"
-    task_type: str | None = None  # PEFT TaskType (e.g. "CAUSAL_LM")
-    r: int | None = None
-    alpha: int | None = None
-    dropout: float = 0.0
-    target_modules: list[str] | str = "all_linear"
-    quantization: dict[str, Any] | None = None
-    modules_to_save: list[str] = Field(default_factory=list)
 
 
 class DataloaderSpec(BaseModel):
@@ -135,7 +104,7 @@ class RLSpec(BaseModel):
     """RL alignment 설정. None이면 SFT."""
 
     algorithm: dict[str, Any]  # _component_ 패턴 (DPO, GRPO, PPO)
-    models: dict[str, RLModelSpec]  # 역할별 모델 정의 (policy 필수)
+    models: dict[str, dict[str, Any]]  # 역할별 모델 정의 (policy 필수)
     generation: RLGenerationSpec | None = None  # GRPO/PPO 전용 응답 생성 파라미터
 
 
@@ -161,9 +130,11 @@ class Recipe(BaseModel):
     name: str
     task: str
     # SFT 필드
-    model: ModelSpec = Field(default_factory=ModelSpec)
+    model: dict[str, Any] = Field(
+        default_factory=lambda: {"_component_": "transformers.AutoModelForCausalLM"}
+    )
     head: dict[str, Any] | None = None
-    adapter: AdapterSpec | None = None
+    adapter: dict[str, Any] | None = None
     data: DataSpec
     training: TrainingSpec
     optimizer: dict[str, Any] | None = None  # SFT용 (RL은 models.*.optimizer)
@@ -189,7 +160,7 @@ class Recipe(BaseModel):
             if "policy" not in self.rl.models:
                 raise ValueError("RL 학습에는 rl.models.policy가 필수입니다")
             policy = self.rl.models["policy"]
-            if policy.optimizer is None:
+            if policy.get("optimizer") is None:
                 raise ValueError("rl.models.policy에는 optimizer가 필수입니다")
         return self
 
