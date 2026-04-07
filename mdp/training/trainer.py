@@ -24,7 +24,6 @@ from torch.utils.data import DataLoader
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
-    STRATEGY_MAP,
     backward_and_step,
     create_callbacks,
     create_expert_parallel,
@@ -822,10 +821,14 @@ class Trainer:
                 if recipe.adapter.get("r") is not None:
                     params["adapter_r"] = recipe.adapter["r"]
 
-            # Strategy
-            dist = self.settings.config.compute.distributed
-            if isinstance(dist, dict) and dist.get("strategy"):
-                params["strategy"] = dist["strategy"]
+            # Strategy — recipe.training.strategy 우선, Config fallback
+            strategy_config = recipe.training.strategy
+            if strategy_config is not None:
+                params["strategy"] = strategy_config.get("_component_", "unknown")
+            else:
+                dist = self.settings.config.compute.distributed
+                if isinstance(dist, dict) and dist.get("strategy"):
+                    params["strategy"] = dist["strategy"]
 
             mlflow.log_params(params)
         except Exception as e:

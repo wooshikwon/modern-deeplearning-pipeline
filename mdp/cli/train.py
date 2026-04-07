@@ -67,7 +67,11 @@ def _run_distributed(settings, nproc: int) -> dict:
         Path(result_path).unlink(missing_ok=True)
 
 
-def run_train(recipe_path: str, config_path: str) -> None:
+def run_train(
+    recipe_path: str,
+    config_path: str,
+    overrides: list[str] | None = None,
+) -> None:
     """Recipe + Config YAML을 조립하여 학습을 실행한다."""
     from mdp.cli.schemas import TrainResult
     from mdp.settings.factory import SettingsFactory
@@ -75,9 +79,11 @@ def run_train(recipe_path: str, config_path: str) -> None:
     if not is_json_mode():
         typer.echo(f"Recipe: {recipe_path}")
         typer.echo(f"Config: {config_path}")
+        if overrides:
+            typer.echo(f"Overrides: {overrides}")
 
     try:
-        settings = SettingsFactory().for_training(recipe_path, config_path)
+        settings = SettingsFactory().for_training(recipe_path, config_path, overrides=overrides)
     except Exception as e:
         if is_json_mode():
             emit_result(build_error(

@@ -240,26 +240,7 @@ class BusinessValidator:
         _component_ 기반 DataSpec에서는 streaming이 Dataset init_args에 있으므로
         스키마 레벨에서 감지할 수 없다. Dataset 클래스가 런타임에 처리한다.
         """
-        # streaming 필드가 DataSpec에서 제거되었으므로 이 검증은 건너뛴다.
         return
-
-        strategy = distributed.get("strategy", "")
-        strategy_name = strategy
-        if isinstance(strategy, dict):
-            strategy_name = strategy.get("_component_", "")
-        strategy_lower = strategy_name.lower() if isinstance(strategy_name, str) else ""
-
-        # data parallelism 전략만 DistributedSampler를 사용하므로 비호환
-        data_parallel = any(
-            strategy_lower.startswith(prefix)
-            for prefix in ("ddp", "fsdp", "deepspeed")
-        )
-        if data_parallel:
-            result.errors.append(
-                f"streaming=true와 데이터 병렬 전략('{strategy_name}')은 호환되지 않습니다. "
-                "DistributedSampler는 IterableDataset의 __len__을 요구합니다. "
-                "대안: streaming=false로 전환하거나 데이터를 로컬에 캐시하세요."
-            )
 
     @staticmethod
     def _check_task_fields(

@@ -58,6 +58,18 @@ class InferenceResult(BaseModel):
     evaluation_metrics: dict[str, Any] | None = None
 
 
+# ── mdp generate ──
+
+
+class GenerateResult(BaseModel):
+    """mdp generate --format json 출력 스키마."""
+
+    output_path: str | None = None
+    num_prompts: int | None = None
+    num_generated: int | None = None
+    num_samples: int | None = None
+
+
 # ── mdp serve ──
 
 

@@ -19,13 +19,28 @@ ENV_PATTERN = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
 class SettingsFactory:
     """YAML 파일 경로를 받아 Settings 객체를 조립한다."""
 
-    def for_training(self, recipe_path: str, config_path: str) -> Settings:
-        """학습용 Settings를 조립한다."""
+    def for_training(
+        self,
+        recipe_path: str,
+        config_path: str,
+        overrides: list[str] | None = None,
+    ) -> Settings:
+        """학습용 Settings를 조립한다.
+
+        Args:
+            overrides: dotted key=value 오버라이드. recipe가 기본 네임스페이스.
+                       ``config.`` 접두사로 Config 필드를 오버라이드할 수 있다.
+        """
         recipe_dict = self._load_yaml(recipe_path)
         config_dict = self._load_yaml(config_path)
 
         recipe_dict = self._substitute_env_vars(recipe_dict)
         config_dict = self._substitute_env_vars(config_dict)
+
+        if overrides:
+            recipe_dict, config_dict = self._split_and_apply_overrides(
+                recipe_dict, config_dict, overrides,
+            )
 
         recipe = Recipe(**recipe_dict)
         config = Config(**config_dict)
@@ -58,7 +73,11 @@ class SettingsFactory:
         self._validate_recipe(settings)
         return settings
 
-    def from_artifact(self, artifact_dir: str) -> Settings:
+    def from_artifact(
+        self,
+        artifact_dir: str,
+        overrides: list[str] | None = None,
+    ) -> Settings:
         """artifact 디렉토리의 recipe.yaml에서 Settings를 조립한다.
 
         model/ artifact와 checkpoint/ artifact 모두 사용 가능.
@@ -75,11 +94,43 @@ class SettingsFactory:
         recipe_dict = self._load_yaml(str(recipe_path))
         recipe_dict = self._substitute_env_vars(recipe_dict)
 
+        config_dict: dict[str, Any] = {}
+        if overrides:
+            recipe_dict, config_dict = self._split_and_apply_overrides(
+                recipe_dict, config_dict, overrides,
+            )
+
         recipe = Recipe(**recipe_dict)
-        config = Config()
+        config = Config(**config_dict) if config_dict else Config()
         settings = Settings(recipe=recipe, config=config)
         self._validate_recipe(settings)
         return settings
+
+    @staticmethod
+    def _split_and_apply_overrides(
+        recipe_dict: dict[str, Any],
+        config_dict: dict[str, Any],
+        overrides: list[str],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """overrides를 recipe/config로 분리하여 적용한다.
+
+        recipe가 기본 네임스페이스. ``config.`` 접두사로 Config 필드를 오버라이드.
+        """
+        from mdp.cli._override import apply_overrides
+
+        recipe_ovr: list[str] = []
+        config_ovr: list[str] = []
+        for o in overrides:
+            key = o.partition("=")[0]
+            if key.startswith("config."):
+                config_ovr.append(o[len("config."):])
+            else:
+                recipe_ovr.append(o)
+        if recipe_ovr:
+            apply_overrides(recipe_dict, recipe_ovr)
+        if config_ovr:
+            apply_overrides(config_dict, config_ovr)
+        return recipe_dict, config_dict
 
     @staticmethod
     def _load_yaml(path: str) -> dict:

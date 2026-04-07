@@ -89,6 +89,7 @@ def reconstruct_model(
     merge: bool = False,
     device_map: str | None = None,
     max_memory: dict[str, str] | None = None,
+    overrides: list[str] | None = None,
 ) -> tuple[Any, Any]:
     """artifact 디렉토리의 recipe.yaml로 모델을 재구성하고 가중치를 로드한다.
 
@@ -100,6 +101,7 @@ def reconstruct_model(
         merge: True이면 adapter를 base model에 merge한다 (export/serve용).
         device_map: "auto", "balanced", "sequential" 등. 지정 시 accelerate로 분산 배치.
         max_memory: GPU별 최대 메모리. {"0": "24GiB", "1": "40GiB"}.
+        overrides: Recipe/Config 오버라이드 (dotted KEY=VALUE).
 
     Returns:
         (model, settings) 튜플.
@@ -107,7 +109,7 @@ def reconstruct_model(
     from mdp.factory.factory import Factory
     from mdp.settings.factory import SettingsFactory
 
-    settings = SettingsFactory().from_artifact(str(artifact_dir))
+    settings = SettingsFactory().from_artifact(str(artifact_dir), overrides=overrides)
     model = Factory(settings).create_model(skip_base_check=True)
 
     # adapter_config.json이 있으면 PEFT adapter artifact

@@ -72,6 +72,7 @@ class TrainingSpec(BaseModel):
     val_check_interval: float = 1.0
     val_check_unit: Literal["epoch", "step"] = "epoch"
     compile: str | bool = False
+    strategy: dict[str, Any] | None = None  # _component_ dict (auto, DDPStrategy, ...)
 
 
 class MonitoringSpec(BaseModel):

@@ -319,6 +319,14 @@ class RLTrainer:
                 params["adapter_component"] = policy_adapter.get("_component_", "unknown")
                 if policy_adapter.get("r") is not None:
                     params["adapter_r"] = policy_adapter["r"]
+            # Strategy — recipe.training.strategy 우선, Config fallback
+            strategy_config = recipe.training.strategy
+            if strategy_config is not None:
+                params["strategy"] = strategy_config.get("_component_", "unknown")
+            else:
+                dist = self.settings.config.compute.distributed
+                if isinstance(dist, dict) and dist.get("strategy"):
+                    params["strategy"] = dist["strategy"]
             mlflow.log_params(params)
         except Exception as e:
             logger.warning(f"MLflow params 로깅 실패: {e}")
@@ -363,17 +371,15 @@ class RLTrainer:
                     from safetensors.torch import save_file
                     save_file(target.state_dict(), output_dir / "model.safetensors")
 
-                # tokenizer
+                # tokenizer — collator _component_의 init_args에서 추출
                 recipe = self.settings.recipe
-                tokenizer_config = recipe.data.tokenizer
-                if tokenizer_config:
-                    pretrained = tokenizer_config.get("pretrained") if isinstance(tokenizer_config, dict) else getattr(tokenizer_config, "pretrained", None)
-                    if pretrained:
-                        try:
-                            from transformers import AutoTokenizer
-                            AutoTokenizer.from_pretrained(pretrained).save_pretrained(output_dir)
-                        except Exception:
-                            pass
+                tokenizer_name = recipe.data.collator.get("tokenizer") if isinstance(recipe.data.collator, dict) else None
+                if tokenizer_name:
+                    try:
+                        from transformers import AutoTokenizer
+                        AutoTokenizer.from_pretrained(tokenizer_name).save_pretrained(output_dir)
+                    except Exception:
+                        pass
 
                 # recipe.yaml
                 import yaml

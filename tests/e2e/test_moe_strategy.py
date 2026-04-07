@@ -41,21 +41,18 @@ class TestRLTrainerKwargs:
 
         resolver = ComponentResolver()
 
-        # RL Trainer의 _create_strategy 로직을 직접 재현
+        # aliases.yaml의 strategy 단축 이름으로 resolve
         dist_config = {
             "strategy": "fsdp",
             "sharding_strategy": "HYBRID_SHARD",
             "mixed_precision": False,
             "backend": "gloo",
         }
-        from mdp.training.trainer import STRATEGY_MAP
-
         strategy_name = dist_config["strategy"]
-        class_path = STRATEGY_MAP[strategy_name]
         strategy_kwargs = {
             k: v for k, v in dist_config.items() if k != "strategy"
         }
-        strategy = resolver.resolve({"_component_": class_path, **strategy_kwargs})
+        strategy = resolver.resolve({"_component_": strategy_name, **strategy_kwargs})
 
         assert strategy.sharding_strategy_name == "HYBRID_SHARD"
         assert strategy.mixed_precision is False
@@ -721,11 +718,12 @@ class TestExpertParallelRegistration:
 
         assert ExpertParallel is not None
 
-    def test_strategy_map_does_not_have_moe(self) -> None:
-        """EP는 전략이 아니므로 STRATEGY_MAP에 없어야 한다."""
-        from mdp.training.trainer import STRATEGY_MAP
+    def test_strategy_aliases_do_not_have_moe(self) -> None:
+        """EP는 전략이 아니므로 aliases.yaml의 strategy 섹션에 없어야 한다."""
+        from mdp.settings.resolver import ComponentResolver
 
-        assert "moe" not in STRATEGY_MAP
+        resolver = ComponentResolver()
+        assert resolver._aliases.get("moe") is None
 
     def test_trainer_creates_expert_parallel_from_config(self) -> None:
         """distributed.moe config가 있으면 create_expert_parallel이 ExpertParallel을 생성한다."""

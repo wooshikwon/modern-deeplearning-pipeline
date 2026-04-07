@@ -108,6 +108,7 @@ def run_inference(
     output_format: str = "parquet",
     output_dir: str = "./output",
     device_map: str | None = None,
+    overrides: list[str] | None = None,
 ) -> None:
     """배치 추론 + (선택) 평가.
 
@@ -140,6 +141,7 @@ def run_inference(
         # 1. 모델 재구성 + 가중치 로드 (adapter면 merge)
         model, settings = reconstruct_model(
             model_path, merge=True, device_map=device_map,
+            overrides=overrides,
         )
 
         # 3. 데이터 로드 — inference는 --data CLI 인자로 별도 데이터를 받음

@@ -36,6 +36,15 @@ strategy:
   DDPStrategy: mdp.training.strategies.ddp.DDPStrategy
   FSDPStrategy: mdp.training.strategies.fsdp.FSDPStrategy
   DeepSpeedStrategy: mdp.training.strategies.deepspeed.DeepSpeedStrategy
+  DeepSpeedZeRO2: mdp.training.strategies.deepspeed.DeepSpeedStrategy
+  DeepSpeedZeRO3: mdp.training.strategies.deepspeed.DeepSpeedStrategy
+  auto: mdp.training._common.auto_strategy
+  # backward compat — Config.compute.distributed.strategy 단축 이름
+  ddp: mdp.training.strategies.ddp.DDPStrategy
+  fsdp: mdp.training.strategies.fsdp.FSDPStrategy
+  deepspeed: mdp.training.strategies.deepspeed.DeepSpeedStrategy
+  deepspeed_zero2: mdp.training.strategies.deepspeed.DeepSpeedStrategy
+  deepspeed_zero3: mdp.training.strategies.deepspeed.DeepSpeedStrategy
 adapter:
   LoRA: mdp.models.adapters.lora.apply_lora
   QLoRA: mdp.models.adapters.qlora.apply_qlora

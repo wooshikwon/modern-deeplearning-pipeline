@@ -1,118 +1,25 @@
 ## 현재 상태
-- phase: audit
-- cycle: 8
+- phase: code
+- stage: S7 / S8
+- cycle: —
 - codebase: ~/projects/modern-deeplearning-pipeline
+- refactor: [[personal/projects/modern-deeplearning-pipeline/docs/refactor-component-unification]]
 
 ## 산출물
 - spec: [[personal/projects/modern-deeplearning-pipeline/_draft]], [[personal/projects/modern-deeplearning-pipeline/docs/spec-architecture|spec-architecture]] ~ [[personal/projects/modern-deeplearning-pipeline/docs/spec-rl|spec-rl]]
-- audit-1: [[personal/projects/modern-deeplearning-pipeline/plans/audit-2026-04-02]] (문서우선: 8, 구현우선: 3, 논의: 7, coding위반: 12)
-- audit-2: [[personal/projects/modern-deeplearning-pipeline/plans/audit-2026-04-03]] (문서우선: 6, 구현우선: 10, 논의: 10, coding위반: 20)
-- friction-1: [[personal/projects/modern-deeplearning-pipeline/plans/friction-2026-04-03]] (5건, 전수 구현 완료)
-- audit-3: [[personal/projects/modern-deeplearning-pipeline/plans/audit-2026-04-03-c3]] (문서우선: 5, 구현우선: 4, 논의: 6, coding위반: 13)
-- audit-4: [[personal/projects/modern-deeplearning-pipeline/plans/audit-2026-04-03-c4]] (문서우선: 5, 구현우선: 2, 논의: 4, coding위반: 4)
-- audit-5: [[personal/projects/modern-deeplearning-pipeline/plans/audit-2026-04-03-c5]] (문서우선: 8, 구현우선: 2, 논의: 4, coding위반: 11)
-- audit-6: [[personal/projects/modern-deeplearning-pipeline/plans/audit-2026-04-03-c6]] (문서우선: 7, 구현우선: 4, 논의: 3, coding위반: 8)
-- audit-7: [[personal/projects/modern-deeplearning-pipeline/plans/audit-2026-04-03-c7]] (문서우선: 7, 구현우선: 4, 논의: 3, coding위반: 6)
+- refactor: [[personal/projects/modern-deeplearning-pipeline/docs/refactor-component-unification]]
+- code-S1: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-07|code-2026-04-07 (S1)]] (DataSpec + Dataset/Collator wrapper + create_dataloaders) — git: ff487f3
+- code-S2+S3: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-07|code-2026-04-07 (S2+S3)]] (ModelSpec/AdapterSpec → dict + adapter routing) — git: 0be9e0a
+- code-S4: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08|code-2026-04-08 (S4)]] (TrainingSpec.strategy + AutoStrategy) — git: 0be9e0a
+- code-S5: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08-S5|code-2026-04-08-S5]] (코드 변경 없음 — S1~S4에서 완료)
+- code-S6: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08-S6|code-2026-04-08-S6]] (generate + --override, 194 passed)
 
 ## 이력
-- 2026-03-31: spec 시작 — _draft.md + drafts/01-08 설계 문서 작성
-- 2026-04-01: coding 진입 — 전체 구현
-- 2026-04-02: audit 진입 (cycle 1) — 24건 발견, 전수 수정
-- 2026-04-03: audit 진입 (cycle 2) — 46건 발견
-- 2026-04-03: audit-review 완료 — discussion items 판단, friction 5건 식별
-- 2026-04-03: coding-fix 완료 — audit-2 수정 + friction 5건 전수 구현
-- 2026-04-03: doc-refine 완료 → audit 진입 (cycle 3)
-  - 문서 정제: spec-training 분리(spec-training + spec-rl 신규), _draft 압축(72→38줄), 전 문서 cross-reference 수정, friction 반영, 태그 정리
-  - 마찰 분석: 신규 마찰 없음 — 5건 friction 전수 반영 확인
-- 2026-04-03: audit 완료 (cycle 3) — 28건 (문서우선 5, 구현우선 4, 논의 6, coding위반 13)
-- 2026-04-03: audit-review 완료 — 논의 6건 전수 확정 (협업 설계 세션)
-  - 3-1: GenerateHandler/PredictHandler 구조 재설계
-  - 3-2: backward_and_step 반환값 SFT 통일
-  - 3-3: fields 기반 tokenizer/augmentation 검증 (VISION_TASKS 삭제)
-  - 3-4: RLGenerationSpec 도입 (group_size 분리)
-  - 3-5: 콜백 step=global_step 통일
-  - 3-6: BaseModel isinstance 강제 (커스텀 모델)
-- 2026-04-03: coding-fix 완료 → doc-refine 진입 대기
-  - 28건 전수 수정 (21파일). 스키마 직렬 → 서빙/RL/CLI 병렬 3에이전트
-  - 감사 리포트 검증 절차 신규 도입 (오탐 0건 확인 후 수정)
-  - dev-cycle, doc-code-audit 스킬 프로토콜 개선 (협업 설계 세션, 검증 단계)
-- 2026-04-03: doc-refine 완료 → audit 진입 (cycle 4)
-  - 문서 검증: 2건 수정 (핸들러 이름 잔여, _fire kwargs 테이블)
-  - deep-explain 점검: 위반 없음
-  - 마찰 분석: 신규 마찰 없음
-  - 프로토콜 개선: coding-fix→doc-refine 자동 연속 실행, coding-fix는 코드만 수정, plans/ 분리
-- 2026-04-03: audit 완료 (cycle 4) — 15건 (문서우선 5, 구현우선 2, 논의 4, coding위반 4)
-  - Cycle 3 수정 28건 전수 확인
-  - 핵심: RL offline gradient accumulation 순환 의존 버그, on_validation_end epoch 누락 TypeError, BaseModel isinstance 시점 오류
-- 2026-04-03: audit-review 완료 → coding-fix 진입
-  - (1) 5건 확정: grad_accum raw counter, epoch/step 체계 SFT-RL 통일(float epoch, RLTrainer epoch 지원), isinstance 시점 이동, recipe_dict 추가, Seq2SeqLMHead alias 검증
-  - (2) 2건 확정: check_rl_consistency stage-1 문서화, label_strategy 필수 필드 전환(fields 자동 파생 삭제, BusinessValidator 정합성 검증)
-  - (3) 4건 확정: NaN 반환 추적, on_batch_start 추가, align collator 변경, GenerateHandler 단일 동시성 문서화
-  - (4) 4건 확정: list_cmd JSON 에러, 중복 추출 안 함, rl_train try/finally, _make_response_mask device
-  - 스킬 개선: doc-code-audit 및 dev-cycle audit-review 프로토콜 — 모든 항목을 deep-explain으로 설명+승인하는 방식으로 변경
-- 2026-04-03: coding-fix 완료 → doc-refine 진입
-  - 15건 전수 수정 (코드 13건 + 문서전용 2건은 doc-refine 이관). 21개 소스파일 + 14개 테스트파일 수정
-  - 주요 변경: RLTrainer raw batch counter (순환 의존 해소), epoch/step SFT-RL 통일 (float epoch, 콜백 패리티), label_strategy 필수 필드 전환 (derive_label_strategy 삭제, BusinessValidator 검증), isinstance adapter 전 이동, align DataCollatorForTokenClassification, _make_response_mask GPU 직접 생성
-  - 부수 수정: Factory.create_model skip_base_check (artifact reconstruct 호환), Trainer 소수 epoch batch budget + resume 반영, sampler getattr 방어
-- 2026-04-03: doc-refine 완료 → audit 진입 (cycle 5)
-  - 문서 정제: 7개 문서 갱신 (spec-data, spec-rl, spec-training, spec-foundation, spec-model, spec-schema, spec-infra, spec-architecture)
-  - 핵심 반영: label_strategy 명시적 필드 전환 (전 문서), RLTrainer epoch/콜백 패리티 (spec-rl, spec-architecture), float epochs (spec-training, spec-foundation), BusinessValidator 5규칙 (spec-foundation), align collator (spec-data), GenerateHandler 단일 동시성 (spec-infra)
-  - deep-explain 점검: 위반 없음
-  - 마찰 분석: 신규 마찰 없음
-- 2026-04-03: audit 완료 (cycle 5) — 25건 (문서우선 8, 구현우선 2, 논의 4, coding위반 11)
-  - Cycle 4 수정 15건 전수 확인
-  - 핵심: RL trainer_state epoch_counter 누락, SFT checkpoint step_in_epoch 버그, val_check_unit Literal 미적용, align tokenize_fn token_labels 누락, train/rl_train 중복
-- 2026-04-03: audit-review 완료 → coding-fix 진입
-  - TrainerState 리팩토링 결정: 1-1~1-4, 3-1, 4-4를 TrainerState dataclass 도입으로 통합 해소
-  - 3-2: ppo_epochs→mini_epochs, 3-3: 현재 유지, 3-4: GenerateHandler Semaphore(1)
-  - 4-1/4-2: 중복 유지 (자체 완결성 우선), 4-3: run_training 호출 통일
-  - 4-8: frozen 모델 동일 dtype 캐스팅 (업계 관행 반영)
-  - 1-7: 문서만 갱신 (serving_meta → recipe.yaml이 겸함)
-- 2026-04-03: coding-fix 완료 → doc-refine 진입
-  - 25건 중 코드 수정 19건 + 문서전용 2건(1-7, 2-1)은 doc-refine 이관 + 변경없음 4건(3-3, 4-1, 4-2)
-  - TrainerState dataclass 도입 후 되돌림 — 과잉 리팩토링 판단. 6개 버그를 각각 1~2줄 타겟 픽스로 교체
-  - 핵심 변경: 1-1 RL checkpoint에 epoch_counter 추가, 1-2/1-3 on_batch_end에 global_step/epoch 전달, 1-4 step_in_epoch kwarg 전달, create_callbacks 공통화, mini_epochs 리네이밍, GenerateHandler Semaphore, frozen 모델 dtype 캐스팅
-  - 161 tests passed (분산/MoE/서빙 환경 테스트 제외)
-- 2026-04-03: doc-refine 완료 → audit 진입 (cycle 6)
-  - 문서 갱신: 4개 문서 (spec-infra, spec-training, spec-rl, spec-foundation)
-  - 핵심 반영: export serving_meta→recipe.yaml 통합 (1-7), backward_and_step scheduler step 내재화 (2-1), on_batch_end kwargs 정확화 (step_in_epoch SFT 전용), RL 콜백 패리티/frozen dtype/mini_epochs (spec-rl), create_callbacks _common.py 이동 (spec-foundation), JSON error 필드 조건부 포함
-  - deep-explain 점검: 위반 없음
-  - 마찰 분석: 신규 마찰 없음
-- 2026-04-03: audit 완료 (cycle 6) — 22건 (문서우선 7, 구현우선 4, 논의 3, coding위반 8)
-  - Cycle 5 수정 25건 전수 확인
-  - 핵심: Loss fallback 우선순위 반전, RL epochs or→min 버그, RLTrainer MPS fp16 누락, FSDP save_checkpoint unwrap 버그, prefix_tuning r KeyError
-- 2026-04-03: audit-review 완료 → coding-fix 진입
-  - (1) 7건 확정: loss fallback 순서, RL epochs or→min, MPS fp16 GradScaler, resume set_epoch, prefix_tuning r KeyError, prefix_tuning 기본값 경고, Factory 독스트링 5단계
-  - (2) 4건 확정: pretrained BaseModel 가드 문서화, version 서브커맨드 문서화, RL TrainResult algorithm 문서화, epoch-level scheduler 문서화
-  - (3) 3건: 3-1 RL 모델 조립 통합 리팩토링(상세 계획 별도), 3-2 GenerateHandler 재구성(상세 계획 별도, 4-6 통합), 3-3 frozen dtype 현행 유지+spec 명시
-  - (4) 8건 확정: FSDP unwrap 버그, _get_or_create None 캐싱, train/rl_train 3중 복제, MLflow 중복, CLI schema dead code, thread.join(3-2 통합), multimodal transform 리스트, streaming 컬럼 누수
-- 2026-04-03: coding-fix 완료 → doc-refine 진입
-  - 22건 중 코드수정 14건 + 변경없음 3건(3-3, 4-3, 4-4 자체완결성) + doc-refine 이관 5건(1-1 카테고리변경, 2-1~2-4, 3-3 spec명시)
-  - 주요 변경: _assemble_model 추출(SFT/RL 5단계 통합), GenerateHandler 라이프사이클 재구성(semaphore+thread+generator 통합), RLModelSpec head 추가+BusinessValidator RL검증, FSDP unwrap 수정, streaming raw_columns 방식 전환
-  - 161 tests passed (분산/MoE/서빙 환경 테스트 제외)
-  - dev-cycle 스킬 개선: audit-review 승인 즉시 audit 문서 반영 강제 (태그 3종: [확정]/[변경없음]/[카테고리 변경])
-- 2026-04-03: doc-refine 완료 → audit 진입 (cycle 7)
-  - 문서 갱신: 6개 문서 (spec-training, spec-model, spec-infra, spec-rl, spec-schema, spec-data)
-  - 핵심 반영: epoch-level scheduler 외부 호출(spec-training), pretrained BaseModel 가드+RL 5단계 통합(spec-model), version 서브커맨드+GenerateHandler 재구성(spec-infra), frozen dtype strategy전 캐스팅+RLModelSpec head(spec-rl), RL per-model 검증(spec-schema), Recipe fields 기반 컬럼 제거+transform batched(spec-data)
-  - deep-explain 점검: 위반 없음
-  - 마찰 분석: 신규 마찰 없음
-- 2026-04-03: audit 완료 (cycle 7) — 20건 (문서우선 7, 구현우선 4, 논의 3, coding위반 6)
-  - Cycle 6 수정 22건 전수 확인
-  - 핵심: mini-epoch NaN no break, DualEncoderHead param 불일치, validation fallback training_step 누락, create_models skip_base_check 미지원, TrainResult run_id 누락, 전략 추천 threshold, task_fields role 기반 전환
-- 2026-04-03: audit-review 완료 → coding-fix 진입
-  - (1) 7건 확정: NaN break, DualEncoderHead hidden_dim→projection_dim, validate_fallback 우선순위 통일(loss_fn 1순위), create_models skip_base_check, TrainResult run_id, threshold <=, task_fields role 기반 전환(TASK_PRESETS required_config 제거)
-  - (2) 4건 확정: EP before strategy(doc-refine), scheduler caller 책임(doc-refine), algorithm __call__→compute_loss(카테고리1 변경), BusinessValidator 6규칙(doc-refine)
-  - (3) 3건 확정: label_strategy 기본값 제거+"none"→"unlabeled", generation path grad_accum_steps=1 강제, SFT 에폭 마지막 force_step+on_batch_end
-  - (4) 6건 확정: QLoRA+head BusinessValidator 차단, dot-path transform ComponentResolver.import_class, tokenizer docstring padding 제거, checkpoint epoch+1→epoch 통일, weighted-NTP docstring 제거, _forward_model preference path 제거(순수 causal 단순화)
-  - 교차 정합성 검증: 모순 0건
-- 2026-04-03: coding-fix 완료 → doc-refine 진입
-  - 20건 중 코드수정 17건 + doc-refine 이관 3건(2-1 EP순서, 2-2 scheduler caller, 2-4 BusinessValidator 6규칙)
-  - 주요 변경: NaN mini-epoch break, DualEncoderHead catalog 3개 수정, validate_fallback loss_fn 1순위, create_models skip_base_check, TrainResult run_id(SFT+RL), threshold <=, task_fields role 기반 양방향 검증(required_config 삭제), algorithm compute_loss 리네이밍, label_strategy "none"→"unlabeled"(기본값 유지: checkpoint 호환), generation path grad_accum=1 강제, SFT 에폭 잔여 gradient force_step, QLoRA+head BusinessValidator 차단, dot-path transform import, tokenizer docstring padding 제거, checkpoint epoch 통일+resume 로직 수정, weighted-NTP docstring 제거, _forward_model preference path 제거+_forward_preference 추출
-  - 전수검증: 3-3 에폭 마지막 force_step에서 이미 backward된 loss 재참조(gradient 중복 누적) 버그 발견 → optimizer step 직접 실행으로 수정, RL per-model QLoRA+head 검증 누락 → _check_rl_models에 추가
-  - 158 tests passed (분산/MoE/서빙 환경 테스트 제외)
-- 2026-04-03: doc-refine 완료 → audit 진입 (cycle 8)
-  - 문서 갱신: 7개 문서 (spec-training, spec-foundation, spec-rl, spec-schema, spec-infra, spec-data, spec-model) + spec-architecture
-  - doc-refine 이관 3건 반영: EP 순서(spec-training), scheduler caller 책임(spec-training), BusinessValidator 6규칙(spec-foundation)
-  - 핵심 반영: validate_fallback loss_fn 1순위 통일(spec-training), 에폭 잔여 gradient flush(spec-training), checkpoint epoch "저장 시점" 통일(spec-training), algorithm compute_loss() 인터페이스(spec-rl), NaN break+grad_accum=1 강제(spec-rl), _forward_preference 추출(spec-rl), label_strategy "none"→"unlabeled"(spec-schema/spec-data), TrainResult run_id(spec-infra), threshold <=(spec-infra), dot-path transform import(spec-data), QLoRA+head BusinessValidator 차단(spec-model/spec-foundation), task_fields role 기반(spec-foundation/spec-architecture)
-  - deep-explain 점검: 위반 없음
-  - 마찰 분석: 신규 마찰 없음
+- 2026-03-31 ~ 2026-04-03: spec → code → audit cycle 1~8 완료 (spec 10개 문서 안정화)
+- 2026-04-04 ~ 2026-04-06: verify/review/fix cycle 9~20 (Multi-GPU Serving 구현 포함)
+- 2026-04-07: refactor 모드 진입 — refactor-component-unification.md (S1~S8)
+- 2026-04-07: S1 완료 — DataSpec schema + HuggingFaceDataset/ImageClassificationDataset + Collator wrapper + create_dataloaders 리팩토링
+- 2026-04-07: S2+S3 완료 — ModelSpec/AdapterSpec/RLModelSpec → dict, Factory dict 기반 리팩토링, apply_adapter 제거
+- 2026-04-08: S4 완료 — TrainingSpec.strategy dict, STRATEGY_MAP → aliases.yaml, auto_strategy 함수 (198 passed, 7 env-only failed)
+- 2026-04-08: S5 완료 — 코드 변경 없음 (validator 갱신은 S1~S4에서 완료)
+- 2026-04-08: S6 완료 — mdp generate 커맨드 + --override 옵션 (4개 커맨드). 신규 3파일, 수정 7파일, 테스트 22건 (194 passed)

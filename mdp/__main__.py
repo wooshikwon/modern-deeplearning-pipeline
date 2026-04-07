@@ -47,22 +47,24 @@ def version():
 def train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
+    override: list[str] | None = typer.Option(None, "--override", help="Recipe/Config 오버라이드 (KEY=VALUE). config. 접두사로 Config 필드 지정"),
 ):
     """모델을 학습한다."""
     from mdp.cli.train import run_train
 
-    run_train(recipe, config)
+    run_train(recipe, config, overrides=override)
 
 
 @app.command(name="rl-train")
 def rl_train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="RL Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
+    override: list[str] | None = typer.Option(None, "--override", help="Recipe/Config 오버라이드 (KEY=VALUE). config. 접두사로 Config 필드 지정"),
 ):
     """RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO)."""
     from mdp.cli.rl_train import run_rl_train
 
-    run_rl_train(recipe, config)
+    run_rl_train(recipe, config, overrides=override)
 
 
 @app.command()
@@ -75,11 +77,39 @@ def inference(
     output_format: str = typer.Option("parquet", "--output-format", help="결과 포맷: parquet|csv|jsonl"),
     output_dir: str = typer.Option("./output", "--output-dir", help="결과 저장 디렉토리"),
     device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
+    override: list[str] | None = typer.Option(None, "--override", help="Recipe 오버라이드 (KEY=VALUE)"),
 ):
     """배치 추론을 실행한다. --run-id 또는 --model-dir 중 하나를 지정."""
     from mdp.cli.inference import run_inference
 
-    run_inference(run_id, model_dir, data, fields, metrics, output_format, output_dir, device_map=device_map)
+    run_inference(run_id, model_dir, data, fields, metrics, output_format, output_dir, device_map=device_map, overrides=override)
+
+
+@app.command()
+def generate(
+    run_id: str = typer.Option(None, "--run-id", help="MLflow run ID"),
+    model_dir: str = typer.Option(None, "--model-dir", help="로컬 모델 디렉토리 (mdp export 결과)"),
+    prompts: str = typer.Option(..., "--prompts", help="프롬프트 JSONL 파일 경로"),
+    prompt_field: str = typer.Option("prompt", "--prompt-field", help="JSONL에서 프롬프트 텍스트 필드명"),
+    output: str = typer.Option("./generated.jsonl", "--output", "-o", help="출력 JSONL 경로"),
+    max_new_tokens: int = typer.Option(None, "--max-new-tokens", help="생성 최대 토큰 수"),
+    temperature: float = typer.Option(None, "--temperature", help="샘플링 temperature"),
+    top_p: float = typer.Option(None, "--top-p", help="nucleus sampling p"),
+    top_k: int = typer.Option(None, "--top-k", help="top-k sampling"),
+    do_sample: bool = typer.Option(None, "--do-sample", help="샘플링 사용 여부"),
+    num_samples: int = typer.Option(1, "--num-samples", help="프롬프트당 생성 횟수"),
+    batch_size: int = typer.Option(1, "--batch-size", help="배치 크기"),
+    device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
+    override: list[str] | None = typer.Option(None, "--override", help="Recipe 오버라이드 (KEY=VALUE)"),
+):
+    """프롬프트 JSONL에서 autoregressive 생성을 실행한다."""
+    from mdp.cli.generate import run_generate
+
+    run_generate(
+        run_id, model_dir, prompts, prompt_field, output,
+        max_new_tokens, temperature, top_p, top_k, do_sample,
+        num_samples, batch_size, device_map, overrides=override,
+    )
 
 
 @app.command()

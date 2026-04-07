@@ -54,16 +54,6 @@ def create_callbacks(configs: list[dict[str, Any]], resolver: Any) -> list:
     return callbacks
 
 
-STRATEGY_MAP: dict[str, str] = {
-    "ddp": "mdp.training.strategies.ddp.DDPStrategy",
-    "fsdp": "mdp.training.strategies.fsdp.FSDPStrategy",
-    "deepspeed_zero2": "mdp.training.strategies.deepspeed.DeepSpeedStrategy",
-    "deepspeed_zero3": "mdp.training.strategies.deepspeed.DeepSpeedStrategy",
-    # deprecated alias — 다음 major 버전에서 제거
-    "deepspeed": "mdp.training.strategies.deepspeed.DeepSpeedStrategy",
-}
-
-
 def detect_device() -> torch.device:
     """Detect the best available device (CUDA > MPS > CPU)."""
     if torch.cuda.is_available():
@@ -73,24 +63,43 @@ def detect_device() -> torch.device:
     return torch.device("cpu")
 
 
+def auto_strategy(**kwargs: Any) -> Any:
+    """GPU 수에 따라 적절한 분산 전략을 자동 선택한다.
+
+    멀티 GPU → DDPStrategy, 단일 GPU/CPU → None.
+    aliases.yaml에서 ``auto`` 로 등록되어 ``_component_: auto``로 사용한다.
+    """
+    if not torch.cuda.is_available() or torch.cuda.device_count() <= 1:
+        return None
+    from mdp.training.strategies.ddp import DDPStrategy
+
+    return DDPStrategy(**kwargs)
+
+
 def create_strategy(settings: Settings, resolver: Any) -> Any:
-    """Create a distributed strategy from settings, or return None."""
+    """Settings에서 분산 전략을 생성한다. None이면 전략 없음.
+
+    우선순위:
+    1. Recipe.training.strategy (_component_ dict) — 새 경로
+    2. Config.compute.distributed (문자열 shortcut) — backward compat
+    """
+    # 1. Recipe.training.strategy (새 경로)
+    strategy_config = settings.recipe.training.strategy
+    if strategy_config is not None:
+        return resolver.resolve(strategy_config)
+
+    # 2. Config.compute.distributed (이전 경로, backward compat)
     dist_config = settings.config.compute.distributed
     if dist_config is None:
         return None
     strategy_name = dist_config.get("strategy", "auto") if isinstance(dist_config, dict) else "auto"
-    if strategy_name in ("none", "auto"):
-        if not torch.cuda.is_available() or torch.cuda.device_count() <= 1:
-            return None
-        strategy_name = "ddp"
-    class_path = STRATEGY_MAP.get(strategy_name)
-    if class_path is None:
-        raise ValueError(f"알 수 없는 분산 전략: {strategy_name}")
+    if strategy_name == "none":
+        return None
     strategy_kwargs = {
         k: v for k, v in (dist_config if isinstance(dist_config, dict) else {}).items()
         if k not in ("strategy", "moe")
     }
-    return resolver.resolve({"_component_": class_path, **strategy_kwargs})
+    return resolver.resolve({"_component_": strategy_name, **strategy_kwargs})
 
 
 def create_expert_parallel(settings: Settings) -> Any:
