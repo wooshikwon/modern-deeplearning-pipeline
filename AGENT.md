@@ -10,12 +10,13 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 | `mdp train -r recipe.yaml -c config.yaml` | SFT 학습 |
 | `mdp rl-train -r rl-recipe.yaml -c config.yaml` | RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO) |
 | `mdp inference --run-id <id> --data <path>` | 배치 추론 + 평가 |
+| `mdp generate --run-id <id> --prompts <jsonl> -o <out>` | autoregressive 생성 (JSONL 프롬프트 → JSONL 결과) |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 + 전략 추천 |
 | `mdp export --run-id <id> --output <dir>` | adapter merge + 서빙용 패키징 (`--checkpoint`로 로컬 체크포인트도 가능) |
 | `mdp serve --run-id <id>` | REST API 서빙 |
 | `mdp list models\|tasks\|callbacks\|strategies` | 카탈로그 조회 |
 
-모든 명령은 `--format json` 옵션을 지원한다. 각 명령의 상세 인자는 `mdp <command> --help`로 확인.
+모든 명령은 `--format json` 옵션을 지원한다. `mdp train`/`rl-train`/`inference`/`generate`는 `--override KEY=VALUE` 옵션을 공통으로 지원하여 Recipe/Config의 필드를 런타임에 덮어쓸 수 있다 (예: `--override training.epochs=0.1 --override data.dataloader.batch_size=8`). 각 명령의 상세 인자는 `mdp <command> --help`로 확인.
 
 ## Agent Discovery Flow
 
@@ -29,7 +30,7 @@ mdp train -r recipe.yaml -c config.yaml --format json  # 학습
 mdp inference --run-id <id> --data test.jsonl --format json  # 추론
 ```
 
-`mdp init`이 생성하는 Recipe에서 `???`로 표시된 필드만 채우면 된다: `data.source`, `data.fields.*`, `metadata.*`
+`mdp init`이 생성하는 Recipe에서 `???`로 표시된 필드만 채우면 된다: `data.dataset.source`, `head.num_classes`(해당 시), `metadata.*`
 
 ---
 
@@ -50,53 +51,62 @@ task: str (9종: image_classification, object_detection, semantic_segmentation,
            text_classification, token_classification, text_generation,
            seq2seq, image_generation, feature_extraction)
 
-model:                          # 모델 아키텍처 + pretrained 가중치
-  class_path: str               # Python 클래스 경로 (예: transformers.AutoModelForCausalLM)
-  pretrained: str               # URI (hf://, timm://, ultralytics://, local://)
-  torch_dtype: str              # float32 | float16 | bfloat16
-  attn_implementation: str      # eager | sdpa | flash_attention_2
-  init_args: dict               # 모델 생성자 추가 인자
+model:                          # _component_ 패턴 — 모델 클래스 + pretrained 가중치
+  _component_: str              # alias (AutoModelForCausalLM, AutoModel 등) 또는 풀 경로
+  pretrained: str               # URI (hf://, timm://, ultralytics://, local://). 없으면 직접 인스턴스화
+  torch_dtype: str              # float32 | float16 | bfloat16 (선택)
+  attn_implementation: str      # eager | sdpa | flash_attention_2 (선택)
+  ...                           # 나머지는 flat kwargs로 모델 생성자에 전달
 
-head:                           # 출력 head 교체 (AutoModelFor* 사용 시 생략 가능)
+head:                           # _component_ 패턴 — 출력 head 교체 (AutoModelFor* 사용 시 생략 가능)
   _component_: str              # Head alias (ClassificationHead, CausalLMHead 등)
   _target_attr: str             # 모델에서 교체할 속성명 (예: head, classifier, fc)
   ...                           # Head 생성자 인자 (num_classes, hidden_dim 등)
 
-adapter:                        # 파라미터 효율 학습 (생략 = full fine-tuning)
-  method: str                   # lora | qlora | prefix_tuning
+adapter:                        # _component_ 패턴 — 파라미터 효율 학습 (생략 = full fine-tuning)
+  _component_: str              # LoRA | QLoRA | PrefixTuning 또는 풀 경로
   r: int                        # LoRA rank 또는 prefix 토큰 수
-  alpha: int                    # LoRA alpha (→ PEFT lora_alpha로 자동 매핑)
-  dropout: float                # LoRA dropout (→ PEFT lora_dropout로 자동 매핑)
+  alpha: int                    # LoRA alpha
+  dropout: float                # LoRA dropout
   target_modules: list | str    # 적용 대상 모듈 (기본 "all_linear")
   quantization:                 # QLoRA 전용
     bits: 4 | 8
   modules_to_save: list         # freeze하지 않을 모듈 (예: [lm_head, embed_tokens])
 
 data:                           # 데이터 파이프라인
-  source: str                   # HF Hub 이름 또는 로컬 파일/디렉토리 경로
-  fields: {role: column}        # 역할→컬럼 매핑 (image, text, label, chosen, rejected 등)
-  split: str                    # 학습 split (기본 "train")
-  val_split: str | null         # 검증 split ("auto" = 자동 추론, null = 비활성화, 문자열 = 직접 지정)
-  tokenizer:                    # 언어 태스크용 (비전에서는 무시됨)
-    pretrained: str
+  dataset:                      # _component_ 패턴 — 학습 Dataset
+    _component_: str            # HuggingFaceDataset | ImageClassificationDataset 또는 풀 경로
+    source: str                 # HF Hub 이름 또는 로컬 파일/디렉토리
+    split: str                  # 기본 "train"
+    fields: {role: column}      # 역할→컬럼 매핑 (선택)
+    tokenizer: str              # AutoTokenizer pretrained 이름 (언어 태스크)
+    max_length: int             # 토큰화 최대 길이
+    augmentation: list          # [{type, params}, ...] (비전 전용)
+    ...                         # Dataset별 추가 kwargs (subset, streaming, data_files 등)
+  val_dataset:                  # _component_ 패턴 — 검증 Dataset (선택; 생략 시 val 비활성)
+    _component_: str
+    ...
+  collator:                     # _component_ 패턴 — 배치 조립기
+    _component_: str            # CausalLMCollator | PreferenceCollator | Seq2SeqCollator |
+                                #   ClassificationCollator | TokenClassificationCollator | VisionCollator
+    tokenizer: str              # 언어 Collator는 tokenizer 필수
     max_length: int
-  augmentation:                 # 비전 태스크용 torchvision DSL
-    train/val:
-      steps: [{type: str, params: dict}, ...]
-  dataloader:
+  dataloader:                   # 순수 설정값 (DataLoader kwargs)
     batch_size: int
     num_workers: int
+    drop_last: bool
 
 training:                       # 학습 루프 설정
-  epochs: int                   # epochs 또는 max_steps 중 하나 필수
+  epochs: float                 # epochs 또는 max_steps 중 하나 필수 (float 허용)
   max_steps: int
   precision: str                # fp32 | fp16 | bf16
   gradient_accumulation_steps: int
   gradient_clip_max_norm: float
   gradient_checkpointing: bool
-  val_check_interval: int | float  # validation 주기
+  val_check_interval: int | float
   val_check_unit: str           # "epoch" (기본) 또는 "step"
-  compile: bool | str           # torch.compile 모드
+  compile: bool | str
+  # strategy는 Config.compute.distributed에서 관리 (아래 Config 섹션 참조)
 
 optimizer:                      # _component_ 패턴
   _component_: str              # AdamW, Adam, SGD 또는 풀 경로
@@ -107,16 +117,26 @@ scheduler:                      # _component_ 패턴 (선택)
 loss:                           # _component_ 패턴 (선택 — 생략 시 model.training_step() 사용)
 callbacks: [...]                # _component_ 패턴 리스트
 evaluation:
-  metrics: [...]                # _component_ 패턴 리스트
+  metrics: [...]                # metric 이름 문자열 리스트
 
 # RL 전용 (mdp rl-train) — rl: 키 아래에 중첩
 rl:
-  algorithm:                    # _component_ 패턴 (DPO, GRPO, PPO)
-  models:                       # 역할별 모델 정의
-    policy: {model: ..., optimizer: ..., scheduler: ...}
-    reference: {model: ...}     # frozen (optimizer 없음)
-    value: {model: ..., optimizer: ...}  # PPO 전용
-    reward: {model: ...}        # frozen
+  algorithm:                    # _component_ 패턴 (DPO, GRPO, PPO, ...)
+    _component_: str
+    ...
+  models:                       # 역할별 model dict. 각 역할이 독립된 _component_ dict
+    policy:
+      _component_: str          # AutoModelForCausalLM 등
+      pretrained: str
+      adapter: {_component_: LoRA, ...}        # sub-component
+      optimizer: {_component_: AdamW, lr: ...} # sub-component (없으면 frozen)
+      scheduler: {_component_: ..., ...}
+      head: {_component_: ..., ...}            # sub-component
+    reference:                  # frozen (optimizer 생략)
+      _component_: str
+      pretrained: str
+    value: {...}                # PPO 전용
+    reward: {...}               # frozen
   generation:                   # GRPO/PPO 전용
     max_new_tokens: int
     temperature: float
@@ -137,9 +157,10 @@ metadata:
 compute:
   target: str                   # local (기본)
   gpus: int | "auto"
-  distributed:
-    strategy: str               # ddp | fsdp | deepspeed_zero2 | deepspeed_zero3
-    ...                         # 전략별 추가 옵션
+  distributed:                  # 분산 전략 (멀티 GPU 시 필수)
+    strategy: str | dict        # ddp | fsdp | deepspeed_zero3 | auto | {_component_: FSDPStrategy, ...}
+    # strategy 외 키(offload_optimizer 등)는 strategy 인스턴스에 kwargs로 전달
+    # moe: {enabled: true, ep_size: N} — MoE Expert Parallelism 설정
 
 mlflow:
   tracking_uri: str             # 기본 ./mlruns
@@ -166,11 +187,11 @@ job:
 
 ## `_component_` Pattern
 
-임의의 Python 클래스를 선택해야 하는 영역(optimizer, scheduler, loss, head, callback, algorithm)에 사용:
+Recipe의 모든 pluggable component(`model`, `adapter`, `head`, `optimizer`, `scheduler`, `loss`, `callback`, `data.dataset`, `data.collator`, `rl.algorithm`, `rl.models.*`)가 동일한 문법을 따른다. Config의 `compute.distributed.strategy`도 dict 형태 시 동일한 `_component_` 문법을 지원한다:
 
 ```yaml
 optimizer:
-  _component_: AdamW        # 내장 alias
+  _component_: AdamW        # 내장 alias → torch.optim.AdamW
   lr: 0.001
 
 optimizer:
@@ -178,7 +199,11 @@ optimizer:
   lr: 0.001
 ```
 
-`_component_`를 사용하지 않는 영역: `model` (class_path+pretrained), `data` (고정 스키마), `adapter` (method 분기), `training` (고정 스키마)
+`_component_` 값에 점(`.`)이 없으면 `mdp/aliases.yaml`에서 풀 경로로 치환되고, 점이 있으면 그대로 import된다. 따라서 내장이든 외부 패키지든 동일한 문법으로 주입된다.
+
+**`_component_`를 쓰지 않는 영역**:
+- 순수 설정값 묶음: `training`(precision/epochs/gradient_* 등), `generation`, `data.dataloader`, `metadata`, `evaluation`
+- `pretrained` 특수 키: `model._component_`와 함께 쓰이는 URI 전용 키. Factory가 URI 스킴에 따라 로더를 선택한다
 
 내장 alias 목록은 `mdp list callbacks`, `mdp list strategies` 등으로 조회.
 
@@ -208,9 +233,10 @@ optimizer:
 
 ### Adapter Constraints
 
-- `qlora` → `quantization.bits` 필수, `torch_dtype`는 `bfloat16` 또는 `float16`
-- `lora`/`qlora`/`prefix_tuning` → `r` 필수
-- `prefix_tuning`에서 `alpha`, `dropout`, `target_modules`는 자동 무시됨
+- `adapter._component_: QLoRA` → `quantization.bits` 필수, `torch_dtype`는 `bfloat16` 또는 `float16`
+- `LoRA`/`QLoRA`/`PrefixTuning` → `r` 필수
+- `PrefixTuning`에서 `alpha`, `dropout`, `target_modules`는 자동 무시됨
+- `QLoRA` + `head` 조합은 차단됨 (양자화 dtype 불일치)
 
 ### Forward Contract
 
@@ -221,15 +247,15 @@ optimizer:
 
 - `bf16` → Ampere+ GPU (A100, RTX 3090+) 필요
 - `flash_attention_2` → Ampere+ GPU 필요
-- `fsdp` + `qlora` → **비호환** (대안: DDP, DeepSpeed ZeRO-3)
-- 멀티 GPU 시 `distributed.strategy` 필수
+- `config.compute.distributed.strategy: fsdp` + QLoRA → **비호환** (대안: DDP, DeepSpeed ZeRO-3)
+- 멀티 GPU 시 `config.compute.distributed.strategy` 필수 (또는 `auto`로 런타임 선택)
 
 ### Data Constraints
 
-- `data.source` 필수
-- `data.tokenizer` → 언어 태스크에서만 유효 (비전 태스크에서 설정 시 경고)
-- `data.fields` → task별 `required_fields`와 일치해야 함
-- `streaming: true` + multimodal(vision+language) → 미지원
+- `data.dataset._component_` 필수. `data.collator._component_` 필수
+- Dataset/Collator 클래스가 자체 `__init__`에서 파라미터 검증(예: `source` 필수, `tokenizer` 필수)을 수행한다 — 프레임워크는 "`_component_` 키가 있는 dict인가"까지만 확인
+- `HuggingFaceDataset`의 `streaming: true` + multimodal(vision+language) → Dataset 클래스가 `ValueError`로 차단
+- 검증 데이터는 `data.val_dataset` dict를 명시적으로 선언해야 활성화됨 (자동 추론 없음)
 
 ---
 
@@ -264,37 +290,46 @@ name: vit-lora-cifar10
 task: image_classification
 
 model:
-  class_path: timm.create_model
-  pretrained: timm://vit_base_patch16_224
+  _component_: transformers.AutoModel
+  pretrained: hf://google/vit-base-patch16-224
 
 head:
   _component_: ClassificationHead
+  _target_attr: head
   num_classes: 10
+  pooling: cls_token
+  dropout: 0.1
 
 adapter:
-  method: lora
+  _component_: LoRA
   r: 16
   alpha: 32
-  target_modules: ["qkv", "proj"]
+  dropout: 0.05
+  target_modules: [q_proj, v_proj]
 
 data:
-  source: cifar10
-  fields:
-    image: img
-    label: label
-  augmentation:
-    train:
-      steps:
-        - {type: RandomResizedCrop, params: {size: [224, 224]}}
-        - {type: RandomHorizontalFlip}
-        - {type: ToDtype, params: {dtype: float32, scale: true}}
-        - {type: Normalize, params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}}
-    val:
-      steps:
-        - {type: Resize, params: {size: [256, 256]}}
-        - {type: CenterCrop, params: {size: [224, 224]}}
-        - {type: ToDtype, params: {dtype: float32, scale: true}}
-        - {type: Normalize, params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}}
+  dataset:
+    _component_: ImageClassificationDataset
+    source: cifar10
+    split: train
+    fields: {image: img, label: label}
+    augmentation:
+      - {type: RandomResizedCrop, params: {size: [224, 224]}}
+      - {type: RandomHorizontalFlip}
+      - {type: ToDtype, params: {dtype: float32, scale: true}}
+      - {type: Normalize, params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}}
+  val_dataset:
+    _component_: ImageClassificationDataset
+    source: cifar10
+    split: test
+    fields: {image: img, label: label}
+    augmentation:
+      - {type: Resize, params: {size: [256, 256]}}
+      - {type: CenterCrop, params: {size: [224, 224]}}
+      - {type: ToDtype, params: {dtype: float32, scale: true}}
+      - {type: Normalize, params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}}
+  collator:
+    _component_: VisionCollator
   dataloader:
     batch_size: 64
 
@@ -302,6 +337,7 @@ training:
   epochs: 30
   precision: bf16
   gradient_clip_max_norm: 1.0
+  # strategy는 Config.compute.distributed에서 설정
 
 optimizer:
   _component_: AdamW
@@ -352,12 +388,12 @@ name: llm-qlora-chat
 task: text_generation
 
 model:
-  class_path: transformers.AutoModelForCausalLM
+  _component_: AutoModelForCausalLM
   pretrained: hf://Qwen/Qwen2.5-7B
   torch_dtype: bfloat16
 
 adapter:
-  method: qlora
+  _component_: QLoRA
   r: 64
   alpha: 128
   quantization:
@@ -365,11 +401,16 @@ adapter:
   modules_to_save: [lm_head, embed_tokens]
 
 data:
-  source: HuggingFaceH4/ultrachat_200k
-  fields:
-    text: text
-  tokenizer:
-    pretrained: Qwen/Qwen2.5-7B
+  dataset:
+    _component_: HuggingFaceDataset
+    source: HuggingFaceH4/ultrachat_200k
+    split: train_sft
+    fields: {text: text}
+    tokenizer: Qwen/Qwen2.5-7B
+    max_length: 2048
+  collator:
+    _component_: CausalLMCollator
+    tokenizer: Qwen/Qwen2.5-7B
     max_length: 2048
   dataloader:
     batch_size: 4
@@ -379,6 +420,7 @@ training:
   precision: bf16
   gradient_accumulation_steps: 4
   gradient_checkpointing: true
+  # strategy는 Config에서 distributed.strategy: deepspeed_zero3로 설정
 
 optimizer:
   _component_: bitsandbytes.optim.AdamW8bit
@@ -492,4 +534,4 @@ class MyModel(BaseModel):
     def configure_optimizers(self) -> dict | None: ...
 ```
 
-Recipe에서 `model.class_path: my_models.custom.MyModel` 지정. `PYTHONPATH`에 프로젝트 루트 포함 필요.
+Recipe에서 `model._component_: my_models.custom.MyModel` 지정. `PYTHONPATH`에 프로젝트 루트 포함 필요.

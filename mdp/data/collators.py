@@ -129,7 +129,11 @@ class PreferenceCollator:
         }
     """
 
-    def __init__(self, tokenizer: Any, max_length: int = 2048) -> None:
+    def __init__(self, tokenizer: str | Any, max_length: int = 2048, **kwargs: Any) -> None:
+        if isinstance(tokenizer, str):
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer)
         self.tokenizer = tokenizer
         self.max_length = max_length
         if tokenizer.pad_token is None:

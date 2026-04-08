@@ -21,30 +21,19 @@ data:
       image: image
       label: label
     augmentation:
-      backend: torchvision
-      steps:
-        - type: RandomHorizontalFlip
-          params:
-            p: 0.5
-        - type: ColorJitter
-          params:
-            brightness: 0.3
-            contrast: 0.3
-            saturation: 0.3
-            hue: 0.1
-        - type: RandomAffine
-          params:
-            degrees: 10
-            translate: [0.1, 0.1]
-            scale: [0.9, 1.1]
-        - type: Resize
-          params:
-            size: [640, 640]
-        - type: ToTensor
-        - type: Normalize
-          params:
-            mean: [0.485, 0.456, 0.406]
-            std: [0.229, 0.224, 0.225]
+      - type: RandomHorizontalFlip
+        params: {p: 0.5}
+      - type: ColorJitter
+        params: {brightness: 0.3, contrast: 0.3, saturation: 0.3, hue: 0.1}
+      - type: RandomAffine
+        params: {degrees: 10, translate: [0.1, 0.1], scale: [0.9, 1.1]}
+      - type: Resize
+        params: {size: [640, 640]}
+      - type: ToTensor
+      - type: Normalize
+        params:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
   val_dataset:
     _component_: ImageClassificationDataset
     source: /data/voc2012
@@ -53,16 +42,13 @@ data:
       image: image
       label: label
     augmentation:
-      backend: torchvision
-      steps:
-        - type: Resize
-          params:
-            size: [640, 640]
-        - type: ToTensor
-        - type: Normalize
-          params:
-            mean: [0.485, 0.456, 0.406]
-            std: [0.229, 0.224, 0.225]
+      - type: Resize
+        params: {size: [640, 640]}
+      - type: ToTensor
+      - type: Normalize
+        params:
+          mean: [0.485, 0.456, 0.406]
+          std: [0.229, 0.224, 0.225]
   collator:
     _component_: VisionCollator
   dataloader:
@@ -81,14 +67,14 @@ training:
   val_check_interval: 1.0
 
 optimizer:
-  _component_: torch.optim.SGD
+  _component_: SGD
   lr: 0.01
   weight_decay: 5e-4
   momentum: 0.937
   nesterov: true
 
 scheduler:
-  _component_: torch.optim.lr_scheduler.CosineAnnealingLR
+  _component_: CosineAnnealingLR
   T_max: 100
   eta_min: 1e-4
   warmup_steps: 1000

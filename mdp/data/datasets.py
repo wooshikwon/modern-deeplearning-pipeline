@@ -189,15 +189,7 @@ class ImageClassificationDataset:
 
     @staticmethod
     def _build_transform(steps: list[dict[str, Any]]) -> Any:
-        """augmentation steps DSL을 torchvision.transforms.Compose로 변환."""
-        from torchvision import transforms as T
+        """augmentation steps DSL을 torchvision.transforms.v2.Compose로 변환."""
+        from mdp.data.transforms import build_transforms
 
-        transform_list = []
-        for step in steps:
-            cls_name = step["type"]
-            params = step.get("params", {})
-            if hasattr(T, cls_name):
-                transform_list.append(getattr(T, cls_name)(**params))
-            else:
-                logger.warning("Unknown transform: %s", cls_name)
-        return T.Compose(transform_list) if transform_list else None
+        return build_transforms({"steps": steps})

@@ -102,7 +102,7 @@ def _build_recipe_from_catalog(
         "name": f"{name}-{project_name}",
         "task": task,
         "model": {
-            "class_path": class_path,
+            "_component_": class_path,
             "pretrained": pretrained,
         },
     }
@@ -215,10 +215,9 @@ def _default_recipe_yaml() -> str:
         task: image_classification
 
         model:
-          class_path: torchvision.models.resnet50
+          _component_: torchvision.models.resnet50
           pretrained: "hf://microsoft/resnet-50"
-          init_args:
-            num_classes: 10
+          num_classes: 10
 
         data:
           dataset:

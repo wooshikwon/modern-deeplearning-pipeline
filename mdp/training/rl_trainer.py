@@ -319,14 +319,11 @@ class RLTrainer:
                 params["adapter_component"] = policy_adapter.get("_component_", "unknown")
                 if policy_adapter.get("r") is not None:
                     params["adapter_r"] = policy_adapter["r"]
-            # Strategy — recipe.training.strategy 우선, Config fallback
-            strategy_config = recipe.training.strategy
-            if strategy_config is not None:
-                params["strategy"] = strategy_config.get("_component_", "unknown")
-            else:
-                dist = self.settings.config.compute.distributed
-                if isinstance(dist, dict) and dist.get("strategy"):
-                    params["strategy"] = dist["strategy"]
+            # Strategy — Config.compute.distributed
+            dist = self.settings.config.compute.distributed
+            if isinstance(dist, dict) and dist.get("strategy"):
+                s = dist["strategy"]
+                params["strategy"] = s.get("_component_", s) if isinstance(s, dict) else s
             mlflow.log_params(params)
         except Exception as e:
             logger.warning(f"MLflow params 로깅 실패: {e}")

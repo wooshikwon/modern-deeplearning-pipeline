@@ -82,6 +82,14 @@ def test_init_generates_parseable_yaml(tmp_path: Path) -> None:
     assert settings.recipe.name is not None
     assert settings.recipe.task is not None
 
+    # S7 회귀 방지: init 템플릿은 component-unified schema를 따라야 한다.
+    # model/dataset/collator가 모두 _component_ dict로 선언되어야 한다.
+    assert "_component_" in settings.recipe.model, (
+        "init 템플릿의 model 블록에 _component_ 키가 없다 — 구 class_path 회귀"
+    )
+    assert "_component_" in settings.recipe.data.dataset
+    assert "_component_" in settings.recipe.data.collator
+
 
 def test_train_json_output_schema() -> None:
     """TrainResult 스키마가 Trainer 결과와 호환되는지."""

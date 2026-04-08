@@ -43,13 +43,13 @@ training:
   val_check_unit: step
 
 optimizer:
-  _component_: torch.optim.AdamW
+  _component_: AdamW
   lr: 5e-5
   weight_decay: 0.1
   betas: [0.9, 0.95]
 
 scheduler:
-  _component_: torch.optim.lr_scheduler.CosineAnnealingLR
+  _component_: CosineAnnealingLR
   T_max: 5
   eta_min: 1e-6
   warmup_ratio: 0.05

@@ -77,26 +77,24 @@ def auto_strategy(**kwargs: Any) -> Any:
 
 
 def create_strategy(settings: Settings, resolver: Any) -> Any:
-    """Settings에서 분산 전략을 생성한다. None이면 전략 없음.
-
-    우선순위:
-    1. Recipe.training.strategy (_component_ dict) — 새 경로
-    2. Config.compute.distributed (문자열 shortcut) — backward compat
-    """
-    # 1. Recipe.training.strategy (새 경로)
-    strategy_config = settings.recipe.training.strategy
-    if strategy_config is not None:
-        return resolver.resolve(strategy_config)
-
-    # 2. Config.compute.distributed (이전 경로, backward compat)
+    """Config.compute.distributed에서 분산 전략을 생성한다. None이면 전략 없음."""
     dist_config = settings.config.compute.distributed
     if dist_config is None:
         return None
-    strategy_name = dist_config.get("strategy", "auto") if isinstance(dist_config, dict) else "auto"
+    if not isinstance(dist_config, dict):
+        return None
+
+    strategy_name = dist_config.get("strategy", "auto")
     if strategy_name == "none":
         return None
+
+    # strategy 값이 이미 _component_ dict이면 직접 resolve
+    if isinstance(strategy_name, dict):
+        return resolver.resolve(strategy_name)
+
+    # 문자열이면 aliases.yaml에서 조회
     strategy_kwargs = {
-        k: v for k, v in (dist_config if isinstance(dist_config, dict) else {}).items()
+        k: v for k, v in dist_config.items()
         if k not in ("strategy", "moe")
     }
     return resolver.resolve({"_component_": strategy_name, **strategy_kwargs})

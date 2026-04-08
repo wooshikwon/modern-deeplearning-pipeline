@@ -46,7 +46,7 @@ class BusinessValidator:
             "distributed_batch": cls._check_distributed_batch,
             "streaming_distributed": cls._check_streaming_distributed,
             "task_fields": cls._check_task_fields,
-            "label_strategy_fields": cls._check_label_strategy_fields,
+            "data_components": cls._check_data_components,
         }
         targets = checks or list(all_checks.keys())
         for name in targets:
@@ -261,7 +261,7 @@ class BusinessValidator:
             )
 
     @staticmethod
-    def _check_label_strategy_fields(
+    def _check_data_components(
         settings: Settings, result: ValidationResult
     ) -> None:
         """5. data.dataset/collator _component_ 존재 검증.

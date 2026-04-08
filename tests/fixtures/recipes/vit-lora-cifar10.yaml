@@ -2,10 +2,8 @@ name: vit-lora-cifar10
 task: image_classification
 
 model:
-  _component_: torchvision.models.resnet50
+  _component_: transformers.AutoModel
   pretrained: hf://google/vit-base-patch16-224
-  image_size: 224
-  patch_size: 16
 
 head:
   _component_: ClassificationHead
@@ -19,9 +17,7 @@ adapter:
   r: 16
   alpha: 32
   dropout: 0.05
-  target_modules:
-    - q_proj
-    - v_proj
+  target_modules: [q_proj, v_proj]
 
 data:
   dataset:
@@ -72,17 +68,17 @@ training:
   val_check_interval: 1.0
 
 optimizer:
-  _component_: torch.optim.AdamW
+  _component_: AdamW
   lr: 3e-4
   weight_decay: 0.01
 
 scheduler:
-  _component_: torch.optim.lr_scheduler.CosineAnnealingLR
+  _component_: CosineAnnealingLR
   T_max: 30
   eta_min: 1e-6
 
 loss:
-  _component_: torch.nn.CrossEntropyLoss
+  _component_: CrossEntropyLoss
   label_smoothing: 0.1
 
 evaluation:

@@ -65,7 +65,7 @@ optimizer:
   weight_decay: 0.01
 
 scheduler:
-  _component_: torch.optim.lr_scheduler.CosineAnnealingLR
+  _component_: CosineAnnealingLR
   T_max: 3
   eta_min: 0
   warmup_ratio: 0.03
