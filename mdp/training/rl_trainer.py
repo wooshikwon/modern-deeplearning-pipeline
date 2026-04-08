@@ -81,12 +81,20 @@ class RLTrainer:
                 self.optimizers[name] = klass(model.parameters(), **kwargs)
                 if spec.get("scheduler") is not None:
                     sched_config = dict(spec["scheduler"])
+                    sched_config.pop("interval", "step")
+                    warmup_steps = sched_config.pop("warmup_steps", 0)
                     warmup_ratio = sched_config.pop("warmup_ratio", 0.0)
                     s_klass, s_kwargs = self.resolver.resolve_partial(sched_config)
                     scheduler = s_klass(self.optimizers[name], **s_kwargs)
+                    if warmup_steps > 0 and warmup_ratio > 0:
+                        raise ValueError(
+                            "warmup_steps와 warmup_ratio를 동시에 지정할 수 없습니다. "
+                            f"warmup_steps={warmup_steps}, warmup_ratio={warmup_ratio}"
+                        )
                     if warmup_ratio > 0:
                         total_steps = self._estimate_total_steps()
                         warmup_steps = int(total_steps * warmup_ratio)
+                    if warmup_steps > 0:
                         warmup = torch.optim.lr_scheduler.LinearLR(
                             self.optimizers[name], start_factor=1e-8, end_factor=1.0,
                             total_iters=warmup_steps,
@@ -711,7 +719,7 @@ class RLTrainer:
                         and self.val_check_interval > 0
                         and self.val_check_unit == "step"
                         and self.global_step > 0
-                        and self.global_step % self.val_check_interval == 0
+                        and self.global_step % int(self.val_check_interval) == 0
                     ):
                         self._fire("on_validation_start", epoch=self.epoch_counter)
                         val_metrics = self._run_rl_validation()

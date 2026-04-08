@@ -52,7 +52,13 @@ class CompatValidator:
             return
 
         distributed = compute.distributed
-        has_strategy = distributed is not None and distributed.get("strategy") is not None
+        if distributed is None:
+            has_strategy = False
+            strategy = None
+        else:
+            # runtime(create_strategy)과 동일하게 기본값 "auto" 적용
+            strategy = distributed.get("strategy", "auto")
+            has_strategy = strategy is not None and strategy != "none"
 
         if gpu_count > 1 and not has_strategy:
             result.errors.append(
@@ -60,7 +66,6 @@ class CompatValidator:
                 f"설정되지 않았습니다."
             )
         elif gpu_count == 1 and has_strategy:
-            strategy = distributed["strategy"]  # type: ignore[index]
             result.warnings.append(
                 f"GPU 1개 환경에서 분산 전략 '{strategy}'이(가) "
                 f"설정되어 있습니다. 불필요할 수 있습니다."
@@ -89,7 +94,7 @@ class CompatValidator:
         if distributed is None:
             return
 
-        strategy = distributed.get("strategy", "")
+        strategy = distributed.get("strategy", "auto")
         strategy_name = strategy
         if isinstance(strategy, dict):
             strategy_name = strategy.get("_component_", "")

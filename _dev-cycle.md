@@ -1,8 +1,9 @@
 ## 현재 상태
-- phase: fix
-- cycle: 1
+- phase: closed (커밋 대기)
+- cycle: 22
 - codebase: ~/projects/modern-deeplearning-pipeline
 - refactor: [[personal/projects/modern-deeplearning-pipeline/docs/refactor-component-unification]]
+- next: factory-removal 리팩토링 세션 (review-22 구조 2건 + Factory→ModelBuilder)
 
 ## 산출물
 - spec: [[personal/projects/modern-deeplearning-pipeline/_draft]], [[personal/projects/modern-deeplearning-pipeline/docs/spec-architecture|spec-architecture]] ~ [[personal/projects/modern-deeplearning-pipeline/docs/spec-rl|spec-rl]]
@@ -16,6 +17,16 @@
 - code-S8: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08-S8|code-2026-04-08-S8]] (spec-schema/data/foundation/infra + AGENT.md + weighted-mtp/mdp-integration 갱신, 코드 변경 없음)
 - verify-1: [[personal/projects/modern-deeplearning-pipeline/plans/verify-2026-04-08-c1|verify-2026-04-08-c1]] (258 passed, 8 skipped, 0 failed)
 - review-1: [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c1|review-2026-04-08-c1]] (버그: 3, 구조: 3, 문서갱신: 1)
+- review-19: [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c19|review-2026-04-08-c19]] (0건 — S1~S3 수렴)
+- review-21 (재): [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c21|review-2026-04-08-c21]] (버그 3, 구조 2)
+- fix-21: [[personal/projects/modern-deeplearning-pipeline/plans/fix-2026-04-08-c21|fix-2026-04-08-c21]] (5건 전수 수정, 252 passed)
+- review-22: [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c22|review-2026-04-08-c22]] (버그 0, 구조 2 — 다음 세션으로 이관)
+
+## 다음 세션: factory-removal + 잔여 구조 개선
+- B: RLTrainer scheduler interval 미사용 (review-22 2-1)
+- C: generate CLI num_beams/repetition_penalty 플래그 (review-22 2-2)
+- A: Factory → models/builder.py 구조 변경
+- 순서: B → C → A
 
 ## 이력
 - 2026-03-31 ~ 2026-04-03: spec → code → audit cycle 1~8 완료 (spec 10개 문서 안정화)
@@ -30,3 +41,5 @@
 - 2026-04-08: S8 완료 → verify 진입 (cycle 1) — 전 Stage(S1~S8) 완료, spec 문서 6개 동기화
 - 2026-04-08: verify-1 완료 (258 passed, 0 failed) → review 진입
 - 2026-04-08: review-1 완료 (버그 3, 구조 3, 문서 1) → fix 진입
+- 2026-04-08: cycle 19 수렴 (S1~S3 영역 0건) → cycle 20-21 오염(§3.5 미인식) → cycle 21 재실행 (5건) → fix-21 (5건 수정)
+- 2026-04-08: review-22 완료 (버그 0, 구조 2) — 구조 2건은 기존 한계, 다음 리팩토링 세션으로 이관. 현 cycle closed

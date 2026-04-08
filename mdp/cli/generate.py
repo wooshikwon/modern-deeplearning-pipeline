@@ -66,7 +66,6 @@ def run_generate(
     from transformers import AutoTokenizer
 
     from mdp.serving.model_loader import reconstruct_model
-    from mdp.settings.factory import SettingsFactory
 
     try:
         model_path = resolve_model_source(run_id, model_dir, "generate")
@@ -79,21 +78,10 @@ def run_generate(
         raise typer.Exit(code=1)
 
     try:
-        # 1. 모델 + settings 로드 (overrides 적용)
-        settings = SettingsFactory().from_artifact(str(model_path), overrides=overrides)
-        from mdp.factory.factory import Factory
-
-        model = Factory(settings).create_model(skip_base_check=True)
-        from mdp.serving.model_loader import load_checkpoint_weights
-
-        load_checkpoint_weights(model, model_path)
-        if device_map is not None:
-            from mdp.serving.model_loader import _find_checkpoint_path, _dispatch_model
-
-            checkpoint = _find_checkpoint_path(model_path)
-            if checkpoint:
-                model = _dispatch_model(model, checkpoint, device_map)
-
+        # 1. 모델 + settings 로드 (adapter merge + device_map + overrides)
+        model, settings = reconstruct_model(
+            model_path, merge=True, device_map=device_map, overrides=overrides,
+        )
         model.eval()
 
         if not hasattr(model, "generate"):
@@ -110,6 +98,8 @@ def run_generate(
             "top_p": 1.0,
             "top_k": 50,
             "do_sample": True,
+            "num_beams": 1,
+            "repetition_penalty": 1.0,
         }
         if gen_spec is not None:
             gen_kwargs.update({
@@ -118,6 +108,8 @@ def run_generate(
                 "top_p": gen_spec.top_p,
                 "top_k": gen_spec.top_k,
                 "do_sample": gen_spec.do_sample,
+                "num_beams": gen_spec.num_beams,
+                "repetition_penalty": gen_spec.repetition_penalty,
             })
         # CLI 값이 명시적으로 전달되었으면 override
         if max_new_tokens is not None:
