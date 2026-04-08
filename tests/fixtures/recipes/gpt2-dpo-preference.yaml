@@ -1,0 +1,62 @@
+name: gpt2-dpo-preference
+task: text_generation
+
+data:
+  dataset:
+    _component_: HuggingFaceDataset
+    source: Anthropic/hh-rlhf
+    split: train
+    fields: {chosen: chosen, rejected: rejected}
+    tokenizer: gpt2
+    max_length: 512
+  val_dataset:
+    _component_: HuggingFaceDataset
+    source: Anthropic/hh-rlhf
+    split: test
+    fields: {chosen: chosen, rejected: rejected}
+    tokenizer: gpt2
+    max_length: 512
+  collator:
+    _component_: PreferenceCollator
+    tokenizer: gpt2
+    max_length: 512
+  dataloader:
+    batch_size: 4
+    num_workers: 2
+    drop_last: true
+
+training:
+  epochs: 1
+  precision: bf16
+  gradient_checkpointing: true
+
+rl:
+  algorithm:
+    _component_: DPO
+    beta: 0.1
+  models:
+    policy:
+      _component_: AutoModelForCausalLM
+      pretrained: hf://gpt2
+      adapter:
+        _component_: LoRA
+        r: 16
+        alpha: 32
+        target_modules: [c_attn]
+        task_type: CAUSAL_LM
+      optimizer:
+        _component_: AdamW
+        lr: 1e-5
+    reference:
+      _component_: AutoModelForCausalLM
+      pretrained: hf://gpt2
+
+callbacks:
+  - _component_: ModelCheckpoint
+    monitor: val_loss
+    save_top_k: 1
+    mode: min
+
+metadata:
+  author: wesley
+  description: "GPT-2 DPO on Anthropic HH-RLHF (minimal preference fixture)."
