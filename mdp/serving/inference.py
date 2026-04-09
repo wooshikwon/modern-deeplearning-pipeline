@@ -85,6 +85,7 @@ def run_batch_inference(
     device: str | torch.device | None = None,
     metrics: list[Any] | None = None,
     callbacks: list[Any] | None = None,
+    tokenizer: Any = None,
 ) -> tuple[Path, dict[str, Any]]:
     """배치 추론을 실행하고 결과를 파일로 저장한다.
 
@@ -106,8 +107,10 @@ def run_batch_inference(
         평가 metric 리스트. 각 metric은 update(outputs, batch) / compute() 프로토콜.
         None이면 prediction만 저장.
     callbacks:
-        추론 콜백 리스트. S3에서 BaseInferenceCallback의 setup/on_batch/teardown
-        dispatch가 추가된다. None이면 콜백 없음.
+        추론 콜백 리스트. ``BaseInferenceCallback`` 인스턴스는 setup/on_batch/teardown
+        lifecycle이 자동 dispatch된다. None이면 콜백 없음.
+    tokenizer:
+        토크나이저. ``BaseInferenceCallback.setup()`` 에 전달된다. None 가능.
 
     Returns
     -------
@@ -124,49 +127,83 @@ def run_batch_inference(
     if callbacks:
         logger.info("Inference callbacks: %d loaded", len(callbacks))
 
+    from mdp.training.callbacks.base import BaseInferenceCallback
+
     if not hasattr(model, "hf_device_map"):
         model = model.to(dev)
     model.eval()
 
+    # Inference callback lifecycle — setup
+    inference_cbs = [
+        cb for cb in (callbacks or [])
+        if isinstance(cb, BaseInferenceCallback)
+    ]
+    for cb in inference_cbs:
+        try:
+            cb.setup(model=model, tokenizer=tokenizer)
+        except Exception as e:
+            if getattr(cb, "critical", False):
+                raise
+            logger.warning("Inference callback %s.setup 실패: %s", type(cb).__name__, e)
+
     all_records: list[dict[str, Any]] = []
 
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(dataloader):
-            # batch를 device로 이동
-            if isinstance(batch, dict):
-                batch = {
-                    k: v.to(dev) if isinstance(v, torch.Tensor) else v
-                    for k, v in batch.items()
-                }
-            elif isinstance(batch, torch.Tensor):
-                batch = batch.to(dev)
+    try:
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(dataloader):
+                # batch를 device로 이동
+                if isinstance(batch, dict):
+                    batch = {
+                        k: v.to(dev) if isinstance(v, torch.Tensor) else v
+                        for k, v in batch.items()
+                    }
+                elif isinstance(batch, torch.Tensor):
+                    batch = batch.to(dev)
 
-            # dict I/O 관례: model(batch) — BaseModel.forward(batch: dict) 계약
-            if isinstance(batch, dict):
-                outputs = model(batch)
-            else:
-                outputs = model(batch)
+                # dict I/O 관례: model(batch) — BaseModel.forward(batch: dict) 계약
+                if isinstance(batch, dict):
+                    outputs = model(batch)
+                else:
+                    outputs = model(batch)
 
-            # 모델이 텐서 하나만 반환하면 dict로 감싼다
-            if isinstance(outputs, torch.Tensor):
-                outputs = {"logits": outputs}
+                # 모델이 텐서 하나만 반환하면 dict로 감싼다
+                if isinstance(outputs, torch.Tensor):
+                    outputs = {"logits": outputs}
 
-            processed = _postprocess(outputs, task)
+                # Inference callback — on_batch
+                for cb in inference_cbs:
+                    try:
+                        cb.on_batch(batch_idx=batch_idx, batch=batch, outputs=outputs)
+                    except Exception as e:
+                        if getattr(cb, "critical", False):
+                            raise
+                        logger.warning("Inference callback %s.on_batch 실패: %s", type(cb).__name__, e)
 
-            # 배치 전체를 한 번에 레코드로 변환
-            batch_size = next(iter(processed.values())).shape[0]
-            for k in processed:
-                processed[k] = processed[k].tolist()
-            for i in range(batch_size):
-                all_records.append({k: v[i] for k, v in processed.items()})
+                processed = _postprocess(outputs, task)
 
-            # Metric 업데이트
-            if metrics:
-                for m in metrics:
-                    m.update(outputs, batch)
+                # 배치 전체를 한 번에 레코드로 변환
+                batch_size = next(iter(processed.values())).shape[0]
+                for k in processed:
+                    processed[k] = processed[k].tolist()
+                for i in range(batch_size):
+                    all_records.append({k: v[i] for k, v in processed.items()})
 
-            if (batch_idx + 1) % 50 == 0:
-                logger.info("  processed %d batches", batch_idx + 1)
+                # Metric 업데이트
+                if metrics:
+                    for m in metrics:
+                        m.update(outputs, batch)
+
+                if (batch_idx + 1) % 50 == 0:
+                    logger.info("  processed %d batches", batch_idx + 1)
+    finally:
+        # Inference callback lifecycle — teardown (always runs)
+        for cb in inference_cbs:
+            try:
+                cb.teardown()
+            except Exception as e:
+                if getattr(cb, "critical", False):
+                    raise
+                logger.warning("Inference callback %s.teardown 실패: %s", type(cb).__name__, e)
 
     logger.info("Inference complete: %d samples", len(all_records))
     result_path = _save_results(all_records, Path(output_path), output_format)

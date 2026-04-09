@@ -251,6 +251,7 @@ def run_inference(
                 task="classification",
                 metrics=metrics or None,
                 callbacks=loaded_callbacks or None,
+                tokenizer=tokenizer,
             )
 
             if not is_json_mode():
