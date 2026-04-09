@@ -43,6 +43,32 @@ def setup_amp(
     return amp_enabled, amp_dtype, scaler
 
 
+def load_callbacks_from_file(path: str) -> list[dict[str, Any]]:
+    """콜백 YAML 파일을 읽어 list[dict] 설정을 반환한다.
+
+    파일 형식은 Recipe의 callbacks 섹션과 동일:
+    ``[{_component_: Name, ...}, ...]``
+    """
+    import yaml
+
+    with open(path) as f:
+        raw = yaml.safe_load(f)
+
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError(
+            f"콜백 파일은 리스트여야 합니다 (실제: {type(raw).__name__}). "
+            "예: [{_component_: EarlyStopping, patience: 3}]"
+        )
+    for i, item in enumerate(raw):
+        if not isinstance(item, dict) or "_component_" not in item:
+            raise ValueError(
+                f"콜백 항목 [{i}]에 _component_ 키가 필요합니다: {item}"
+            )
+    return raw
+
+
 def create_callbacks(configs: list[dict[str, Any]], resolver: Any) -> list:
     """Recipe의 callbacks 설정에서 콜백 리스트를 생성한다."""
     callbacks = []

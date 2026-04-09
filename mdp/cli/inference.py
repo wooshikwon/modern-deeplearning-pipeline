@@ -176,6 +176,7 @@ def run_inference(
     overrides: list[str] | None = None,
     pretrained: str | None = None,
     tokenizer_name: str | None = None,
+    callbacks_file: str | None = None,
 ) -> None:
     """배치 추론 + (선택) 평가.
 
@@ -194,6 +195,17 @@ def run_inference(
         raise typer.Exit(code=1)
 
     is_pretrained = model_path is None
+
+    # 콜백 로드 (pretrained/artifact 공통)
+    loaded_callbacks: list = []
+    if callbacks_file:
+        from mdp.settings.resolver import ComponentResolver
+        from mdp.training._common import create_callbacks, load_callbacks_from_file
+
+        cb_configs = load_callbacks_from_file(callbacks_file)
+        loaded_callbacks = create_callbacks(cb_configs, ComponentResolver())
+        if not is_json_mode():
+            typer.echo(f"Callbacks: {len(loaded_callbacks)}개 로드 ({callbacks_file})")
 
     if not is_json_mode():
         if is_pretrained:
@@ -238,6 +250,7 @@ def run_inference(
                 output_format=output_format,
                 task="classification",
                 metrics=metrics or None,
+                callbacks=loaded_callbacks or None,
             )
 
             if not is_json_mode():
@@ -321,6 +334,7 @@ def run_inference(
                 output_format=output_format,
                 task=settings.recipe.task,
                 metrics=metrics or None,
+                callbacks=loaded_callbacks or None,
             )
 
             # 6. Drift detection (baseline이 존재하면)

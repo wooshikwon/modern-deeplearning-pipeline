@@ -51,24 +51,26 @@ def version():
 def train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
+    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe callbacks를 override)"),
     override: list[str] | None = typer.Option(None, "--override", help="Recipe/Config 오버라이드 (KEY=VALUE). config. 접두사로 Config 필드 지정"),
 ):
     """모델을 학습한다."""
     from mdp.cli.train import run_train
 
-    run_train(recipe, config, overrides=override)
+    run_train(recipe, config, overrides=override, callbacks_file=callbacks)
 
 
 @app.command(name="rl-train")
 def rl_train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="RL Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
+    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe callbacks를 override)"),
     override: list[str] | None = typer.Option(None, "--override", help="Recipe/Config 오버라이드 (KEY=VALUE). config. 접두사로 Config 필드 지정"),
 ):
     """RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO)."""
     from mdp.cli.rl_train import run_rl_train
 
-    run_rl_train(recipe, config, overrides=override)
+    run_rl_train(recipe, config, overrides=override, callbacks_file=callbacks)
 
 
 @app.command()
@@ -80,6 +82,7 @@ def inference(
     data: str = typer.Option(..., "--data", help="추론 대상 데이터 (HF Hub 이름 또는 로컬 경로)"),
     fields: list[str] | None = typer.Option(None, "--fields", help="필드 매핑 오버라이드 (예: image=img label=class)"),
     metrics: list[str] | None = typer.Option(None, "--metrics", help="평가 metric (예: Accuracy F1Score)"),
+    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (추론 콜백)"),
     output_format: str = typer.Option("parquet", "--output-format", help="결과 포맷: parquet|csv|jsonl"),
     output_dir: str = typer.Option("./output", "--output-dir", help="결과 저장 디렉토리"),
     device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
@@ -92,6 +95,7 @@ def inference(
         run_id, model_dir, data, fields, metrics, output_format, output_dir,
         device_map=device_map, overrides=override,
         pretrained=pretrained, tokenizer_name=tokenizer,
+        callbacks_file=callbacks,
     )
 
 
@@ -111,6 +115,7 @@ def generate(
     do_sample: bool = typer.Option(None, "--do-sample", help="샘플링 사용 여부"),
     num_samples: int = typer.Option(1, "--num-samples", help="프롬프트당 생성 횟수"),
     batch_size: int = typer.Option(1, "--batch-size", help="배치 크기"),
+    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (추론 콜백)"),
     device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
     override: list[str] | None = typer.Option(None, "--override", help="Recipe 오버라이드 (KEY=VALUE)"),
 ):
@@ -122,6 +127,7 @@ def generate(
         max_new_tokens, temperature, top_p, top_k, do_sample,
         num_samples, batch_size, device_map, overrides=override,
         pretrained=pretrained, tokenizer_name=tokenizer,
+        callbacks_file=callbacks,
     )
 
 

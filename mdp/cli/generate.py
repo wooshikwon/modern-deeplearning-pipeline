@@ -79,6 +79,7 @@ def run_generate(
     overrides: list[str] | None = None,
     pretrained: str | None = None,
     tokenizer_name: str | None = None,
+    callbacks_file: str | None = None,
 ) -> None:
     """프롬프트 JSONL에서 autoregressive 생성을 실행한다."""
     import torch
@@ -117,6 +118,17 @@ def run_generate(
 
             tok_name = tokenizer_name or _resolve_tokenizer_name(settings)
             tokenizer = AutoTokenizer.from_pretrained(tok_name)
+
+        # 콜백 로드
+        loaded_callbacks: list = []
+        if callbacks_file:
+            from mdp.settings.resolver import ComponentResolver
+            from mdp.training._common import create_callbacks, load_callbacks_from_file
+
+            cb_configs = load_callbacks_from_file(callbacks_file)
+            loaded_callbacks = create_callbacks(cb_configs, ComponentResolver())
+            if not is_json_mode():
+                typer.echo(f"Callbacks: {len(loaded_callbacks)}개 로드 ({callbacks_file})")
 
         if not hasattr(model, "generate"):
             raise ValueError(

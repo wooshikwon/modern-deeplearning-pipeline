@@ -84,6 +84,7 @@ def run_batch_inference(
     task: str = "classification",
     device: str | torch.device | None = None,
     metrics: list[Any] | None = None,
+    callbacks: list[Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     """배치 추론을 실행하고 결과를 파일로 저장한다.
 
@@ -104,6 +105,9 @@ def run_batch_inference(
     metrics:
         평가 metric 리스트. 각 metric은 update(outputs, batch) / compute() 프로토콜.
         None이면 prediction만 저장.
+    callbacks:
+        추론 콜백 리스트. S3에서 BaseInferenceCallback의 setup/on_batch/teardown
+        dispatch가 추가된다. None이면 콜백 없음.
 
     Returns
     -------
@@ -117,6 +121,8 @@ def run_batch_inference(
 
     dev = _detect_device(device)
     logger.info("Running batch inference on %s (task=%s)", dev, task)
+    if callbacks:
+        logger.info("Inference callbacks: %d loaded", len(callbacks))
 
     if not hasattr(model, "hf_device_map"):
         model = model.to(dev)

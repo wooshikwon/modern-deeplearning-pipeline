@@ -72,6 +72,7 @@ def run_rl_train(
     recipe_path: str,
     config_path: str,
     overrides: list[str] | None = None,
+    callbacks_file: str | None = None,
 ) -> None:
     """RL Recipe + Config YAML로 alignment 학습을 실행한다."""
     from mdp.settings.factory import SettingsFactory
@@ -79,11 +80,17 @@ def run_rl_train(
     if not is_json_mode():
         typer.echo(f"Recipe: {recipe_path}")
         typer.echo(f"Config: {config_path}")
+        if callbacks_file:
+            typer.echo(f"Callbacks: {callbacks_file}")
         if overrides:
             typer.echo(f"Overrides: {overrides}")
 
     try:
         settings = SettingsFactory().for_training(recipe_path, config_path, overrides=overrides)
+
+        if callbacks_file:
+            from mdp.training._common import load_callbacks_from_file
+            settings.recipe.callbacks = load_callbacks_from_file(callbacks_file)
     except Exception as e:
         if is_json_mode():
             emit_result(build_error(command="rl-train", error_type="ValidationError", message=str(e)))
