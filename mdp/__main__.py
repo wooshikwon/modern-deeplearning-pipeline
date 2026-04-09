@@ -1,3 +1,7 @@
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import typer
 
 from mdp.cli.output import OutputFormat, set_output_format
