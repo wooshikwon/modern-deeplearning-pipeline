@@ -1,0 +1,271 @@
+# Inference & Serving
+
+배치 추론, 텍스트 생성, 모델 내보내기, REST API 서빙을 다룬다.
+
+## 모델 소스
+
+추론/생성/서빙 명령은 세 가지 모델 소스를 지원한다 (상호 배타):
+
+| 옵션 | 설명 | 용도 |
+|------|------|------|
+| `--run-id <id>` | MLflow run 아티팩트 | 학습된 모델 로드 |
+| `--model-dir <dir>` | 로컬 디렉토리 | export된 모델 또는 체크포인트 |
+| `--pretrained <uri>` | 오픈소스 모델 URI | 학습 없이 직접 사용 |
+
+Pretrained URI 형식:
+- `hf://meta-llama/Llama-3-8B` — HuggingFace Hub
+- `timm://resnet50` — TIMM
+- `ultralytics://yolov8n` — YOLO
+- `local://./my-model` — 로컬 경로
+
+---
+
+## 배치 추론
+
+```bash
+mdp inference --run-id <id> --data test.jsonl \
+  --fields text=text_column label=label_column \
+  --metrics Accuracy F1Score \
+  --output-format parquet \
+  --output-dir ./results
+```
+
+### 주요 옵션
+
+| 옵션 | 설명 |
+|------|------|
+| `--data` | 데이터셋 (HF Hub 이름 또는 로컬 파일) |
+| `--fields` | 역할→컬럼 매핑 (`role=column` 형식) |
+| `--metrics` | 평가 메트릭 이름 (torchmetrics) |
+| `--output-format` | `parquet` / `csv` / `jsonl` |
+| `--output-dir` | 결과 저장 디렉토리 |
+| `--device-map` | 멀티 GPU 분배 (`auto` / `balanced` / `sequential`) |
+| `--callbacks` | 추론 콜백 YAML 파일 |
+
+### 오픈소스 모델 직접 추론
+
+Recipe 없이 오픈소스 모델을 바로 사용할 수 있다:
+
+```bash
+mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
+  --data test.jsonl \
+  --fields text=text \
+  --metrics Accuracy
+
+# 토크나이저 명시 (자동 추론이 안 될 때)
+mdp inference --pretrained hf://model --tokenizer other-tokenizer \
+  --data test.jsonl
+```
+
+### 드리프트 감지
+
+학습 시 baseline이 저장되었으면, 추론 시 자동으로 데이터 분포 변화를 감지한다.
+`--format json` 출력에 `monitoring.drift_detected`, `severity_level` 등이 포함된다.
+
+---
+
+## 텍스트 생성
+
+```bash
+mdp generate --run-id <id> \
+  --prompts prompts.jsonl \
+  --prompt-field prompt \
+  --output generated.jsonl \
+  --max-new-tokens 256 \
+  --temperature 0.7 \
+  --top-p 0.9 \
+  --num-samples 3 \
+  --batch-size 8
+```
+
+### 입력 형식
+
+`prompts.jsonl` — 각 줄이 JSON 객체:
+```json
+{"prompt": "Explain quantum computing in simple terms."}
+{"prompt": "Write a Python function to sort a list."}
+```
+
+`--prompt-field`로 프롬프트 텍스트가 담긴 필드명을 지정한다 (기본: `prompt`).
+
+### 주요 옵션
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--max-new-tokens` | 256 | 최대 생성 토큰 수 |
+| `--temperature` | 1.0 | 샘플링 온도 |
+| `--top-p` | 1.0 | Nucleus sampling |
+| `--top-k` | 50 | Top-k sampling |
+| `--do-sample` | true | 샘플링 활성화 |
+| `--num-samples` | 1 | 프롬프트당 생성 수 |
+| `--batch-size` | 1 | 배치 크기 |
+
+---
+
+## 모델 내보내기
+
+LoRA/QLoRA 어댑터를 base 모델에 merge하여 배포용 패키지를 생성한다:
+
+```bash
+mdp export --run-id <id> --output ./model-production
+
+# 로컬 체크포인트에서도 가능
+mdp export --checkpoint ./checkpoints/best --output ./model-production
+```
+
+출력 구조:
+```
+model-production/
+  ├── model.safetensors       # merged 전체 모델
+  ├── config.json
+  ├── tokenizer.json
+  ├── special_tokens_map.json
+  └── recipe.yaml             # 서빙 메타데이터
+```
+
+> MLflow에 저장되는 LoRA 아티팩트는 어댑터만(~50MB) 포함한다. `export`가 on-demand merge를 수행한다.
+
+---
+
+## REST API 서빙
+
+```bash
+# MLflow에서 모델 로드
+mdp serve --run-id <id> --port 8000
+
+# export된 모델에서 로드
+mdp serve --model-dir ./model-production --port 8000 --host 0.0.0.0
+```
+
+### 엔드포인트
+
+**`POST /predict`** — 추론 요청
+
+LLM (text_generation/seq2seq):
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Explain quantum computing"}'
+```
+SSE(Server-Sent Events) 스트리밍으로 토큰 단위 응답을 반환한다.
+
+분류 태스크:
+```bash
+curl -X POST http://localhost:8000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"text": "This movie is great"}'
+```
+
+**`GET /health`** — 서버 상태 확인
+
+### 멀티 GPU 서빙
+
+단일 GPU를 초과하는 대형 모델은 `device_map`으로 멀티 GPU에 분배한다:
+
+```bash
+mdp serve --run-id <id> \
+  --device-map auto \
+  --max-memory '{"0": "24GiB", "1": "40GiB"}'
+```
+
+| device_map | 동작 |
+|-----------|------|
+| `auto` | accelerate가 자동 분배 |
+| `balanced` | GPU 간 균등 분배 |
+| `sequential` | GPU 0부터 순서대로 채움 |
+
+### 서빙 아키텍처
+
+- **LLM**: `GenerateHandler` — HuggingFace `TextIteratorStreamer` + SSE 스트리밍. 동시 요청은 lock으로 제한 (1 stream/process)
+- **분류/NER**: `PredictHandler` — 동기 추론. `max_batch_size > 1`이면 동적 배칭
+
+### 프로덕션 배포
+
+MDP 서빙은 검증/데모 용도다. 프로덕션 LLM 서빙은:
+
+1. `mdp export`로 모델 패키징
+2. vLLM 또는 TGI에 전달 (tensor parallelism, continuous batching)
+
+---
+
+## 추론 콜백
+
+추론 시 모델 내부 상태(hidden state, attention 등)를 분석할 수 있다.
+
+### BaseInferenceCallback 인터페이스
+
+```python
+from mdp.callbacks.base import BaseInferenceCallback
+
+class ActivationAnalyzer(BaseInferenceCallback):
+    def setup(self, model, tokenizer=None, **kwargs):
+        """추론 시작 전. forward hook 등록."""
+        target = dict(model.named_modules())["model.layers.20"]
+        self._handle = target.register_forward_hook(self._capture)
+        self._activations = []
+
+    def _capture(self, module, input, output):
+        h = output[0] if isinstance(output, tuple) else output
+        self._activations.append(h.detach().cpu())
+
+    def on_batch(self, batch_idx, batch, outputs, **kwargs):
+        """매 배치 forward 후. 캡처된 활성화 처리."""
+        # self._activations[-1] 접근
+
+    def teardown(self, **kwargs):
+        """추론 완료 후. hook 해제, 결과 저장."""
+        self._handle.remove()
+        torch.save(self._activations, "activations.pt")
+```
+
+### 콜백 YAML 작성
+
+```yaml
+# analysis.yaml
+- _component_: my_project.ActivationAnalyzer
+  layers: [20, 40, 60]
+```
+
+### 사용
+
+```bash
+# 학습된 모델 + 분석 콜백
+mdp inference --run-id <id> --data test.jsonl --callbacks analysis.yaml
+
+# 오픈소스 모델 + 분석 콜백
+mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
+  --data prompts.jsonl --callbacks analysis.yaml
+```
+
+추론 루프는 hidden state/attention을 직접 다루지 않으며, 모든 내부 접근은 콜백의 `register_forward_hook`을 통해 이루어진다.
+
+---
+
+## JSON 출력
+
+모든 명령은 `--format json`을 지원한다. stdout에 JSON, stderr에 로그가 분리 출력된다.
+
+### 추론 결과 예시
+
+```json
+{
+  "status": "success",
+  "command": "inference",
+  "timestamp": "2026-04-09T12:00:00",
+  "run_id": "abc123",
+  "output_path": "./results/predictions.parquet",
+  "task": "text_generation",
+  "monitoring": {
+    "drift_detected": true,
+    "severity_level": "watch",
+    "alerts": ["entropy_drift: 0.15 > 0.1"]
+  }
+}
+```
+
+### 에러 처리
+
+| error.type | 대응 |
+|-----------|------|
+| `ValidationError` | Recipe/Config YAML 수정 |
+| `RuntimeError` | batch_size 축소, precision 변경, GPU 수 조정 |
