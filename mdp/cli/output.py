@@ -94,16 +94,35 @@ def resolve_model_source(
     run_id: str | None,
     model_dir: str | None,
     command: str,
-) -> Path:
-    """run_id 또는 model_dir에서 모델 디렉토리를 해석한다."""
+    pretrained: str | None = None,
+) -> Path | None:
+    """run_id, model_dir, 또는 pretrained URI에서 모델 소스를 해석한다.
+
+    세 옵션은 상호 배타적이다.  pretrained가 지정되면 None을 반환하고,
+    호출부가 PretrainedResolver로 직접 로드한다.
+    """
     from pathlib import Path
 
     import typer
 
-    if run_id and model_dir:
-        raise typer.BadParameter("--run-id와 --model-dir은 동시에 사용할 수 없습니다.")
-    if not run_id and not model_dir:
-        raise typer.BadParameter("--run-id 또는 --model-dir 중 하나가 필요합니다.")
+    sources = [s for s in (run_id, model_dir, pretrained) if s]
+    if len(sources) > 1:
+        raise typer.BadParameter(
+            "--run-id, --model-dir, --pretrained 중 하나만 사용할 수 있습니다."
+        )
+    if len(sources) == 0:
+        raise typer.BadParameter(
+            "--run-id, --model-dir, --pretrained 중 하나가 필요합니다."
+        )
+
+    if pretrained:
+        _PRETRAINED_COMMANDS = ("inference", "generate")
+        if command not in _PRETRAINED_COMMANDS:
+            raise typer.BadParameter(
+                f"--pretrained는 {', '.join(_PRETRAINED_COMMANDS)} 커맨드에서만 사용할 수 있습니다."
+            )
+        return None
+
     if run_id:
         import mlflow
 

@@ -75,6 +75,8 @@ def rl_train(
 def inference(
     run_id: str = typer.Option(None, "--run-id", help="MLflow run ID"),
     model_dir: str = typer.Option(None, "--model-dir", help="로컬 모델 디렉토리 (mdp export 결과)"),
+    pretrained: str = typer.Option(None, "--pretrained", help="사전학습 모델 URI (hf://model-name)"),
+    tokenizer: str = typer.Option(None, "--tokenizer", help="토크나이저 이름 (--pretrained 시 자동 추론, 명시 가능)"),
     data: str = typer.Option(..., "--data", help="추론 대상 데이터 (HF Hub 이름 또는 로컬 경로)"),
     fields: list[str] | None = typer.Option(None, "--fields", help="필드 매핑 오버라이드 (예: image=img label=class)"),
     metrics: list[str] | None = typer.Option(None, "--metrics", help="평가 metric (예: Accuracy F1Score)"),
@@ -83,16 +85,22 @@ def inference(
     device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
     override: list[str] | None = typer.Option(None, "--override", help="Recipe 오버라이드 (KEY=VALUE)"),
 ):
-    """배치 추론을 실행한다. --run-id 또는 --model-dir 중 하나를 지정."""
+    """배치 추론을 실행한다. --run-id, --model-dir, --pretrained 중 하나를 지정."""
     from mdp.cli.inference import run_inference
 
-    run_inference(run_id, model_dir, data, fields, metrics, output_format, output_dir, device_map=device_map, overrides=override)
+    run_inference(
+        run_id, model_dir, data, fields, metrics, output_format, output_dir,
+        device_map=device_map, overrides=override,
+        pretrained=pretrained, tokenizer_name=tokenizer,
+    )
 
 
 @app.command()
 def generate(
     run_id: str = typer.Option(None, "--run-id", help="MLflow run ID"),
     model_dir: str = typer.Option(None, "--model-dir", help="로컬 모델 디렉토리 (mdp export 결과)"),
+    pretrained: str = typer.Option(None, "--pretrained", help="사전학습 모델 URI (hf://model-name)"),
+    tokenizer: str = typer.Option(None, "--tokenizer", help="토크나이저 이름 (--pretrained 시 자동 추론, 명시 가능)"),
     prompts: str = typer.Option(..., "--prompts", help="프롬프트 JSONL 파일 경로"),
     prompt_field: str = typer.Option("prompt", "--prompt-field", help="JSONL에서 프롬프트 텍스트 필드명"),
     output: str = typer.Option("./generated.jsonl", "--output", "-o", help="출력 JSONL 경로"),
@@ -113,6 +121,7 @@ def generate(
         run_id, model_dir, prompts, prompt_field, output,
         max_new_tokens, temperature, top_p, top_k, do_sample,
         num_samples, batch_size, device_map, overrides=override,
+        pretrained=pretrained, tokenizer_name=tokenizer,
     )
 
 

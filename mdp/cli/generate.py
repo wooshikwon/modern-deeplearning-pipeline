@@ -45,6 +45,23 @@ def _resolve_tokenizer_name(settings: Any) -> str:
     )
 
 
+def _resolve_pretrained_tokenizer_name(pretrained_uri: str) -> str:
+    """pretrained URI에서 토크나이저 이름을 추론한다.
+
+    hf:// 접두사가 있으면 제거하고 HuggingFace 모델 이름을 반환한다.
+    접두사가 없으면 HF 모델명으로 간주한다.
+    """
+    if pretrained_uri.startswith("hf://"):
+        return pretrained_uri[5:]
+    for prefix in ("timm://", "ultralytics://", "local://"):
+        if pretrained_uri.startswith(prefix):
+            raise ValueError(
+                f"{prefix} 모델의 토크나이저는 자동 추론할 수 없습니다. "
+                "--tokenizer로 명시해 주세요."
+            )
+    return pretrained_uri
+
+
 def run_generate(
     run_id: str | None,
     model_dir: str | None,
@@ -60,15 +77,15 @@ def run_generate(
     batch_size: int = 1,
     device_map: str | None = None,
     overrides: list[str] | None = None,
+    pretrained: str | None = None,
+    tokenizer_name: str | None = None,
 ) -> None:
     """프롬프트 JSONL에서 autoregressive 생성을 실행한다."""
     import torch
     from transformers import AutoTokenizer
 
-    from mdp.serving.model_loader import reconstruct_model
-
     try:
-        model_path = resolve_model_source(run_id, model_dir, "generate")
+        model_path = resolve_model_source(run_id, model_dir, "generate", pretrained=pretrained)
     except typer.BadParameter as e:
         msg = str(e)
         if is_json_mode():
@@ -78,11 +95,28 @@ def run_generate(
         raise typer.Exit(code=1)
 
     try:
-        # 1. 모델 + settings 로드 (adapter merge + device_map + overrides)
-        model, settings = reconstruct_model(
-            model_path, merge=True, device_map=device_map, overrides=overrides,
-        )
-        model.eval()
+        is_pretrained = model_path is None
+
+        if is_pretrained:
+            # pretrained 분기: PretrainedResolver로 직접 로드, Recipe 없음
+            from mdp.models.pretrained import PretrainedResolver
+
+            model = PretrainedResolver.load(pretrained)
+            model.eval()
+
+            tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(pretrained)
+            tokenizer = AutoTokenizer.from_pretrained(tok_name)
+        else:
+            # 기존 artifact 분기: reconstruct_model로 Recipe 기반 로드
+            from mdp.serving.model_loader import reconstruct_model
+
+            model, settings = reconstruct_model(
+                model_path, merge=True, device_map=device_map, overrides=overrides,
+            )
+            model.eval()
+
+            tok_name = tokenizer_name or _resolve_tokenizer_name(settings)
+            tokenizer = AutoTokenizer.from_pretrained(tok_name)
 
         if not hasattr(model, "generate"):
             raise ValueError(
@@ -90,8 +124,7 @@ def run_generate(
                 "text_generation 태스크의 모델만 지원됩니다."
             )
 
-        # 2. Generation 파라미터: recipe defaults + CLI overrides
-        gen_spec = settings.recipe.generation
+        # Generation 파라미터: CLI defaults → recipe (artifact만) → CLI overrides
         gen_kwargs: dict[str, Any] = {
             "max_new_tokens": 256,
             "temperature": 1.0,
@@ -101,16 +134,18 @@ def run_generate(
             "num_beams": 1,
             "repetition_penalty": 1.0,
         }
-        if gen_spec is not None:
-            gen_kwargs.update({
-                "max_new_tokens": gen_spec.max_new_tokens,
-                "temperature": gen_spec.temperature,
-                "top_p": gen_spec.top_p,
-                "top_k": gen_spec.top_k,
-                "do_sample": gen_spec.do_sample,
-                "num_beams": gen_spec.num_beams,
-                "repetition_penalty": gen_spec.repetition_penalty,
-            })
+        if not is_pretrained:
+            gen_spec = settings.recipe.generation
+            if gen_spec is not None:
+                gen_kwargs.update({
+                    "max_new_tokens": gen_spec.max_new_tokens,
+                    "temperature": gen_spec.temperature,
+                    "top_p": gen_spec.top_p,
+                    "top_k": gen_spec.top_k,
+                    "do_sample": gen_spec.do_sample,
+                    "num_beams": gen_spec.num_beams,
+                    "repetition_penalty": gen_spec.repetition_penalty,
+                })
         # CLI 값이 명시적으로 전달되었으면 override
         if max_new_tokens is not None:
             gen_kwargs["max_new_tokens"] = max_new_tokens
@@ -123,18 +158,20 @@ def run_generate(
         if do_sample is not None:
             gen_kwargs["do_sample"] = do_sample
 
-        # 3. 토크나이저 로드
-        tokenizer_name = _resolve_tokenizer_name(settings)
-        tokenizer = AutoTokenizer.from_pretrained(tokenizer_name)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
         if not is_json_mode():
-            typer.echo(f"모델: {model_path}")
-            typer.echo(f"토크나이저: {tokenizer_name}")
+            if is_pretrained:
+                typer.echo(f"Pretrained: {pretrained}")
+            elif run_id:
+                typer.echo(f"MLflow run: {run_id}")
+            else:
+                typer.echo(f"모델 디렉토리: {model_dir}")
+            typer.echo(f"토크나이저: {tok_name}")
             typer.echo(f"프롬프트: {prompts}")
 
-        # 4. JSONL 프롬프트 읽기
+        # JSONL 프롬프트 읽기
         prompt_records: list[dict[str, Any]] = []
         with open(prompts) as f:
             for line in f:
@@ -148,7 +185,7 @@ def run_generate(
         if not is_json_mode():
             typer.echo(f"프롬프트 {len(prompt_records)}개 로드. 생성 시작...")
 
-        # 5. 배치 생성
+        # 배치 생성
         device = next(model.parameters()).device
         results: list[dict[str, Any]] = []
 
@@ -180,7 +217,7 @@ def run_generate(
                     result["generated_text"] = text
                     results.append(result)
 
-        # 6. 결과 저장
+        # 결과 저장
         output_path = Path(output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         with open(output_path, "w") as f:
