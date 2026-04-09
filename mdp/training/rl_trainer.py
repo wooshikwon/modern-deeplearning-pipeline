@@ -72,6 +72,7 @@ class RLTrainer:
         self.frozen: dict[str, nn.Module] = {}
         self.optimizers: dict[str, torch.optim.Optimizer] = {}
         self.schedulers: dict[str, Any] = {}
+        self.scheduler_intervals: dict[str, str] = {}
 
         for name, spec in recipe.rl.models.items():
             model = models[name]
@@ -81,7 +82,7 @@ class RLTrainer:
                 self.optimizers[name] = klass(model.parameters(), **kwargs)
                 if spec.get("scheduler") is not None:
                     sched_config = dict(spec["scheduler"])
-                    sched_config.pop("interval", "step")
+                    interval = sched_config.pop("interval", "step")
                     warmup_steps = sched_config.pop("warmup_steps", 0)
                     warmup_ratio = sched_config.pop("warmup_ratio", 0.0)
                     s_klass, s_kwargs = self.resolver.resolve_partial(sched_config)
@@ -105,6 +106,7 @@ class RLTrainer:
                             milestones=[warmup_steps],
                         )
                     self.schedulers[name] = scheduler
+                    self.scheduler_intervals[name] = interval
             else:
                 model.eval()
                 for p in model.parameters():
@@ -642,9 +644,10 @@ class RLTrainer:
                             else:
                                 for name, opt in self.optimizers.items():
                                     self.scaler.step(opt)
-                                    sched = self.schedulers.get(name)
-                                    if sched is not None:
-                                        sched.step()
+                                    if self.scheduler_intervals.get(name) == "step":
+                                        sched = self.schedulers.get(name)
+                                        if sched is not None:
+                                            sched.step()
                                 self.scaler.update()
                                 for opt in self.optimizers.values():
                                     opt.zero_grad(set_to_none=True)
@@ -661,6 +664,11 @@ class RLTrainer:
 
                         self._fire("on_epoch_end", epoch=self.epoch_counter, metrics={"loss": total_loss / max(num_steps, 1)})
                         self.epoch_counter += 1
+
+                        # Epoch-level scheduler stepping
+                        for name, sched in self.schedulers.items():
+                            if self.scheduler_intervals.get(name) == "epoch":
+                                sched.step()
 
                         # Epoch-based validation
                         if (
@@ -806,10 +814,14 @@ class RLTrainer:
                 trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
             losses = self.algorithm.compute_loss(trainable_out, frozen_out, batch)
 
+        step_schedulers = {
+            n: s for n, s in self.schedulers.items()
+            if self.scheduler_intervals.get(n) == "step"
+        }
         result = backward_and_step(
             losses=losses,
             optimizers=self.optimizers,
-            schedulers=self.schedulers,
+            schedulers=step_schedulers,
             scaler=self.scaler,
             trainable_models=self.trainable,
             grad_accum_steps=self.grad_accum_steps,
@@ -890,10 +902,14 @@ class RLTrainer:
                 }
                 losses = self.algorithm.compute_loss(trainable_out, frozen_out, gen_batch)
 
+            step_schedulers = {
+                n: s for n, s in self.schedulers.items()
+                if self.scheduler_intervals.get(n) == "step"
+            }
             result = backward_and_step(
                 losses=losses,
                 optimizers=self.optimizers,
-                schedulers=self.schedulers,
+                schedulers=step_schedulers,
                 scaler=self.scaler,
                 trainable_models=self.trainable,
                 grad_accum_steps=self.grad_accum_steps,
