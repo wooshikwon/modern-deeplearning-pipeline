@@ -127,7 +127,7 @@ def run_batch_inference(
     if callbacks:
         logger.info("Inference callbacks: %d loaded", len(callbacks))
 
-    from mdp.training.callbacks.base import BaseInferenceCallback
+    from mdp.callbacks.base import BaseInferenceCallback
 
     if not hasattr(model, "hf_device_map"):
         model = model.to(dev)

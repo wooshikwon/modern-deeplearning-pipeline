@@ -7,10 +7,10 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 | Command | Purpose |
 |---------|---------|
 | `mdp init <name> --task <task> --model <model>` | 프로젝트 스캐폴딩 + Recipe 템플릿 생성 |
-| `mdp train -r recipe.yaml -c config.yaml` | SFT 학습 |
-| `mdp rl-train -r rl-recipe.yaml -c config.yaml` | RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO) |
-| `mdp inference --run-id <id> --data <path>` | 배치 추론 + 평가 |
-| `mdp generate --run-id <id> --prompts <jsonl> -o <out>` | autoregressive 생성 (JSONL 프롬프트 → JSONL 결과) |
+| `mdp train -r recipe.yaml -c config.yaml` | SFT 학습. `--callbacks <yaml>` 으로 Recipe 콜백 override 가능 |
+| `mdp rl-train -r rl-recipe.yaml -c config.yaml` | RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO). `--callbacks <yaml>` 지원 |
+| `mdp inference --run-id <id> --data <path>` | 배치 추론 + 평가. `--pretrained <uri>` 대안 모델 소스, `--callbacks <yaml>` 추론 콜백 |
+| `mdp generate --run-id <id> --prompts <jsonl> -o <out>` | autoregressive 생성. `--pretrained <uri>` 대안, `--callbacks <yaml>` 추론 콜백 |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 + 전략 추천 |
 | `mdp export --run-id <id> --output <dir>` | adapter merge + 서빙용 패키징 (`--checkpoint`로 로컬 체크포인트도 가능) |
 | `mdp serve --run-id <id>` | REST API 서빙 |
@@ -34,12 +34,69 @@ mdp inference --run-id <id> --data test.jsonl --format json  # 추론
 
 ---
 
-## Two-File System
+## Two-File System + Callbacks
 
 - **Recipe** (실험 정의): 무엇을 학습할지 — 모델, 데이터, 하이퍼파라미터
 - **Config** (인프라 설정): 어디서 실행할지 — GPU, 분산 전략, MLflow, 체크포인트 경로
+- **Callbacks** (부가 동작): 체크포인트, 분석, 스티어링, 로깅 — `--callbacks <yaml>` 로 별도 파일 제공
 
-동일 Recipe를 다른 Config로 실행하면 같은 실험을 다른 환경에서 재현할 수 있다.
+동일 Recipe를 다른 Config로 실행하면 같은 실험을 다른 환경에서 재현할 수 있다. 콜백도 독립 파일로 분리하면 동일 실험에 다른 분석 동작을 조합할 수 있다.
+
+### `--pretrained` 모델 소스
+
+`inference`와 `generate`에서 `--run-id`, `--model-dir`, `--pretrained` 중 하나를 지정한다 (상호 배타):
+
+```bash
+# 학습된 모델 (기존 방식)
+mdp inference --run-id abc123 --data test.jsonl
+# 오픈소스 모델 직접 로드 (Recipe 없이)
+mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B --data prompts.jsonl
+# 토크나이저 명시 (자동 추론이 안 될 때)
+mdp generate --pretrained hf://model --prompts p.jsonl --tokenizer other-tokenizer
+```
+
+### `--callbacks` 파일
+
+train, rl-train, inference, generate 4개 커맨드에서 `--callbacks <yaml>` 옵션을 지원한다. 파일 형식은 Recipe의 `callbacks:` 섹션과 동일:
+
+```yaml
+# analysis.yaml
+- _component_: my_project.HiddenStateLogger
+  layers: [20, 40, 60]
+- _component_: ModelCheckpoint
+  monitor: val_loss
+```
+
+**병합 규칙** (학습 커맨드에서):
+- Recipe `callbacks:` 있고 `--callbacks` 없음 → Recipe 콜백 사용
+- `--callbacks` 있음 → `--callbacks`가 override (CLI 우선)
+- 둘 다 없음 → 콜백 없음
+
+### BaseInferenceCallback
+
+추론 콜백은 `BaseInferenceCallback`을 상속하여 3개 hook을 구현한다. 추론 루프는 hidden state/attention을 직접 다루지 않으며, 모든 내부 접근은 콜백이 `setup`에서 등록하는 `register_forward_hook`을 통해 이루어진다:
+
+```python
+from mdp.callbacks.base import BaseInferenceCallback
+
+class MyAnalysisCallback(BaseInferenceCallback):
+    def setup(self, model, tokenizer=None, **kwargs):
+        """추론 시작 전. 모델에 forward hook 등록, 버퍼 준비."""
+        self._handle = model.layer[20].register_forward_hook(self._capture)
+
+    def on_batch(self, batch_idx, batch, outputs, **kwargs):
+        """매 배치 forward 후. hook이 캡처한 활성화를 처리."""
+
+    def teardown(self, **kwargs):
+        """추론 완료 후. 누적 결과 저장, hook 해제."""
+        self._handle.remove()
+```
+
+```bash
+# 오픈소스 모델 + 분석 콜백
+mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
+  --data prompts.jsonl --callbacks analysis.yaml
+```
 
 ---
 

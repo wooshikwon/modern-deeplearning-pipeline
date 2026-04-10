@@ -1,4 +1,4 @@
-"""Re-export from mdp.callbacks.base for backward compatibility."""
+"""Shared callback base classes for training and inference."""
 
 from mdp.callbacks.base import BaseCallback, BaseInferenceCallback
 

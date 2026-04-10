@@ -130,104 +130,150 @@ def run_generate(
             if not is_json_mode():
                 typer.echo(f"Callbacks: {len(loaded_callbacks)}개 로드 ({callbacks_file})")
 
-        if not hasattr(model, "generate"):
-            raise ValueError(
-                f"모델 '{type(model).__name__}'에 generate 메서드가 없습니다. "
-                "text_generation 태스크의 모델만 지원됩니다."
-            )
+        # Inference callback lifecycle — setup
+        from mdp.callbacks.base import BaseInferenceCallback
 
-        # Generation 파라미터: CLI defaults → recipe (artifact만) → CLI overrides
-        gen_kwargs: dict[str, Any] = {
-            "max_new_tokens": 256,
-            "temperature": 1.0,
-            "top_p": 1.0,
-            "top_k": 50,
-            "do_sample": True,
-            "num_beams": 1,
-            "repetition_penalty": 1.0,
-        }
-        if not is_pretrained:
-            gen_spec = settings.recipe.generation
-            if gen_spec is not None:
-                gen_kwargs.update({
-                    "max_new_tokens": gen_spec.max_new_tokens,
-                    "temperature": gen_spec.temperature,
-                    "top_p": gen_spec.top_p,
-                    "top_k": gen_spec.top_k,
-                    "do_sample": gen_spec.do_sample,
-                    "num_beams": gen_spec.num_beams,
-                    "repetition_penalty": gen_spec.repetition_penalty,
-                })
-        # CLI 값이 명시적으로 전달되었으면 override
-        if max_new_tokens is not None:
-            gen_kwargs["max_new_tokens"] = max_new_tokens
-        if temperature is not None:
-            gen_kwargs["temperature"] = temperature
-        if top_p is not None:
-            gen_kwargs["top_p"] = top_p
-        if top_k is not None:
-            gen_kwargs["top_k"] = top_k
-        if do_sample is not None:
-            gen_kwargs["do_sample"] = do_sample
+        inference_cbs = [
+            cb for cb in loaded_callbacks
+            if isinstance(cb, BaseInferenceCallback)
+        ]
+        for cb in inference_cbs:
+            try:
+                cb.setup(model=model, tokenizer=tokenizer)
+            except Exception as e:
+                if getattr(cb, "critical", False):
+                    raise
+                logger.warning("Inference callback %s.setup 실패: %s", type(cb).__name__, e)
 
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        if not is_json_mode():
-            if is_pretrained:
-                typer.echo(f"Pretrained: {pretrained}")
-            elif run_id:
-                typer.echo(f"MLflow run: {run_id}")
-            else:
-                typer.echo(f"모델 디렉토리: {model_dir}")
-            typer.echo(f"토크나이저: {tok_name}")
-            typer.echo(f"프롬프트: {prompts}")
-
-        # JSONL 프롬프트 읽기
-        prompt_records: list[dict[str, Any]] = []
-        with open(prompts) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    prompt_records.append(json.loads(line))
-
-        if not prompt_records:
-            raise ValueError(f"프롬프트 파일이 비어 있습니다: {prompts}")
-
-        if not is_json_mode():
-            typer.echo(f"프롬프트 {len(prompt_records)}개 로드. 생성 시작...")
-
-        # 배치 생성
-        device = next(model.parameters()).device
-        results: list[dict[str, Any]] = []
-
-        for i in range(0, len(prompt_records), batch_size):
-            batch_records = prompt_records[i:i + batch_size]
-            batch_prompts = [r[prompt_field] for r in batch_records]
-
-            inputs = tokenizer(
-                batch_prompts, return_tensors="pt", padding=True, truncation=True,
-            ).to(device)
-
-            for _ in range(num_samples):
-                with torch.no_grad():
-                    output_ids = model.generate(
-                        **inputs,
-                        pad_token_id=tokenizer.pad_token_id,
-                        **gen_kwargs,
-                    )
-
-                # input 부분을 제외한 생성 텍스트만 디코딩
-                input_length = inputs["input_ids"].shape[1]
-                generated_ids = output_ids[:, input_length:]
-                generated_texts = tokenizer.batch_decode(
-                    generated_ids, skip_special_tokens=True,
+        try:
+            if not hasattr(model, "generate"):
+                raise ValueError(
+                    f"모델 '{type(model).__name__}'에 generate 메서드가 없습니다. "
+                    "text_generation 태스크의 모델만 지원됩니다."
                 )
 
-                for record, text in zip(batch_records, generated_texts):
-                    result = dict(record)
-                    result["generated_text"] = text
-                    results.append(result)
+            # Generation 파라미터: CLI defaults → recipe (artifact만) → CLI overrides
+            gen_kwargs: dict[str, Any] = {
+                "max_new_tokens": 256,
+                "temperature": 1.0,
+                "top_p": 1.0,
+                "top_k": 50,
+                "do_sample": True,
+                "num_beams": 1,
+                "repetition_penalty": 1.0,
+            }
+            if not is_pretrained:
+                gen_spec = settings.recipe.generation
+                if gen_spec is not None:
+                    gen_kwargs.update({
+                        "max_new_tokens": gen_spec.max_new_tokens,
+                        "temperature": gen_spec.temperature,
+                        "top_p": gen_spec.top_p,
+                        "top_k": gen_spec.top_k,
+                        "do_sample": gen_spec.do_sample,
+                        "num_beams": gen_spec.num_beams,
+                        "repetition_penalty": gen_spec.repetition_penalty,
+                    })
+            # CLI 값이 명시적으로 전달되었으면 override
+            if max_new_tokens is not None:
+                gen_kwargs["max_new_tokens"] = max_new_tokens
+            if temperature is not None:
+                gen_kwargs["temperature"] = temperature
+            if top_p is not None:
+                gen_kwargs["top_p"] = top_p
+            if top_k is not None:
+                gen_kwargs["top_k"] = top_k
+            if do_sample is not None:
+                gen_kwargs["do_sample"] = do_sample
+
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            if not is_json_mode():
+                if is_pretrained:
+                    typer.echo(f"Pretrained: {pretrained}")
+                elif run_id:
+                    typer.echo(f"MLflow run: {run_id}")
+                else:
+                    typer.echo(f"모델 디렉토리: {model_dir}")
+                typer.echo(f"토크나이저: {tok_name}")
+                typer.echo(f"프롬프트: {prompts}")
+
+            # JSONL 프롬프트 읽기
+            prompt_records: list[dict[str, Any]] = []
+            with open(prompts) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        prompt_records.append(json.loads(line))
+
+            if not prompt_records:
+                raise ValueError(f"프롬프트 파일이 비어 있습니다: {prompts}")
+
+            if not is_json_mode():
+                typer.echo(f"프롬프트 {len(prompt_records)}개 로드. 생성 시작...")
+
+            # 배치 생성
+            device = next(model.parameters()).device
+            results: list[dict[str, Any]] = []
+            batch_idx = 0
+
+            for i in range(0, len(prompt_records), batch_size):
+                batch_records = prompt_records[i:i + batch_size]
+                batch_prompts = [r[prompt_field] for r in batch_records]
+
+                inputs = tokenizer(
+                    batch_prompts, return_tensors="pt", padding=True, truncation=True,
+                ).to(device)
+
+                for _ in range(num_samples):
+                    with torch.no_grad():
+                        output_ids = model.generate(
+                            **inputs,
+                            pad_token_id=tokenizer.pad_token_id,
+                            **gen_kwargs,
+                        )
+
+                    # input 부분을 제외한 생성 텍스트만 디코딩
+                    input_length = inputs["input_ids"].shape[1]
+                    generated_ids = output_ids[:, input_length:]
+                    generated_texts = tokenizer.batch_decode(
+                        generated_ids, skip_special_tokens=True,
+                    )
+
+                    # Inference callback — on_batch
+                    for cb in inference_cbs:
+                        try:
+                            cb.on_batch(
+                                batch_idx=batch_idx,
+                                batch=dict(inputs),
+                                outputs={"generated_ids": generated_ids},
+                            )
+                        except Exception as e:
+                            if getattr(cb, "critical", False):
+                                raise
+                            logger.warning(
+                                "Inference callback %s.on_batch 실패: %s",
+                                type(cb).__name__, e,
+                            )
+                    batch_idx += 1
+
+                    for record, text in zip(batch_records, generated_texts):
+                        result = dict(record)
+                        result["generated_text"] = text
+                        results.append(result)
+        finally:
+            # Inference callback lifecycle — teardown (always runs)
+            for cb in inference_cbs:
+                try:
+                    cb.teardown()
+                except Exception as e:
+                    if getattr(cb, "critical", False):
+                        raise
+                    logger.warning(
+                        "Inference callback %s.teardown 실패: %s",
+                        type(cb).__name__, e,
+                    )
 
         # 결과 저장
         output_path = Path(output)
