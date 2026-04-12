@@ -83,9 +83,15 @@ def inference(
     fields: list[str] | None = typer.Option(None, "--fields", help="필드 매핑 오버라이드 (예: image=img label=class)"),
     metrics: list[str] | None = typer.Option(None, "--metrics", help="평가 metric (예: Accuracy F1Score)"),
     callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (추론 콜백)"),
+    save_output: bool = typer.Option(False, "--save-output", help="콜백 전용 모드에서도 DefaultOutputCallback으로 결과 파일을 저장"),
     output_format: str = typer.Option("parquet", "--output-format", help="결과 포맷: parquet|csv|jsonl"),
     output_dir: str = typer.Option("./output", "--output-dir", help="결과 저장 디렉토리"),
     device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
+    dtype: str = typer.Option(None, "--dtype", help="모델 로딩 dtype: float32|float16|bfloat16"),
+    trust_remote_code: bool = typer.Option(False, "--trust-remote-code/--no-trust-remote-code", help="HF 모델의 remote code 신뢰 여부"),
+    attn_impl: str = typer.Option(None, "--attn-impl", help="어텐션 구현: flash_attention_2|sdpa|eager"),
+    batch_size: int = typer.Option(32, "--batch-size", help="pretrained 추론 배치 크기 (대형 모델은 줄여서 OOM 방지)"),
+    max_length: int = typer.Option(512, "--max-length", help="토큰화 최대 길이 (pretrained 경로)"),
     override: list[str] | None = typer.Option(None, "--override", help="Recipe 오버라이드 (KEY=VALUE)"),
 ):
     """배치 추론을 실행한다. --run-id, --model-dir, --pretrained 중 하나를 지정."""
@@ -96,6 +102,9 @@ def inference(
         device_map=device_map, overrides=override,
         pretrained=pretrained, tokenizer_name=tokenizer,
         callbacks_file=callbacks,
+        dtype=dtype, trust_remote_code=trust_remote_code, attn_impl=attn_impl,
+        save_output=save_output,
+        batch_size=batch_size, max_length=max_length,
     )
 
 
@@ -117,6 +126,9 @@ def generate(
     batch_size: int = typer.Option(1, "--batch-size", help="배치 크기"),
     callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (추론 콜백)"),
     device_map: str = typer.Option(None, "--device-map", help="multi-GPU 분산 배치: auto|balanced|sequential"),
+    dtype: str = typer.Option(None, "--dtype", help="모델 로딩 dtype: float32|float16|bfloat16"),
+    trust_remote_code: bool = typer.Option(False, "--trust-remote-code/--no-trust-remote-code", help="HF 모델의 remote code 신뢰 여부"),
+    attn_impl: str = typer.Option(None, "--attn-impl", help="어텐션 구현: flash_attention_2|sdpa|eager"),
     override: list[str] | None = typer.Option(None, "--override", help="Recipe 오버라이드 (KEY=VALUE)"),
 ):
     """프롬프트 JSONL에서 autoregressive 생성을 실행한다."""
@@ -128,6 +140,7 @@ def generate(
         num_samples, batch_size, device_map, overrides=override,
         pretrained=pretrained, tokenizer_name=tokenizer,
         callbacks_file=callbacks,
+        dtype=dtype, trust_remote_code=trust_remote_code, attn_impl=attn_impl,
     )
 
 

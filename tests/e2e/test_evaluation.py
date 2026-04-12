@@ -6,6 +6,7 @@ from pathlib import Path
 
 import torch
 
+from mdp.callbacks.inference import DefaultOutputCallback
 from mdp.serving.inference import run_batch_inference
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
 from tests.e2e.models import TinyVisionModel
@@ -41,6 +42,9 @@ def test_inference_with_metrics(tmp_path: Path) -> None:
     loader = ListDataLoader(batches)
 
     metrics = [_SimpleAccuracy()]
+    output_cb = DefaultOutputCallback(
+        output_path=tmp_path / "preds", output_format="jsonl", task="classification",
+    )
     result_path, eval_results = run_batch_inference(
         model=model,
         dataloader=loader,
@@ -49,8 +53,10 @@ def test_inference_with_metrics(tmp_path: Path) -> None:
         task="classification",
         device="cpu",
         metrics=metrics,
+        callbacks=[output_cb],
     )
 
+    assert result_path is not None
     assert result_path.exists()
     assert "_SimpleAccuracy" in eval_results
     acc = eval_results["_SimpleAccuracy"]
@@ -63,6 +69,9 @@ def test_inference_without_metrics(tmp_path: Path) -> None:
     batches = make_vision_batches(num_batches=2, batch_size=2, num_classes=2)
     loader = ListDataLoader(batches)
 
+    output_cb = DefaultOutputCallback(
+        output_path=tmp_path / "preds", output_format="parquet", task="classification",
+    )
     result_path, eval_results = run_batch_inference(
         model=model,
         dataloader=loader,
@@ -70,8 +79,10 @@ def test_inference_without_metrics(tmp_path: Path) -> None:
         output_format="parquet",
         task="classification",
         device="cpu",
+        callbacks=[output_cb],
     )
 
+    assert result_path is not None
     assert result_path.exists()
     assert eval_results == {}
 
@@ -84,6 +95,9 @@ def test_metric_missing_key_silent(tmp_path: Path) -> None:
     loader = ListDataLoader(batches)
 
     metrics = [_SimpleAccuracy()]
+    output_cb = DefaultOutputCallback(
+        output_path=tmp_path / "preds", output_format="jsonl", task="classification",
+    )
     result_path, eval_results = run_batch_inference(
         model=model,
         dataloader=loader,
@@ -92,6 +106,7 @@ def test_metric_missing_key_silent(tmp_path: Path) -> None:
         task="classification",
         device="cpu",
         metrics=metrics,
+        callbacks=[output_cb],
     )
 
     # labels가 없으므로 accuracy는 0/0 = 0.0

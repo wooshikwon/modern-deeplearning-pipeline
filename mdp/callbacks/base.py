@@ -135,7 +135,23 @@ class BaseInferenceCallback(BaseCallback):
         """
 
     def on_batch(self, batch_idx: int, batch: dict, outputs: dict, **kwargs) -> None:  # noqa: ARG002
-        """매 배치 forward 후 호출. hook이 캡처한 활성화를 처리한다."""
+        """매 배치 forward 후 호출. hook이 캡처한 활성화를 처리한다.
+
+        Parameters
+        ----------
+        batch_idx:
+            현재 배치의 0-based 인덱스.
+        batch:
+            모델에 전달된 입력 배치 dict.
+        outputs:
+            모델의 정규화된 출력 dict.
+        **kwargs:
+            추가 컨텍스트. 현재 지원되는 키:
+
+            - ``metadata`` (``list[dict] | None``): pretrained 분기에서 토큰화 전에
+              추출된 원본 컬럼의 현재 배치 슬라이스. 각 dict는 한 샘플의 메타데이터
+              (label, topic 등)를 담고 있다. artifact 분기이거나 메타데이터가 없으면 None.
+        """
 
     def teardown(self, **kwargs) -> None:  # noqa: ARG002
         """추론 완료 후 호출. 누적 결과 저장, hook 핸들 해제."""

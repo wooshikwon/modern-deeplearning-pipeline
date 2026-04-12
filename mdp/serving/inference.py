@@ -1,17 +1,21 @@
-"""배치 추론 — 모델 포워드 + 태스크별 후처리 + 결과 저장 + (선택) metric 평가."""
+"""배치 추론 — 모델 포워드 + 콜백 dispatch + (선택) metric 평가.
+
+출력 후처리(softmax, numpy 변환)와 파일 저장은 ``DefaultOutputCallback`` 이 담당한다.
+추론 루프 본문은 ``forward_fn(batch)`` -> 콜백 ``on_batch`` -> metric ``update`` 만 수행한다.
+"""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import torch
+from torch import Tensor, nn
 from torch.utils.data import DataLoader
 
 logger = logging.getLogger(__name__)
-
-_SUPPORTED_FORMATS = {"parquet", "csv", "jsonl"}
 
 
 def _detect_device(device: str | torch.device | None) -> torch.device:
@@ -25,55 +29,51 @@ def _detect_device(device: str | torch.device | None) -> torch.device:
     return torch.device("cpu")
 
 
-def _postprocess(outputs: dict[str, torch.Tensor], task: str) -> dict[str, Any]:
-    """출력 키 기반 모델 출력 후처리."""
-    if "generated_ids" in outputs:
-        return {"generated_ids": outputs["generated_ids"].cpu().numpy()}
+def _make_forward_fn(model: nn.Module) -> Callable[[dict[str, Tensor]], dict[str, Tensor]]:
+    """모델 유형에 따라 정규화된 forward callable을 생성한다.
 
-    if "boxes" in outputs:
-        return {"boxes": outputs["boxes"].cpu().numpy()}
+    BaseModel이면 기존 ``model(batch)`` 계약을 그대로 사용하고,
+    그 외(HuggingFace 모델 등)이면 ``model(**batch)`` 로 키워드 인자를 언패킹한 뒤
+    ModelOutput을 ``dict[str, Tensor]`` 로 정규화한다.
 
-    if "logits" in outputs:
-        logits = outputs["logits"]
-        probs = torch.softmax(logits, dim=-1)
-        preds = torch.argmax(logits, dim=-1)
-        return {
-            "prediction": preds.cpu().numpy(),
-            "probabilities": probs.cpu().numpy(),
-        }
+    이 함수는 추론 루프 진입 전에 한 번만 호출되며, 루프 내에서는 반환된
+    callable만 사용하므로 분기 비용이 없다.
+    """
+    from mdp.models.base import BaseModel
 
-    # fallback: 첫 번째 키
-    first_key = next(iter(outputs))
-    return {first_key: outputs[first_key].cpu().numpy()}
+    if isinstance(model, BaseModel):
+        def _base_forward(batch: dict[str, Tensor]) -> dict[str, Tensor]:
+            return model(batch)
+        return _base_forward
 
+    # HF 모델 경로: **batch로 키워드 인자 언패킹 + 출력 정규화
+    def _hf_forward(batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        outputs = model(**batch)
 
-def _save_results(
-    records: list[dict[str, Any]],
-    output_path: Path,
-    output_format: str,
-) -> Path:
-    """결과를 parquet/csv/jsonl로 저장."""
-    import pandas as pd  # lazy import
+        # 이미 dict이면 그대로 반환 (일부 커스텀 nn.Module)
+        if isinstance(outputs, dict):
+            return outputs
 
-    df = pd.DataFrame(records)
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+        # 단일 Tensor → logits 키로 감싸기
+        if isinstance(outputs, Tensor):
+            return {"logits": outputs}
 
-    if output_format == "parquet":
-        path = output_path.with_suffix(".parquet")
-        df.to_parquet(path, index=False)
-    elif output_format == "csv":
-        path = output_path.with_suffix(".csv")
-        df.to_csv(path, index=False)
-    elif output_format == "jsonl":
-        path = output_path.with_suffix(".jsonl")
-        df.to_json(path, orient="records", lines=True)
-    else:
-        msg = f"Unsupported format: {output_format!r}. Use one of {_SUPPORTED_FORMATS}"
-        raise ValueError(msg)
+        # HuggingFace ModelOutput → 콜백이 기대하는 키로 정규화
+        # 우선순위: logits > last_hidden_state > dict 변환 > output 폴백
+        if hasattr(outputs, "logits") and outputs.logits is not None:
+            result: dict[str, Tensor] = {"logits": outputs.logits}
+            # object detection 모델: boxes 키도 함께 전달
+            if hasattr(outputs, "pred_boxes") and outputs.pred_boxes is not None:
+                result["boxes"] = outputs.pred_boxes
+            return result
+        if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
+            return {"last_hidden_state": outputs.last_hidden_state}
+        # 그 외 ModelOutput (to_tuple이 있으면 ModelOutput 프로토콜)
+        if hasattr(outputs, "keys"):
+            return {k: v for k, v in outputs.items() if isinstance(v, Tensor)}
+        return {"output": outputs}
 
-    logger.info("Saved %d records → %s", len(df), path)
-    return path
+    return _hf_forward
 
 
 def run_batch_inference(
@@ -86,8 +86,15 @@ def run_batch_inference(
     metrics: list[Any] | None = None,
     callbacks: list[Any] | None = None,
     tokenizer: Any = None,
-) -> tuple[Path, dict[str, Any]]:
-    """배치 추론을 실행하고 결과를 파일로 저장한다.
+    metadata: list[dict] | None = None,
+) -> tuple[Path | None, dict[str, Any]]:
+    """배치 추론을 실행한다.
+
+    출력 후처리와 파일 저장은 콜백(``DefaultOutputCallback``)이 담당한다.
+    추론 루프 본문은 ``forward_fn(batch)`` -> 콜백 dispatch -> metric update만 수행한다.
+    ``DefaultOutputCallback`` 이 콜백 리스트에 포함되어 있으면 해당 콜백이 배치별
+    후처리(softmax, numpy 변환)와 파일 저장을 수행하고, 포함되어 있지 않으면
+    출력 파일이 생성되지 않는다 (콜백 전용 모드).
 
     Parameters
     ----------
@@ -97,31 +104,37 @@ def run_batch_inference(
         입력 데이터를 제공하는 DataLoader.
     output_path:
         결과 파일 경로 (확장자는 format에 따라 자동 설정).
+        ``DefaultOutputCallback`` 이 콜백 리스트에 포함된 경우에만 사용된다.
     output_format:
         ``parquet`` | ``csv`` | ``jsonl``.
+        ``DefaultOutputCallback`` 이 콜백 리스트에 포함된 경우에만 사용된다.
     task:
         ``classification`` | ``detection`` | ``text_generation`` | 기타.
+        ``DefaultOutputCallback`` 이 콜백 리스트에 포함된 경우에만 사용된다.
     device:
         추론 디바이스. ``None`` 이면 자동 감지.
     metrics:
-        평가 metric 리스트. 각 metric은 update(outputs, batch) / compute() 프로토콜.
-        None이면 prediction만 저장.
+        평가 metric 리스트. 각 metric은 ``update(outputs, batch)`` / ``compute()``
+        프로토콜. None이면 metric 평가 없음. metric은 raw 텐서(outputs)를 직접
+        받으므로 ``DefaultOutputCallback`` 유무와 무관하게 동작한다.
     callbacks:
         추론 콜백 리스트. ``BaseInferenceCallback`` 인스턴스는 setup/on_batch/teardown
         lifecycle이 자동 dispatch된다. None이면 콜백 없음.
     tokenizer:
         토크나이저. ``BaseInferenceCallback.setup()`` 에 전달된다. None 가능.
+    metadata:
+        샘플별 메타데이터 레코드 리스트. pretrained 분기에서 토큰화 전에 추출된
+        원본 컬럼(label, topic 등)이다. None이면 메타데이터 없음.
+        각 배치의 해당 슬라이스가 ``on_batch(metadata=...)`` kwargs로 콜백에 전달된다.
 
     Returns
     -------
-    tuple[Path, dict]:
-        (저장된 결과 파일 경로, 평가 metric 결과 dict).
+    tuple[Path | None, dict]:
+        (결과 파일 경로, 평가 metric 결과 dict).
+        ``DefaultOutputCallback`` 이 콜백 리스트에 포함되어 있으면 해당 콜백의
+        ``result_path`` 를, 그렇지 않으면 ``None`` 을 반환한다.
         metrics가 None이면 빈 dict.
     """
-    if output_format not in _SUPPORTED_FORMATS:
-        msg = f"Unsupported format: {output_format!r}. Use one of {_SUPPORTED_FORMATS}"
-        raise ValueError(msg)
-
     dev = _detect_device(device)
     logger.info("Running batch inference on %s (task=%s)", dev, task)
     if callbacks:
@@ -146,7 +159,9 @@ def run_batch_inference(
                 raise
             logger.warning("Inference callback %s.setup 실패: %s", type(cb).__name__, e)
 
-    all_records: list[dict[str, Any]] = []
+    forward_fn = _make_forward_fn(model)
+    _sample_offset = 0  # metadata 슬라이싱용 누적 오프셋
+    _total_samples = 0
 
     try:
         with torch.no_grad():
@@ -160,35 +175,27 @@ def run_batch_inference(
                 elif isinstance(batch, torch.Tensor):
                     batch = batch.to(dev)
 
-                # dict I/O 관례: model(batch) — BaseModel.forward(batch: dict) 계약
-                if isinstance(batch, dict):
-                    outputs = model(batch)
-                else:
-                    outputs = model(batch)
+                outputs = forward_fn(batch)
 
-                # 모델이 텐서 하나만 반환하면 dict로 감싼다
-                if isinstance(outputs, torch.Tensor):
-                    outputs = {"logits": outputs}
+                # 현재 배치 크기 — metadata 슬라이싱에 사용
+                current_batch_size = next(iter(outputs.values())).shape[0]
 
-                # Inference callback — on_batch
+                # Inference callback — on_batch (metadata 슬라이스 전달)
+                meta_slice = None
+                if metadata is not None:
+                    meta_slice = metadata[_sample_offset:_sample_offset + current_batch_size]
                 for cb in inference_cbs:
                     try:
-                        cb.on_batch(batch_idx=batch_idx, batch=batch, outputs=outputs)
+                        cb.on_batch(batch_idx=batch_idx, batch=batch, outputs=outputs, metadata=meta_slice)
                     except Exception as e:
                         if getattr(cb, "critical", False):
                             raise
                         logger.warning("Inference callback %s.on_batch 실패: %s", type(cb).__name__, e)
 
-                processed = _postprocess(outputs, task)
+                _sample_offset += current_batch_size
+                _total_samples += current_batch_size
 
-                # 배치 전체를 한 번에 레코드로 변환
-                batch_size = next(iter(processed.values())).shape[0]
-                for k in processed:
-                    processed[k] = processed[k].tolist()
-                for i in range(batch_size):
-                    all_records.append({k: v[i] for k, v in processed.items()})
-
-                # Metric 업데이트
+                # Metric 업데이트 — raw 텐서를 직접 받으므로 콜백 유무와 무관
                 if metrics:
                     for m in metrics:
                         m.update(outputs, batch)
@@ -205,8 +212,16 @@ def run_batch_inference(
                     raise
                 logger.warning("Inference callback %s.teardown 실패: %s", type(cb).__name__, e)
 
-    logger.info("Inference complete: %d samples", len(all_records))
-    result_path = _save_results(all_records, Path(output_path), output_format)
+    logger.info("Inference complete: %d samples", _total_samples)
+
+    # DefaultOutputCallback에서 result_path 추출
+    from mdp.callbacks.inference import DefaultOutputCallback
+
+    output_cb = next(
+        (cb for cb in inference_cbs if isinstance(cb, DefaultOutputCallback)),
+        None,
+    )
+    result_path = output_cb.result_path if output_cb else None
 
     # Metric 집계
     eval_results: dict[str, Any] = {}

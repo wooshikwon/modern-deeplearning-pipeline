@@ -41,10 +41,11 @@ mdp inference --run-id <id> --data test.jsonl \
 | `--output-dir` | 결과 저장 디렉토리 |
 | `--device-map` | 멀티 GPU 분배 (`auto` / `balanced` / `sequential`) |
 | `--callbacks` | 추론 콜백 YAML 파일 |
+| `--save-output` | 콜백 전용 모드에서도 DefaultOutputCallback으로 결과 파일을 저장 |
 
 ### 오픈소스 모델 직접 추론
 
-Recipe 없이 오픈소스 모델을 바로 사용할 수 있다:
+Recipe 없이 오픈소스 모델을 바로 사용할 수 있다. `--pretrained`로 지정된 모델은 `config.architectures`에서 클래스를 자동 결정한다. `architectures` 필드가 없는 모델은 에러가 발생한다.
 
 ```bash
 mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
@@ -55,7 +56,22 @@ mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
 # 토크나이저 명시 (자동 추론이 안 될 때)
 mdp inference --pretrained hf://model --tokenizer other-tokenizer \
   --data test.jsonl
+
+# dtype/attention/remote-code 지정
+mdp inference --pretrained hf://Qwen/Qwen2.5-7B \
+  --data test.jsonl --dtype float32 --trust-remote-code --attn-impl sdpa
 ```
+
+### Pretrained 모델 로딩 옵션
+
+`--pretrained` 사용 시 `from_pretrained()`에 전달되는 추가 옵션:
+
+| 옵션 | 기본값 | 설명 |
+|------|--------|------|
+| `--dtype` | None (모델 기본) | 모델 로딩 dtype (`float32` / `float16` / `bfloat16`). BFloat16 기본 모델이 numpy 변환 에러를 일으킬 때 `float32`를 지정한다 |
+| `--trust-remote-code` | False | HuggingFace 모델의 custom code 실행을 허용한다 (Qwen2.5, Gemma-2 등) |
+| `--attn-impl` | None (모델 기본) | 어텐션 구현 (`flash_attention_2` / `sdpa` / `eager`) |
+| `--device-map` | None | `from_pretrained(device_map=...)`으로 전달. 설정 시 `.to(device)` 호출을 스킵한다 |
 
 ### 드리프트 감지
 
@@ -190,7 +206,22 @@ MDP 서빙은 검증/데모 용도다. 프로덕션 LLM 서빙은:
 
 ## 추론 콜백
 
-추론 시 모델 내부 상태(hidden state, attention 등)를 분석할 수 있다.
+추론 루프는 `forward_fn(batch)` -> 콜백 dispatch -> metric update만 수행한다. 출력 처리(softmax, numpy 변환, 파일 저장)는 `DefaultOutputCallback`이 담당하며, 콜백이 없으면 출력 처리가 일어나지 않는다.
+
+### DefaultOutputCallback
+
+`_postprocess` + `_save_results`를 캡슐화한 기본 출력 콜백. 기존 추론 루프에서 하드코딩되어 있던 출력 처리 로직을 콜백으로 분리하여, 콜백 전용 추론(hidden state 추출 등)에서 불필요한 메모리 소비를 제거한다.
+
+CLI는 모델 소스와 콜백 유무에 따라 DefaultOutputCallback을 자동 주입한다:
+
+| 경로 | 콜백 상태 | DefaultOutputCallback | 이유 |
+|------|----------|----------------------|------|
+| Recipe (`--run-id`, `--model-dir`) | 무관 | 항상 자동 추가 | Recipe 경로는 결과 저장이 기본 기대 |
+| Pretrained | 콜백 없음 | 자동 추가 | 결과 저장이 기본 기대 |
+| Pretrained | 사용자 콜백 있음 | 미추가 | 콜백 전용 모드 (메모리 절약) |
+| Pretrained | 사용자 콜백 + `--save-output` | 명시 추가 | 사용자가 출력 저장도 원함 |
+
+자동 주입은 CLI 레이어에서 수행되며, `run_batch_inference`는 전달받은 콜백을 그대로 실행하는 순수한 엔진이다.
 
 ### BaseInferenceCallback 인터페이스
 

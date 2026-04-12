@@ -80,6 +80,9 @@ def run_generate(
     pretrained: str | None = None,
     tokenizer_name: str | None = None,
     callbacks_file: str | None = None,
+    dtype: str | None = None,
+    trust_remote_code: bool = False,
+    attn_impl: str | None = None,
 ) -> None:
     """프롬프트 JSONL에서 autoregressive 생성을 실행한다."""
     import torch
@@ -102,7 +105,10 @@ def run_generate(
             # pretrained 분기: PretrainedResolver로 직접 로드, Recipe 없음
             from mdp.models.pretrained import PretrainedResolver
 
-            model = PretrainedResolver.load(pretrained)
+            from mdp.cli.inference import _build_pretrained_kwargs
+
+            model_kwargs = _build_pretrained_kwargs(dtype, trust_remote_code, attn_impl, device_map)
+            model = PretrainedResolver.load(pretrained, **model_kwargs)
             model.eval()
 
             tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(pretrained)

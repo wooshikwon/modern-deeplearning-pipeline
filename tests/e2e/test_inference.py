@@ -8,6 +8,8 @@ from typing import Any
 import torch
 from torch import nn
 
+from mdp.callbacks.inference import DefaultOutputCallback
+from mdp.models.base import BaseModel
 from mdp.serving.inference import run_batch_inference
 from mdp.training.callbacks.base import BaseInferenceCallback
 from tests.e2e.datasets import ListDataLoader, make_vision_batches
@@ -26,6 +28,9 @@ def test_batch_inference_classification(tmp_path: Path) -> None:
     loader = ListDataLoader(batches)
 
     output_path = tmp_path / "preds"
+    output_cb = DefaultOutputCallback(
+        output_path=output_path, output_format="jsonl", task="classification",
+    )
     result_path, eval_results = run_batch_inference(
         model=model,
         dataloader=loader,
@@ -33,8 +38,10 @@ def test_batch_inference_classification(tmp_path: Path) -> None:
         output_format="jsonl",
         task="classification",
         device="cpu",
+        callbacks=[output_cb],
     )
 
+    assert result_path is not None
     assert result_path.exists()
     assert result_path.suffix == ".jsonl"
 
@@ -52,6 +59,9 @@ def test_batch_inference_formats(tmp_path: Path) -> None:
 
     for fmt, suffix in [("csv", ".csv"), ("parquet", ".parquet")]:
         output_path = tmp_path / f"preds_{fmt}"
+        output_cb = DefaultOutputCallback(
+            output_path=output_path, output_format=fmt, task="classification",
+        )
         result_path, _ = run_batch_inference(
             model=model,
             dataloader=loader,
@@ -59,7 +69,9 @@ def test_batch_inference_formats(tmp_path: Path) -> None:
             output_format=fmt,
             task="classification",
             device="cpu",
+            callbacks=[output_cb],
         )
+        assert result_path is not None
         assert result_path.exists()
         assert result_path.suffix == suffix
         assert result_path.stat().st_size > 0
@@ -109,6 +121,9 @@ def test_inference_callback_lifecycle(tmp_path: Path) -> None:
     loader = ListDataLoader(batches)
 
     cb = _HiddenStateCaptureCallback(layer_name="classifier")
+    output_cb = DefaultOutputCallback(
+        output_path=tmp_path / "preds", output_format="jsonl", task="classification",
+    )
 
     result_path, _ = run_batch_inference(
         model=model,
@@ -117,7 +132,7 @@ def test_inference_callback_lifecycle(tmp_path: Path) -> None:
         output_format="jsonl",
         task="classification",
         device="cpu",
-        callbacks=[cb],
+        callbacks=[cb, output_cb],
     )
 
     # Lifecycle 호출 확인
@@ -135,6 +150,7 @@ def test_inference_callback_lifecycle(tmp_path: Path) -> None:
     assert cb._hook_handle is None
 
     # 추론 결과도 정상 저장
+    assert result_path is not None
     assert result_path.exists()
 
 
@@ -148,7 +164,7 @@ def test_inference_callback_teardown_on_error(tmp_path: Path) -> None:
         def teardown(self, **kwargs) -> None:
             self.teardown_called = True
 
-    class _ExplodingModel(nn.Module):
+    class _ExplodingModel(BaseModel):
         """2번째 배치에서 에러를 발생시키는 모델."""
         def __init__(self) -> None:
             super().__init__()
@@ -161,6 +177,12 @@ def test_inference_callback_teardown_on_error(tmp_path: Path) -> None:
                 raise RuntimeError("deliberate test explosion")
             x = batch["pixel_values"].flatten(1)
             return {"logits": self.linear(x)}
+
+        def training_step(self, batch: dict) -> torch.Tensor:
+            return self.forward(batch)["logits"].mean()
+
+        def validation_step(self, batch: dict) -> dict[str, float]:
+            return {"val_loss": 0.0}
 
     model = _ExplodingModel()
     batches = make_vision_batches(num_batches=3, batch_size=2, num_classes=2)
@@ -224,6 +246,9 @@ def test_inference_callback_noncritical_swallowed(tmp_path: Path) -> None:
     batches = make_vision_batches(num_batches=2, batch_size=2, num_classes=2)
     loader = ListDataLoader(batches)
     cb = _FailingCallback()
+    output_cb = DefaultOutputCallback(
+        output_path=tmp_path / "preds", output_format="jsonl", task="classification",
+    )
 
     # Should not raise
     result_path, _ = run_batch_inference(
@@ -232,15 +257,16 @@ def test_inference_callback_noncritical_swallowed(tmp_path: Path) -> None:
         output_path=tmp_path / "preds",
         output_format="jsonl",
         device="cpu",
-        callbacks=[cb],
+        callbacks=[cb, output_cb],
     )
 
+    assert result_path is not None
     assert result_path.exists()
     assert cb.teardown_called
 
 
 def test_inference_callback_no_callbacks(tmp_path: Path) -> None:
-    """callbacks=None일 때 기존 동작이 그대로 유지된다."""
+    """callbacks=None이면 DefaultOutputCallback이 없으므로 result_path가 None이다."""
     model = TinyVisionModel(num_classes=2, hidden_dim=16)
     batches = make_vision_batches(num_batches=2, batch_size=4, num_classes=2)
     loader = ListDataLoader(batches)
@@ -254,6 +280,117 @@ def test_inference_callback_no_callbacks(tmp_path: Path) -> None:
         callbacks=None,
     )
 
-    assert result_path.exists()
-    lines = result_path.read_text().strip().splitlines()
-    assert len(lines) == 8
+    # DefaultOutputCallback이 없으면 출력 파일이 생성되지 않는다
+    assert result_path is None
+
+
+# ---------------------------------------------------------------------------
+# Callback-only mode (no DefaultOutputCallback → no postprocess → memory savings)
+# ---------------------------------------------------------------------------
+
+
+def test_callback_only_mode_no_output_file(tmp_path: Path) -> None:
+    """사용자 콜백만 등록하면 출력 파일 없이 추론이 완료된다."""
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    batches = make_vision_batches(num_batches=3, batch_size=4, num_classes=2)
+    loader = ListDataLoader(batches)
+
+    cb = _HiddenStateCaptureCallback(layer_name="classifier")
+
+    result_path, eval_results = run_batch_inference(
+        model=model,
+        dataloader=loader,
+        output_path=tmp_path / "preds",
+        output_format="jsonl",
+        device="cpu",
+        callbacks=[cb],
+    )
+
+    # 콜백은 정상 동작
+    assert cb.setup_called
+    assert cb.teardown_called
+    assert len(cb.captured) == 3
+
+    # DefaultOutputCallback 없으므로 출력 파일 없음
+    assert result_path is None
+    assert not (tmp_path / "preds.jsonl").exists()
+
+
+def test_callback_only_mode_no_softmax_on_logits(tmp_path: Path) -> None:
+    """콜백 전용 모드에서 logits에 softmax가 적용되지 않는다.
+
+    DefaultOutputCallback이 없으면 _postprocess(softmax+argmax+numpy)가 실행되지 않으므로,
+    LM의 거대한 logits(vocab_size=151K)에 softmax를 적용하는 25GB 메모리 낭비가 없다.
+    이 테스트는 콜백이 받는 outputs가 raw logits(softmax 미적용)인지 검증한다.
+    """
+
+    class _OutputInspector(BaseInferenceCallback):
+        """on_batch에서 outputs의 logits 값 범위를 기록하는 콜백."""
+
+        def __init__(self) -> None:
+            self.logits_ranges: list[tuple[float, float]] = []
+
+        def on_batch(self, batch_idx: int, batch: dict, outputs: dict, **kwargs) -> None:
+            if "logits" in outputs:
+                logits = outputs["logits"]
+                self.logits_ranges.append((logits.min().item(), logits.max().item()))
+
+    # num_classes=10으로 설정 — 클래스가 많아야 random init에서 logits가
+    # [0,1] 범위를 확실히 벗어나 raw logits임을 검증할 수 있다.
+    model = TinyVisionModel(num_classes=10, hidden_dim=16)
+    batches = make_vision_batches(num_batches=2, batch_size=4, num_classes=10)
+    loader = ListDataLoader(batches)
+
+    inspector = _OutputInspector()
+
+    run_batch_inference(
+        model=model,
+        dataloader=loader,
+        output_path=tmp_path / "preds",
+        output_format="jsonl",
+        device="cpu",
+        callbacks=[inspector],
+    )
+
+    # logits는 raw 값 — softmax가 적용되지 않았으므로 [0,1] 범위가 아니다
+    assert len(inspector.logits_ranges) == 2
+    for lo, hi in inspector.logits_ranges:
+        # raw logits는 음수를 포함할 수 있고 1을 초과할 수 있다
+        # softmax가 적용되었다면 모든 값이 [0, 1]이어야 한다
+        assert lo < 0 or hi > 1, (
+            f"logits range [{lo}, {hi}] looks like softmax was applied"
+        )
+
+
+def test_callback_only_with_metadata(tmp_path: Path) -> None:
+    """콜백 전용 모드에서 metadata가 올바르게 전달된다."""
+
+    class _MetadataCollector(BaseInferenceCallback):
+        def __init__(self) -> None:
+            self.collected: list = []
+
+        def on_batch(self, batch_idx: int, batch: dict, outputs: dict, **kwargs) -> None:
+            meta = kwargs.get("metadata")
+            if meta is not None:
+                self.collected.extend(meta)
+
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    batches = make_vision_batches(num_batches=2, batch_size=4, num_classes=2)
+    loader = ListDataLoader(batches)
+
+    collector = _MetadataCollector()
+    fake_metadata = [{"label": f"item_{i}"} for i in range(8)]
+
+    run_batch_inference(
+        model=model,
+        dataloader=loader,
+        output_path=tmp_path / "preds",
+        output_format="jsonl",
+        device="cpu",
+        callbacks=[collector],
+        metadata=fake_metadata,
+    )
+
+    assert len(collector.collected) == 8
+    assert collector.collected[0] == {"label": "item_0"}
+    assert collector.collected[7] == {"label": "item_7"}

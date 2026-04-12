@@ -1,45 +1,30 @@
 ## 현재 상태
-- phase: closed (커밋 대기)
-- cycle: 22
-- codebase: ~/projects/modern-deeplearning-pipeline
-- refactor: [[personal/projects/modern-deeplearning-pipeline/docs/refactor-component-unification]]
-- next: factory-removal 리팩토링 세션 (review-22 구조 2건 + Factory→ModelBuilder)
+- phase: done
+- codebase: ~/Desktop/wooshikwon/modern-deeplearning-pipeline
 
 ## 산출물
-- spec: [[personal/projects/modern-deeplearning-pipeline/_draft]], [[personal/projects/modern-deeplearning-pipeline/docs/spec-architecture|spec-architecture]] ~ [[personal/projects/modern-deeplearning-pipeline/docs/spec-rl|spec-rl]]
-- refactor: [[personal/projects/modern-deeplearning-pipeline/docs/refactor-component-unification]]
-- code-S1: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-07|code-2026-04-07 (S1)]] (DataSpec + Dataset/Collator wrapper + create_dataloaders) — git: ff487f3
-- code-S2+S3: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-07|code-2026-04-07 (S2+S3)]] (ModelSpec/AdapterSpec → dict + adapter routing) — git: 0be9e0a
-- code-S4: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08|code-2026-04-08 (S4)]] (TrainingSpec.strategy + AutoStrategy) — git: 0be9e0a
-- code-S5: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08-S5|code-2026-04-08-S5]] (코드 변경 없음 — S1~S4에서 완료)
-- code-S6: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08-S6|code-2026-04-08-S6]] (generate + --override, 194 passed)
-- code-S7: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08-S7|code-2026-04-08-S7]] (fixture 5개 수정 + gpt2-dpo-preference 신규 + test_recipe_fixtures.py 신규 + init.py 번외 수정, 258 passed) — git: uncommitted
-- code-S8: [[personal/projects/modern-deeplearning-pipeline/plans/code-2026-04-08-S8|code-2026-04-08-S8]] (spec-schema/data/foundation/infra + AGENT.md + weighted-mtp/mdp-integration 갱신, 코드 변경 없음)
-- verify-1: [[personal/projects/modern-deeplearning-pipeline/plans/verify-2026-04-08-c1|verify-2026-04-08-c1]] (258 passed, 8 skipped, 0 failed)
-- review-1: [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c1|review-2026-04-08-c1]] (버그: 3, 구조: 3, 문서갱신: 1)
-- review-19: [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c19|review-2026-04-08-c19]] (0건 — S1~S3 수렴)
-- review-21 (재): [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c21|review-2026-04-08-c21]] (버그 3, 구조 2)
-- fix-21: [[personal/projects/modern-deeplearning-pipeline/plans/fix-2026-04-08-c21|fix-2026-04-08-c21]] (5건 전수 수정, 252 passed)
-- review-22: [[personal/projects/modern-deeplearning-pipeline/plans/review-2026-04-08-c22|review-2026-04-08-c22]] (버그 0, 구조 2 — 다음 세션으로 이관)
-
-## 다음 세션: factory-removal + 잔여 구조 개선
-- B: RLTrainer scheduler interval 미사용 (review-22 2-1)
-- C: generate CLI num_beams/repetition_penalty 플래그 (review-22 2-2)
-- A: Factory → models/builder.py 구조 변경
-- 순서: B → C → A
+- spec: [[personal/archive/modern-deeplearning-pipeline/dev-cycle/spec/spec-pretrained-compat|spec-pretrained-compat]]
+- design: [[personal/archive/modern-deeplearning-pipeline/docs/architecture|아키텍처]], [[personal/archive/modern-deeplearning-pipeline/docs/model|모델]], [[personal/archive/modern-deeplearning-pipeline/docs/data|데이터]], [[personal/archive/modern-deeplearning-pipeline/docs/training|학습]], [[personal/archive/modern-deeplearning-pipeline/docs/infra|인프라]]
+- (cycle 9~16: archive/cycle-9..16/ — 버그 14→0 수렴, multi-GPU serving, import-linter 해소)
+- spec-component-unification: archive/spec-component-unification/ (U2~U6 코드 리포트 4개, 5개 영역 _component_ 통일 + CLI 2건, spec 흡수 완료)
+- (cycle 17~19: archive/cycle-17..19/ — U1-U3 review 수렴, fix-18 5건 전수)
+- (cycle 20-21 오염 리포트: archive/contaminated-c20-c21/)
+- (cycle 21~23: archive/cycle-21..23/ — 252 pass, 버그 3→1→0 수렴, doc-refine 완료)
+- spec-inference-callbacks: archive/spec-inference-callbacks/ (U1~U3, --pretrained 3-way + --callbacks + BaseInferenceCallback, 287 pass, spec 흡수 완료)
+- (cycle 1~3: archive/cycle-1..3/ — 버그 1→1→0 수렴, 283→287 pass, doc-refine: architecture/infra/training/usage-scenarios 갱신)
+- spec-pretrained-compat: archive/spec-pretrained-compat/ (U1~U3, forward 어댑터 + config.architectures 직접 로드 + metadata 보존, 323 pass, spec 흡수 완료)
+- (cycle 1~2: archive/cycle-1..2/ — 버그 1→0 수렴, --task 삭제 + config.architectures, doc-refine: model/architecture/training/infra/usage-scenarios 갱신)
 
 ## 이력
-- 2026-03-31 ~ 2026-04-03: spec → code → audit cycle 1~8 완료 (spec 10개 문서 안정화)
-- 2026-04-04 ~ 2026-04-06: verify/review/fix cycle 9~20 (Multi-GPU Serving 구현 포함)
-- 2026-04-07: refactor 모드 진입 — refactor-component-unification.md (S1~S8)
-- 2026-04-07: S1 완료 — DataSpec schema + HuggingFaceDataset/ImageClassificationDataset + Collator wrapper + create_dataloaders 리팩토링
-- 2026-04-07: S2+S3 완료 — ModelSpec/AdapterSpec/RLModelSpec → dict, Factory dict 기반 리팩토링, apply_adapter 제거
-- 2026-04-08: S4 완료 — TrainingSpec.strategy dict, STRATEGY_MAP → aliases.yaml, auto_strategy 함수 (198 passed, 7 env-only failed)
-- 2026-04-08: S5 완료 — 코드 변경 없음 (validator 갱신은 S1~S4에서 완료)
-- 2026-04-08: S6 완료 — mdp generate 커맨드 + --override 옵션 (4개 커맨드). 신규 3파일, 수정 7파일, 테스트 22건 (194 passed)
-- 2026-04-08: S7 완료 — tests/fixtures 5개 수정 + gpt2-dpo-preference 신규 + test_recipe_fixtures.py 6개 parametrize suite 신규 + init.py 번외 수정 (258 passed, 8 skipped)
-- 2026-04-08: S8 완료 → verify 진입 (cycle 1) — 전 Stage(S1~S8) 완료, spec 문서 6개 동기화
-- 2026-04-08: verify-1 완료 (258 passed, 0 failed) → review 진입
-- 2026-04-08: review-1 완료 (버그 3, 구조 3, 문서 1) → fix 진입
-- 2026-04-08: cycle 19 수렴 (S1~S3 영역 0건) → cycle 20-21 오염(§3.5 미인식) → cycle 21 재실행 (5건) → fix-21 (5건 수정)
-- 2026-04-08: review-22 완료 (버그 0, 구조 2) — 구조 2건은 기존 한계, 다음 리팩토링 세션으로 이관. 현 cycle closed
+- 2026-04-04~07: cycle 9~16 — 버그 수렴 14→0, multi-GPU serving, import-linter 해소, spec 3건 동기화. done 선언
+- 2026-04-07: cycle 17 spec 진입 — U1(DataSpec), U2(ModelSpec→dict), U3(adapter→_component_) 완료. review cycle 17~19 수렴
+- 2026-04-08: U4(Strategy aliases.yaml 이관) + U5(변경 없음) + U6(generate CLI + --override) 완료
+- 2026-04-08: **§3.5 오염 사건** — U4 code가 spec §3.5 번복 결정을 무시하고 recipe.training.strategy 구현. 이후 세션에서 Config 단일 경로로 복원했으나 미커밋. review-20/fix-20/review-21이 잘못된 전제로 작성됨
+- 2026-04-08: §3.5 복원 + U7(fixtures/tests alias 정규화) + U8(AGENT.md 동기화) 커밋 (bd7307d). 오염 리포트 3건 archive. cycle 21 review 재시작
+- 2026-04-08: review-21 재실행 완료 (252 pass / 버그 3, 구조 2) → fix 완료 (5건 전수: generate.py reconstruct_model 교체, GenerationSpec 7/7 필드, compat_validator "auto" 기본값 통일, RLTrainer scheduler 3키 pop + val int cast) → review 진입 (cycle 22)
+- 2026-04-08: review-22 완료 (252 pass / 버그 1) → fix 완료 (1건: RLTrainer scheduler interval per-model 저장 + step/epoch 분기 5개 지점) → review 진입 (cycle 23)
+- 2026-04-08: review-23 완료 (252 pass / 0건) — U4-U8 사이클 수렴
+- 2026-04-08: doc-refine 완료 — spec 흡수(spec-training/spec-rl/spec-model/usage-scenarios 갱신) → spec-component-unification.md 삭제. phase=done. Unit 리포트 4건 + cycle 17-19 archive
+- 2026-04-09: spec-inference-callbacks — U1~U3 완료(--pretrained 3-way, --callbacks 4커맨드, BaseInferenceCallback). cycle 1~3 수렴(버그 1→1→0, 283→287 pass). doc-refine 완료(architecture/infra/training/usage-scenarios 갱신, 콜백 아키텍처·시나리오 9-10 추가). phase=done
+- 2026-04-09: spec-pretrained-compat 완료 → code 진입 (U1~U3, Group1: U1+U2 병렬)
+- 2026-04-10: spec-pretrained-compat — U1~U3 완료(forward 어댑터, Auto 클래스→config.architectures 직접 로드, metadata 보존). cycle 1~2 수렴(버그 1→0, 323 pass, --task 삭제). doc-refine 완료(model/architecture/training/infra/usage-scenarios 갱신). phase=done

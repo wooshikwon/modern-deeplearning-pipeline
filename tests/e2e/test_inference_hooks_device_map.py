@@ -18,6 +18,7 @@ import torch
 from torch import Tensor, nn
 
 from mdp.callbacks.base import BaseInferenceCallback
+from mdp.callbacks.inference import DefaultOutputCallback
 from mdp.serving.inference import run_batch_inference
 from tests.e2e.datasets import ListDataLoader, make_language_batches
 from tests.e2e.models import TinyLanguageModel
@@ -346,6 +347,10 @@ def test_device_map_skips_model_to(tmp_path: Path) -> None:
     batches = make_language_batches(num_batches=1, batch_size=2, seq_len=8, vocab_size=64)
     loader = ListDataLoader(batches)
 
+    output_cb = DefaultOutputCallback(
+        output_path=tmp_path / "preds", output_format="jsonl", task="text_generation",
+    )
+
     # 에러 없이 추론이 완료되어야 한다
     result_path, _ = run_batch_inference(
         model=model,
@@ -354,7 +359,9 @@ def test_device_map_skips_model_to(tmp_path: Path) -> None:
         output_format="jsonl",
         task="text_generation",
         device="cpu",
+        callbacks=[output_cb],
     )
+    assert result_path is not None
     assert result_path.exists()
 
 

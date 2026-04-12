@@ -18,7 +18,7 @@ class PretrainedResolver:
 
     지원 프로토콜::
 
-        hf://bert-base-uncased              → AutoModel.from_pretrained
+        hf://bert-base-uncased              → config.architectures[0] 클래스로 로드
         hf://bert-base-uncased?class_path=... → 동적 임포트 후 .from_pretrained
         timm://resnet50                      → timm.create_model(pretrained=True)
         ultralytics://yolov8n.pt             → YOLO(identifier)
@@ -78,19 +78,40 @@ class PretrainedResolver:
         class_path: str | None = None,
         **kwargs: Any,
     ) -> nn.Module:
-        """HuggingFace 모델 로딩."""
+        """HuggingFace 모델 로딩.
+
+        class_path가 명시되어 있으면 그대로 사용 (Recipe 기반 경로).
+        class_path가 None이면 config.architectures[0]에서 직접 모델 클래스를 결정한다.
+        architectures가 없거나 빈 리스트이면 에러를 발생시킨다 (폴백 없음).
+        """
+        try:
+            import transformers
+        except ImportError as e:
+            raise ImportError(
+                "transformers 패키지가 필요합니다: pip install transformers"
+            ) from e
+
         if class_path is not None:
             module_path, _, cls_name = class_path.rpartition(".")
             mod = importlib.import_module(module_path)
             model_cls = getattr(mod, cls_name)
         else:
-            try:
-                from transformers import AutoModel
-            except ImportError as e:
-                raise ImportError(
-                    "transformers 패키지가 필요합니다: pip install transformers"
-                ) from e
-            model_cls = AutoModel
+            config = transformers.AutoConfig.from_pretrained(identifier)
+            architectures = getattr(config, "architectures", None) or []
+            if not architectures:
+                raise ValueError(
+                    f"모델 '{identifier}'의 config에 architectures 필드가 없습니다. "
+                    "HuggingFace Hub에서 올바른 모델 식별자를 확인하세요."
+                )
+            cls_name = architectures[0]
+            model_cls = getattr(transformers, cls_name, None)
+            if model_cls is None:
+                raise ValueError(
+                    f"transformers에 '{cls_name}' 클래스가 없습니다."
+                )
+            logger.info(
+                "config.architectures=%s → %s", cls_name, model_cls.__name__,
+            )
 
         logger.info("HF 모델 로딩: %s (class=%s)", identifier, model_cls.__name__)
         return model_cls.from_pretrained(identifier, **kwargs)

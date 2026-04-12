@@ -9,8 +9,8 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 | `mdp init <name> --task <task> --model <model>` | 프로젝트 스캐폴딩 + Recipe 템플릿 생성 |
 | `mdp train -r recipe.yaml -c config.yaml` | SFT 학습. `--callbacks <yaml>` 으로 Recipe 콜백 override 가능 |
 | `mdp rl-train -r rl-recipe.yaml -c config.yaml` | RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO). `--callbacks <yaml>` 지원 |
-| `mdp inference --run-id <id> --data <path>` | 배치 추론 + 평가. `--pretrained <uri>` 대안 모델 소스, `--callbacks <yaml>` 추론 콜백 |
-| `mdp generate --run-id <id> --prompts <jsonl> -o <out>` | autoregressive 생성. `--pretrained <uri>` 대안, `--callbacks <yaml>` 추론 콜백 |
+| `mdp inference --run-id <id> --data <path>` | 배치 추론 + 평가. `--pretrained <uri>`, `--dtype`, `--trust-remote-code`, `--attn-impl`, `--callbacks <yaml>`, `--save-output`, `--batch-size` (기본 32), `--max-length` (기본 512) |
+| `mdp generate --run-id <id> --prompts <jsonl> -o <out>` | autoregressive 생성. `--pretrained <uri>`, `--dtype`, `--trust-remote-code`, `--attn-impl`, `--callbacks <yaml>`, `--max-new-tokens` (기본 256), `--temperature` (기본 1.0), `--top-p` (기본 1.0), `--top-k` (기본 50), `--do-sample`, `--batch-size` (기본 1) |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 + 전략 추천 |
 | `mdp export --run-id <id> --output <dir>` | adapter merge + 서빙용 패키징 (`--checkpoint`로 로컬 체크포인트도 가능) |
 | `mdp serve --run-id <id>` | REST API 서빙 |
@@ -53,6 +53,9 @@ mdp inference --run-id abc123 --data test.jsonl
 mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B --data prompts.jsonl
 # 토크나이저 명시 (자동 추론이 안 될 때)
 mdp generate --pretrained hf://model --prompts p.jsonl --tokenizer other-tokenizer
+# dtype/attention/remote-code 지정 (BFloat16 모델의 numpy 변환 에러 방지)
+mdp inference --pretrained hf://Qwen/Qwen2.5-7B --data test.jsonl \
+  --dtype float32 --trust-remote-code --attn-impl sdpa --device-map auto
 ```
 
 ### `--callbacks` 파일

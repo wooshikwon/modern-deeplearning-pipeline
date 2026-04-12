@@ -104,11 +104,19 @@ def _load_pretrained_data(
     tokenizer: Any,
     cli_fields: list[str] | None,
     batch_size: int = 32,
-) -> Any:
-    """pretrained 모드에서 데이터를 로드하고 토크나이즈하여 DataLoader를 반환한다.
+    max_length: int = 512,
+) -> tuple[Any, list[dict] | None]:
+    """pretrained 모드에서 데이터를 로드하고 토크나이즈하여 DataLoader와 메타데이터를 반환한다.
 
     --data가 HuggingFace hub 이름이면 load_dataset으로,
     로컬 파일(.jsonl, .csv, .parquet)이면 파일에서 로드한다.
+
+    Returns
+    -------
+    tuple[DataLoader, list[dict] | None]
+        DataLoader와 메타데이터 레코드 리스트. 메타데이터가 없으면 None.
+        메타데이터는 원본 컬럼 중 모델 입력이 아닌 컬럼(label, topic 등)을
+        샘플별 dict로 추출한 것이다. 콜백의 ``on_batch(metadata=...)`` 로 전달된다.
     """
     from datasets import load_dataset
     from torch.utils.data import DataLoader
@@ -146,22 +154,60 @@ def _load_pretrained_data(
                 "--fields text=컬럼명 으로 지정하세요."
             )
 
+    # tokenize 전에 metadata 컬럼을 결정한다.
+    # 모델 입력이 될 수 있는 컬럼은 tokenizer가 생성하는 키들이다.
+    # 원본 컬럼 중 text_column을 제외한 나머지가 metadata 후보다.
+    original_columns = list(ds.column_names)
+    metadata_columns = [c for c in original_columns if c != text_column]
+
+    # metadata가 있으면 tokenize 전에 eager 추출한다.
+    # 추론 데이터셋은 학습보다 작으므로 한 번 순회해도 충분하다.
+    metadata_records: list[dict] | None = None
+    if metadata_columns:
+        metadata_records = [
+            {col: ds[i][col] for col in metadata_columns}
+            for i in range(len(ds))
+        ]
+
     def tokenize_fn(examples: dict) -> dict:
         return tokenizer(
             examples[text_column],
             padding="max_length",
             truncation=True,
-            max_length=512,
+            max_length=max_length,
             return_tensors="pt",
         )
 
+    # remove_columns로 원본 컬럼을 제거한다.
+    # DataLoader가 string 컬럼을 텐서로 변환하려다 실패하는 문제를 방지한다.
     ds = ds.map(tokenize_fn, batched=True, remove_columns=ds.column_names)
     ds.set_format("torch")
 
-    return DataLoader(ds, batch_size=batch_size)
+    return DataLoader(ds, batch_size=batch_size), metadata_records
 
 
 # ── Public API ──
+
+
+def _build_pretrained_kwargs(
+    dtype: str | None,
+    trust_remote_code: bool,
+    attn_impl: str | None,
+    device_map: str | None,
+) -> dict[str, Any]:
+    """pretrained 분기에서 from_pretrained에 전달할 kwargs를 구성한다."""
+    import torch
+
+    kwargs: dict[str, Any] = {}
+    if dtype:
+        kwargs["torch_dtype"] = getattr(torch, dtype)
+    if trust_remote_code:
+        kwargs["trust_remote_code"] = True
+    if attn_impl:
+        kwargs["attn_implementation"] = attn_impl
+    if device_map:
+        kwargs["device_map"] = device_map
+    return kwargs
 
 
 def run_inference(
@@ -177,10 +223,22 @@ def run_inference(
     pretrained: str | None = None,
     tokenizer_name: str | None = None,
     callbacks_file: str | None = None,
+    dtype: str | None = None,
+    trust_remote_code: bool = False,
+    attn_impl: str | None = None,
+    save_output: bool = False,
+    batch_size: int = 32,
+    max_length: int = 512,
 ) -> None:
     """배치 추론 + (선택) 평가.
 
     --run-id, --model-dir, --pretrained 중 하나를 지정.
+
+    DefaultOutputCallback 자동 주입 정책:
+    - Recipe 경로 (--run-id, --model-dir): 항상 자동 추가
+    - Pretrained + 사용자 콜백 없음: 자동 추가
+    - Pretrained + 사용자 콜백 있음: 미추가 (콜백 전용 모드)
+    - Pretrained + 사용자 콜백 + --save-output: 추가
     """
     from mdp.serving.inference import run_batch_inference
 
@@ -223,15 +281,17 @@ def run_inference(
             from mdp.models.pretrained import PretrainedResolver
             from transformers import AutoTokenizer
 
-            model = PretrainedResolver.load(pretrained)
+            model_kwargs = _build_pretrained_kwargs(dtype, trust_remote_code, attn_impl, device_map)
+            model = PretrainedResolver.load(pretrained, **model_kwargs)
 
             tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(pretrained)
             tokenizer = AutoTokenizer.from_pretrained(tok_name)
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
-            test_loader = _load_pretrained_data(
+            test_loader, metadata = _load_pretrained_data(
                 data_source, tokenizer, cli_fields,
+                batch_size=batch_size, max_length=max_length,
             )
 
             metrics = _create_metrics(metric_names, None)
@@ -243,19 +303,42 @@ def run_inference(
             if not is_json_mode():
                 typer.echo("배치 추론 시작...")
 
+            # pretrained 모델의 task는 모델 클래스명에서 추출한다.
+            # config.architectures[0]로 로드했으므로 클래스명이 task 정보를 내포한다.
+            pretrained_task = type(model).__name__
+
+            # DefaultOutputCallback 자동 주입 정책 (pretrained 분기):
+            # - 사용자 콜백 없음: 자동 추가
+            # - 사용자 콜백 있음: 미추가 (콜백 전용 모드)
+            # - 사용자 콜백 + --save-output: 추가
+            inference_callbacks = list(loaded_callbacks) if loaded_callbacks else []
+            should_inject = not loaded_callbacks or save_output
+            if should_inject:
+                from mdp.callbacks.inference import DefaultOutputCallback
+
+                inference_callbacks.append(DefaultOutputCallback(
+                    output_path=out_path,
+                    output_format=output_format,
+                    task=pretrained_task,
+                ))
+
             result_path, eval_results = run_batch_inference(
                 model=model,
                 dataloader=test_loader,
                 output_path=out_path,
                 output_format=output_format,
-                task="classification",
+                task=pretrained_task,
                 metrics=metrics or None,
-                callbacks=loaded_callbacks or None,
+                callbacks=inference_callbacks or None,
                 tokenizer=tokenizer,
+                metadata=metadata,
             )
 
             if not is_json_mode():
-                typer.echo(f"추론 완료. 결과: {result_path}")
+                if result_path is not None:
+                    typer.echo(f"추론 완료. 결과: {result_path}")
+                else:
+                    typer.echo("추론 완료. 콜백 전용 모드 (출력 파일 없음)")
                 if eval_results:
                     typer.echo("평가 결과:")
                     for name, value in eval_results.items():
@@ -265,8 +348,8 @@ def run_inference(
                 from mdp.cli.schemas import InferenceResult
 
                 result = InferenceResult(
-                    output_path=str(result_path),
-                    task="classification",
+                    output_path=str(result_path) if result_path else None,
+                    task=pretrained_task,
                     evaluation_metrics=eval_results or None,
                 )
                 emit_result(build_result(
@@ -328,6 +411,16 @@ def run_inference(
             if not is_json_mode():
                 typer.echo("배치 추론 시작...")
 
+            # DefaultOutputCallback 자동 주입 (Recipe 경로: 항상 추가)
+            from mdp.callbacks.inference import DefaultOutputCallback
+
+            inference_callbacks = list(loaded_callbacks) if loaded_callbacks else []
+            inference_callbacks.append(DefaultOutputCallback(
+                output_path=out_path,
+                output_format=output_format,
+                task=settings.recipe.task,
+            ))
+
             result_path, eval_results = run_batch_inference(
                 model=model,
                 dataloader=test_loader,
@@ -335,7 +428,7 @@ def run_inference(
                 output_format=output_format,
                 task=settings.recipe.task,
                 metrics=metrics or None,
-                callbacks=loaded_callbacks or None,
+                callbacks=inference_callbacks or None,
             )
 
             # 6. Drift detection (baseline이 존재하면)
@@ -359,7 +452,10 @@ def run_inference(
                         logger.warning("Drift detection 실패: %s", e)
 
             if not is_json_mode():
-                typer.echo(f"추론 완료. 결과: {result_path}")
+                if result_path is not None:
+                    typer.echo(f"추론 완료. 결과: {result_path}")
+                else:
+                    typer.echo("추론 완료. 콜백 전용 모드 (출력 파일 없음)")
                 if eval_results:
                     typer.echo("평가 결과:")
                     for name, value in eval_results.items():
@@ -367,7 +463,7 @@ def run_inference(
 
             if is_json_mode():
                 result = InferenceResult(
-                    output_path=str(result_path),
+                    output_path=str(result_path) if result_path else None,
                     task=settings.recipe.task,
                     monitoring=monitoring_result,
                     evaluation_metrics=eval_results or None,
