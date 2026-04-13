@@ -29,7 +29,7 @@ init_args_schema:
 
 adapter_defaults:
   lora:
-    target_modules: ["q", "v"]
+    target: [attn.q, attn.v]
     r: 16
     alpha: 32
     task_type: "SEQ_2_SEQ_LM"

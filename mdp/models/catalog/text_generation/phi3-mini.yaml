@@ -27,7 +27,7 @@ init_args_schema:
 
 adapter_defaults:
   lora:
-    target_modules: ["qkv_proj", "o_proj"]
+    target: [attn.qkv, attn.o]
     r: 16
     alpha: 32
     task_type: "CAUSAL_LM"

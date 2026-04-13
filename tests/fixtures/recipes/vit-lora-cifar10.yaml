@@ -7,7 +7,7 @@ model:
 
 head:
   _component_: ClassificationHead
-  _target_attr: head
+  slot: head.cls
   num_classes: 10
   pooling: cls_token
   dropout: 0.1
@@ -17,7 +17,7 @@ adapter:
   r: 16
   alpha: 32
   dropout: 0.05
-  target_modules: [q_proj, v_proj]
+  target: [attn.q, attn.v]
 
 data:
   dataset:

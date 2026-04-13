@@ -13,7 +13,7 @@ supported_tasks:
 
 default_head:
   task: image_classification
-  _target_attr: classifier
+  slot: head.cls
   _component_: ClassificationHead
   hidden_dim: 1280
   dropout: 0.2
@@ -36,7 +36,7 @@ adapter_defaults:
   # 경량 모델이라 LoRA보다 전체 파인튜닝 권장, 기본값만 제공
   # timm EfficientNet exposes the final linear as `classifier` (not `_fc`)
   lora:
-    target_modules: ["classifier"]
+    target: [head.cls]
     r: 4
     alpha: 8
 

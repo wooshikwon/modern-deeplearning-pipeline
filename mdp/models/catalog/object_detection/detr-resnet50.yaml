@@ -26,7 +26,7 @@ init_args_schema:
 adapter_defaults:
   lora:
     # 트랜스포머 디코더의 어텐션 레이어
-    target_modules: ["q_proj", "v_proj"]
+    target: [attn.q, attn.v]
     r: 8
     alpha: 16
 

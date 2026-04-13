@@ -13,7 +13,7 @@ supported_tasks:
 
 default_head:
   task: image_classification
-  _target_attr: head
+  slot: head.cls
   _component_: ClassificationHead
   hidden_dim: 768
   dropout: 0.1
@@ -35,7 +35,7 @@ init_args_schema:
 
 adapter_defaults:
   lora:
-    target_modules: ["qkv", "proj"]
+    target: [attn.qkv, attn.o]
     r: 16
     alpha: 32
 

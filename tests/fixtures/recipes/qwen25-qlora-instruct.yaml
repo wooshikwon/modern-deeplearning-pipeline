@@ -11,13 +11,13 @@ adapter:
   r: 64
   alpha: 128
   dropout: 0.1
-  target_modules: "all-linear"
+  target: "all-linear"
   quantization:
     bits: 4
     type: nf4
-  modules_to_save:
-    - lm_head
-    - embed_tokens
+  save:
+    - head.lm
+    - embed.token
 
 data:
   dataset:

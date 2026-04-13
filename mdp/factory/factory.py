@@ -75,11 +75,17 @@ class Factory:
         """
         # QLoRA 특수 경로: 양자화 + 로딩 + 어댑터가 한 번에
         if adapter_config is not None and self._is_qlora_adapter(adapter_config):
+            adapter_config = self._resolve_semantic_from_config(model_config, adapter_config)
             return self._build_qlora_model(model_config, adapter_config)
 
         # 일반 경로
         # 단계 1: pretrained 로딩
         model = self._load_pretrained(model_config)
+
+        # 단계 1.5: semantic resolve (일방향 — 여기서 한 번만, 이후 raw만 흐름)
+        head_config, adapter_config = self._resolve_semantic(
+            model, head_config, adapter_config,
+        )
 
         # 단계 2: MoE 감지
         if self._is_moe_model(model):
@@ -115,6 +121,105 @@ class Factory:
             model = self.resolver.resolve(adapter_config, model)
 
         return model
+
+    def _resolve_semantic(
+        self,
+        model: nn.Module,
+        head_config: dict[str, Any] | None,
+        adapter_config: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        """semantic 키를 raw 키로 번역한다. model 생성 후, head/adapter 적용 전 1회 호출.
+
+        변환:
+        - head_config["slot"] → head_config["_target_attr"]
+        - adapter_config["target"] → adapter_config["target_modules"]
+        - adapter_config["save"] → adapter_config["modules_to_save"]
+
+        semantic 키가 없으면 config를 그대로 반환 (기존 경로 호환).
+        semantic 키와 대응하는 raw 키가 동시에 존재하면 ValueError.
+        """
+        needs_resolve = (
+            (head_config is not None and "slot" in head_config)
+            or (adapter_config is not None and ("target" in adapter_config or "save" in adapter_config))
+        )
+        if not needs_resolve:
+            return head_config, adapter_config
+
+        from mdp.models.family_routing import (
+            detect_family, resolve_targets, resolve_head_slot, resolve_save_modules,
+        )
+        family = detect_family(model)
+
+        if head_config is not None and "slot" in head_config:
+            head_config = dict(head_config)
+            if "_target_attr" in head_config:
+                raise ValueError(
+                    "head 설정에 'slot'과 '_target_attr'을 동시에 지정할 수 없습니다. "
+                    "semantic 이름('slot')과 raw 이름('_target_attr') 중 하나만 사용하세요."
+                )
+            slot = head_config.pop("slot")
+            head_config["_target_attr"] = resolve_head_slot(slot, family)
+
+        if adapter_config is not None:
+            ac = dict(adapter_config)
+            target = ac.pop("target", None)
+            if target is not None:
+                if "target_modules" in ac:
+                    raise ValueError(
+                        "adapter 설정에 'target'과 'target_modules'를 동시에 지정할 수 없습니다. "
+                        "semantic 이름('target')과 raw 이름('target_modules') 중 하나만 사용하세요."
+                    )
+                ac["target_modules"] = resolve_targets(target, family)
+            save = ac.pop("save", None)
+            if save is not None:
+                if "modules_to_save" in ac:
+                    raise ValueError(
+                        "adapter 설정에 'save'와 'modules_to_save'를 동시에 지정할 수 없습니다. "
+                        "semantic 이름('save')과 raw 이름('modules_to_save') 중 하나만 사용하세요."
+                    )
+                ac["modules_to_save"] = resolve_save_modules(save, family)
+            adapter_config = ac
+
+        return head_config, adapter_config
+
+    def _resolve_semantic_from_config(
+        self, model_config: dict[str, Any], adapter_config: dict[str, Any],
+    ) -> dict[str, Any]:
+        """QLoRA 분기 전용: model 없이 config 기반 family 추정 후 semantic resolve.
+
+        QLoRA는 model 인스턴스가 resolve 시점에 존재하지 않으므로,
+        pretrained URI에서 AutoConfig로 family를 추정한다.
+        """
+        ac = dict(adapter_config)
+        target = ac.pop("target", None)
+        save = ac.pop("save", None)
+
+        if target is None and save is None:
+            return ac  # semantic 키 없음 → 기존 경로
+
+        from mdp.models.family_routing import (
+            detect_family_from_pretrained_uri, resolve_targets, resolve_save_modules,
+        )
+        pretrained = model_config.get("pretrained")
+        component = model_config.get("_component_")
+        family = detect_family_from_pretrained_uri(pretrained, component)
+
+        if target is not None:
+            if "target_modules" in ac:
+                raise ValueError(
+                    "adapter 설정에 'target'과 'target_modules'를 동시에 지정할 수 없습니다. "
+                    "semantic 이름('target')과 raw 이름('target_modules') 중 하나만 사용하세요."
+                )
+            ac["target_modules"] = resolve_targets(target, family)
+        if save is not None:
+            if "modules_to_save" in ac:
+                raise ValueError(
+                    "adapter 설정에 'save'와 'modules_to_save'를 동시에 지정할 수 없습니다. "
+                    "semantic 이름('save')과 raw 이름('modules_to_save') 중 하나만 사용하세요."
+                )
+            ac["modules_to_save"] = resolve_save_modules(save, family)
+
+        return ac
 
     def _load_pretrained(self, model_config: dict[str, Any]) -> nn.Module:
         """_component_와 pretrained 조합에 따라 모델을 로딩한다.

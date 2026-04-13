@@ -14,7 +14,7 @@ supported_tasks:
 
 default_head:
   task: text_classification
-  _target_attr: classifier
+  slot: head.cls
   _component_: SequenceClassificationHead
   hidden_dim: 768
 
@@ -30,7 +30,7 @@ init_args_schema:
 
 adapter_defaults:
   lora:
-    target_modules: ["query", "value"]
+    target: [attn.q, attn.v]
     r: 8
     alpha: 16
     task_type: "SEQ_CLS"

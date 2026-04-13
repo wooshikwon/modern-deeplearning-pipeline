@@ -14,7 +14,7 @@ supported_tasks:
 default_head:
   # 자기지도학습 백본이므로 다운스트림 태스크에 헤드 부착 필요
   task: image_classification
-  _target_attr: head
+  slot: head.cls
   _component_: ClassificationHead
   hidden_dim: 768
   dropout: 0.1
@@ -34,7 +34,7 @@ init_args_schema:
 adapter_defaults:
   lora:
     # HF Dinov2SelfAttention uses BERT-style separate linears (query/key/value)
-    target_modules: ["query", "value"]
+    target: [attn.q, attn.v]
     r: 16
     alpha: 32
 

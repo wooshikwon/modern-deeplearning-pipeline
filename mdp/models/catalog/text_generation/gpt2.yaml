@@ -28,12 +28,12 @@ init_args_schema:
 
 adapter_defaults:
   lora:
-    target_modules: ["c_attn", "c_proj"]
+    target: [attn.qkv, attn.o]
     r: 8
     alpha: 16
     task_type: "CAUSAL_LM"
   qlora:
-    target_modules: ["c_attn", "c_proj"]
+    target: [attn.qkv, attn.o]
     r: 8
     alpha: 16
     task_type: "CAUSAL_LM"

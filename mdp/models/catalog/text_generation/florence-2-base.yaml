@@ -31,7 +31,7 @@ init_args_schema:
 adapter_defaults:
   lora:
     # 인코더-디코더 양쪽의 어텐션 레이어에 적용
-    target_modules: ["q_proj", "v_proj", "k_proj"]
+    target: [attn.q, attn.v, attn.k]
     r: 8
     alpha: 16
 

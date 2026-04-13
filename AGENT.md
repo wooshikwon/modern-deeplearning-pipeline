@@ -165,18 +165,24 @@ model:                          # _component_ 패턴 — 모델 클래스 + pret
 
 head:                           # _component_ 패턴 — 출력 head 교체 (AutoModelFor* 사용 시 생략 가능)
   _component_: str              # Head alias (ClassificationHead, CausalLMHead 등)
-  _target_attr: str             # 모델에서 교체할 속성명 (예: head, classifier, fc)
+  slot: str                     # semantic head slot (head.cls, head.lm 등). family별 실제 속성명으로 자동 번역
+  _target_attr: str             # (하위 호환) 모델에서 교체할 속성명 직접 지정 (예: head, classifier, fc)
   ...                           # Head 생성자 인자 (num_classes, hidden_dim 등)
+  # slot과 _target_attr 중 하나만 사용. slot은 semantic, _target_attr은 raw. 둘 다 없으면 head 교체 없음.
 
 adapter:                        # _component_ 패턴 — 파라미터 효율 학습 (생략 = full fine-tuning)
   _component_: str              # LoRA | QLoRA | PrefixTuning 또는 풀 경로
   r: int                        # LoRA rank 또는 prefix 토큰 수
   alpha: int                    # LoRA alpha
   dropout: float                # LoRA dropout
-  target_modules: list | str    # 적용 대상 모듈 (기본 "all-linear" — PEFT 표준)
+  target: list | str            # semantic 적용 대상 (attn.q, mlp.gate 등). family별 실제 모듈명으로 자동 번역
+  target_modules: list | str    # (하위 호환) 적용 대상 모듈 raw name 직접 지정 (기본 "all-linear" — PEFT 표준)
   quantization:                 # QLoRA 전용
     bits: 4 | 8
-  modules_to_save: list         # freeze하지 않을 모듈 (예: [lm_head, embed_tokens])
+  save: list                    # semantic freeze 제외 모듈 (head.lm, embed.token 등). 실제 이름으로 자동 번역
+  modules_to_save: list         # (하위 호환) freeze하지 않을 모듈 raw name 직접 지정 (예: [lm_head, embed_tokens])
+  # target과 target_modules는 동시 지정 금지 (ValueError). save와 modules_to_save도 마찬가지.
+  # 둘 다 없으면 PEFT 자동 매핑에 위임 (target_modules=None).
 
 data:                           # 데이터 파이프라인
   dataset:                      # _component_ 패턴 — 학습 Dataset
@@ -362,6 +368,50 @@ Factory는 `_component_` 유무를 먼저 확인하고, duck typing으로 HF 클
 내장 alias 목록은 `mdp list callbacks`, `mdp list strategies` 등으로 조회.
 
 > **DualEncoderHead 참고**: CLIP/SigLIP 학습 시 모델의 `training_step()`에서 `self.head.forward_pair(image_features, text_features)`를 직접 호출해야 한다. `forward()`는 추론 시 image projection만 수행한다.
+
+### Semantic Module Routing
+
+`target`, `slot`, `save` 필드는 모델 family에 독립적인 의미적 이름(dot-path)을 사용한다. Factory가 모델 로딩 후 `family_routing` 모듈을 통해 실제 모듈명으로 자동 번역하므로, 동일한 Recipe로 다른 family의 모델을 사용할 수 있다.
+
+**사용 예시**:
+
+```yaml
+# Semantic (권장) — family에 독립적
+adapter:
+  _component_: LoRA
+  target: [attn.q, attn.v]       # Llama → [q_proj, v_proj], BERT → [query, value], T5 → [q, v]
+
+# Wildcard 축약
+adapter:
+  target: [attn.*, mlp.*]        # family의 모든 attention + MLP 모듈
+
+# Escape hatch (하위 호환) — raw name 직접
+adapter:
+  target_modules: [q_proj, v_proj]  # 기존 방식 그대로 작동
+```
+
+**Semantic 네임스페이스**:
+
+| Prefix | 이름 | 설명 |
+|--------|------|------|
+| `attn.` | `q`, `k`, `v`, `o`, `qkv` | Attention projections |
+| `mlp.` | `gate`, `up`, `down`, `fc1`, `fc2`, `gate_up` | MLP/FFN layers |
+| `head.` | `cls`, `lm`, `det`, `seg` | 출력 head |
+| `embed.` | `token`, `pos` | Embedding layers |
+| `conv.` | `dw` | Convolution layers |
+
+**Family별 번역 예시**:
+
+| Semantic | Llama | BERT | GPT-2 | ViT-timm | ConvNeXt |
+|----------|-------|------|-------|----------|----------|
+| `attn.q` | q_proj | query | - | - | - |
+| `attn.qkv` | - | - | c_attn | qkv | - |
+| `attn.o` | o_proj | output.dense | c_proj | proj | - |
+| `head.cls` | - | classifier | - | head | head |
+| `head.lm` | lm_head | - | lm_head | - | - |
+| `conv.dw` | - | - | - | - | conv_dw |
+
+dot(`.`)이 없는 이름은 raw name으로 취급되어 번역 없이 PEFT에 직접 전달된다. `target`과 `target_modules`를 동시에 지정하면 ValueError로 차단된다.
 
 ---
 

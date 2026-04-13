@@ -34,7 +34,7 @@ init_args_schema:
 adapter_defaults:
   lora:
     # vision encoder + text encoder 양쪽의 어텐션 레이어에 적용
-    target_modules: ["q_proj", "v_proj"]
+    target: [attn.q, attn.v]
     r: 8
     alpha: 16
 

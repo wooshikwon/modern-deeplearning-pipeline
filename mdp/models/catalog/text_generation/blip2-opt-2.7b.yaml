@@ -34,7 +34,7 @@ init_args_schema:
 adapter_defaults:
   lora:
     # OPT LLM 부분의 어텐션 레이어에 적용
-    target_modules: ["q_proj", "v_proj"]
+    target: [attn.q, attn.v]
     r: 8
     alpha: 16
     task_type: "CAUSAL_LM"

@@ -14,7 +14,7 @@ supported_tasks:
 
 default_head:
   task: image_classification
-  _target_attr: head
+  slot: head.cls
   _component_: ClassificationHead
   hidden_dim: 1024
   dropout: 0.1
@@ -36,7 +36,7 @@ init_args_schema:
 adapter_defaults:
   lora:
     # timm ConvNeXt 블록: depthwise conv(`conv_dw`) + pointwise MLP(`fc1`, `fc2`)
-    target_modules: ["conv_dw", "fc1", "fc2"]
+    target: [conv.dw, mlp.fc1, mlp.fc2]
     r: 8
     alpha: 16
 
