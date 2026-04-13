@@ -30,14 +30,12 @@ moe:
 
 adapter_defaults:
   lora:
+    # attention 4개 projection만 타겟. transformers 5.x의 MixtralExperts는
+    # expert MLP를 `nn.Parameter` (fused tensor)로 저장하므로 LoRA로 래핑 불가.
+    # Expert MLP 학습이 필요하면 LoRA 대신 full fine-tuning 또는 커스텀 경로.
     target_modules: ["q_proj", "k_proj", "v_proj", "o_proj"]
     r: 16
     alpha: 32
-    task_type: "CAUSAL_LM"
-  _lora_expert_preset:  # 참고 프리셋 — adapter.method 값이 아님
-    target_modules: ["q_proj", "k_proj", "v_proj", "o_proj", "w1", "w2", "w3"]
-    r: 8
-    alpha: 16
     task_type: "CAUSAL_LM"
 
 memory:

@@ -34,8 +34,9 @@ init_args_schema:
 
 adapter_defaults:
   # 경량 모델이라 LoRA보다 전체 파인튜닝 권장, 기본값만 제공
+  # timm EfficientNet exposes the final linear as `classifier` (not `_fc`)
   lora:
-    target_modules: ["_fc"]
+    target_modules: ["classifier"]
     r: 4
     alpha: 8
 

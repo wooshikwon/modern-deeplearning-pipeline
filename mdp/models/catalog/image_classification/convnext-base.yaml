@@ -35,8 +35,8 @@ init_args_schema:
 
 adapter_defaults:
   lora:
-    # ConvNeXt 블록 내 핵심 레이어: 깊이별 합성곱 + 포인트별 합성곱 2개
-    target_modules: ["dwconv", "pwconv1", "pwconv2"]
+    # timm ConvNeXt 블록: depthwise conv(`conv_dw`) + pointwise MLP(`fc1`, `fc2`)
+    target_modules: ["conv_dw", "fc1", "fc2"]
     r: 8
     alpha: 16
 

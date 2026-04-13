@@ -31,7 +31,8 @@ init_args_schema:
 
 adapter_defaults:
   lora:
-    target_modules: ["q", "v"]
+    # HF SegformerEfficientSelfAttention uses BERT-style full names (query/key/value)
+    target_modules: ["query", "value"]
     r: 8
     alpha: 16
 
