@@ -455,178 +455,32 @@ mdp 자체 로그(`logger = logging.getLogger(__name__)`)는 영향받지 않는
 
 ## Working Examples
 
-### Vision: ViT LoRA Image Classification
+인라인 예시는 유지하지 않는다. 대신 **실제로 파싱·테스트 검증된 레시피**가 `tests/fixtures/recipes/`에 있다. 에이전트는 이 중 가장 가까운 것을 복사해서 필요한 필드만 수정하거나, `mdp init`이 생성하는 템플릿의 `???` 필드를 채우면 된다.
 
-**Recipe** (`recipes/vit-lora-cifar10.yaml`):
+| 파일 | 태스크 | 특징 |
+|------|--------|------|
+| `tiny-vision-e2e.yaml` | image_classification | 커스텀 `BaseModel` 최소 예시 (테스트용) |
+| `vit-lora-cifar10.yaml` | image_classification | ViT + LoRA + augmentation pipeline |
+| `yolo-detection-custom.yaml` | object_detection | `ultralytics://` 프로토콜 + 커스텀 모델 |
+| `clip-finetune-custom.yaml` | feature_extraction | CLIP multimodal + DualEncoderHead |
+| `gpt2-finetune-text.yaml` | text_generation | LLM SFT 최소 예시 |
+| `qwen25-qlora-instruct.yaml` | text_generation | 대형 LLM + QLoRA + bf16 |
+| `gpt2-dpo-preference.yaml` | text_generation (RL) | DPO preference 학습 (chosen/rejected) |
 
-```yaml
-name: vit-lora-cifar10
-task: image_classification
+이 파일들은 `tests/unit/test_recipe_fixtures.py`에서 `SettingsFactory.for_estimation`으로 파싱·검증되므로 스키마 drift가 발생하면 즉시 깨진다 — 항상 최신 상태가 보장되는 단일 소스.
 
-model:
-  _component_: transformers.AutoModel
-  pretrained: hf://google/vit-base-patch16-224
-
-head:
-  _component_: ClassificationHead
-  _target_attr: head
-  num_classes: 10
-  pooling: cls_token
-  dropout: 0.1
-
-adapter:
-  _component_: LoRA
-  r: 16
-  alpha: 32
-  dropout: 0.05
-  target_modules: [q_proj, v_proj]
-
-data:
-  dataset:
-    _component_: ImageClassificationDataset
-    source: cifar10
-    split: train
-    fields: {image: img, label: label}
-    augmentation:
-      - {type: RandomResizedCrop, params: {size: [224, 224]}}
-      - {type: RandomHorizontalFlip}
-      - {type: ToDtype, params: {dtype: float32, scale: true}}
-      - {type: Normalize, params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}}
-  val_dataset:
-    _component_: ImageClassificationDataset
-    source: cifar10
-    split: test
-    fields: {image: img, label: label}
-    augmentation:
-      - {type: Resize, params: {size: [256, 256]}}
-      - {type: CenterCrop, params: {size: [224, 224]}}
-      - {type: ToDtype, params: {dtype: float32, scale: true}}
-      - {type: Normalize, params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}}
-  collator:
-    _component_: VisionCollator
-  dataloader:
-    batch_size: 64
-
-training:
-  epochs: 30
-  precision: bf16
-  gradient_clip_max_norm: 1.0
-
-optimizer:
-  _component_: AdamW
-  lr: 0.001
-  weight_decay: 0.01
-
-scheduler:
-  _component_: CosineAnnealingLR
-  T_max: 30
-
-loss:
-  _component_: CrossEntropyLoss
-
-callbacks:
-  - _component_: EarlyStopping
-    monitor: val_loss
-    patience: 5
-  - _component_: ModelCheckpoint
-    monitor: val_accuracy
-    mode: max
-
-metadata:
-  author: agent
-  description: ViT-Base LoRA fine-tuning on CIFAR-10
-```
-
-**Config** (`configs/local-1gpu.yaml`):
+Config 예시는 단순하다:
 
 ```yaml
-compute:
-  gpus: 1
+# 로컬 단일 GPU
+compute: {gpus: 1}
+mlflow: {experiment_name: my-exp}
+storage: {checkpoint_dir: ./checkpoints, output_dir: ./outputs}
 
-mlflow:
-  tracking_uri: ./mlruns
-  experiment_name: vit-cifar10
-
-storage:
-  checkpoint_dir: ./checkpoints/vit-lora-cifar10
-  output_dir: ./outputs/vit-lora-cifar10
-```
-
-### Language: LLM QLoRA Fine-tuning
-
-**Recipe** (`recipes/llm-qlora.yaml`):
-
-```yaml
-name: llm-qlora-chat
-task: text_generation
-
-model:
-  _component_: AutoModelForCausalLM
-  pretrained: hf://Qwen/Qwen2.5-7B
-  torch_dtype: bfloat16
-
-adapter:
-  _component_: QLoRA
-  r: 64
-  alpha: 128
-  quantization:
-    bits: 4
-  modules_to_save: [lm_head, embed_tokens]
-
-data:
-  dataset:
-    _component_: HuggingFaceDataset
-    source: HuggingFaceH4/ultrachat_200k
-    split: train_sft
-    fields: {text: text}
-    tokenizer: Qwen/Qwen2.5-7B
-    max_length: 2048
-  collator:
-    _component_: CausalLMCollator
-    tokenizer: Qwen/Qwen2.5-7B
-    max_length: 2048
-  dataloader:
-    batch_size: 4
-
-training:
-  max_steps: 1000
-  precision: bf16
-  gradient_accumulation_steps: 4
-  gradient_checkpointing: true
-
-optimizer:
-  _component_: bitsandbytes.optim.AdamW8bit
-  lr: 0.0002
-  weight_decay: 0.01
-
-scheduler:
-  _component_: CosineAnnealingLR
-  T_max: 1000
-
-callbacks:
-  - _component_: ModelCheckpoint
-    every_n_steps: 200
-
-metadata:
-  author: agent
-  description: Qwen 7B QLoRA on UltraChat
-```
-
-**Config** (`configs/local-deepspeed.yaml`):
-
-```yaml
+# 멀티 GPU + DeepSpeed ZeRO-3
 compute:
   gpus: auto
-  distributed:
-    strategy: deepspeed_zero3
-
-mlflow:
-  tracking_uri: ./mlruns
-  experiment_name: llm-qlora
-
-storage:
-  checkpoint_dir: ./checkpoints/llm-qlora
-  output_dir: ./outputs/llm-qlora
+  distributed: {strategy: deepspeed_zero3}
 ```
 
 ---
