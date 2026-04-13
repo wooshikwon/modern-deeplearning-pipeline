@@ -40,6 +40,16 @@ def is_json_mode() -> bool:
     return _output_format == OutputFormat.json
 
 
+def apply_format_override(fmt: OutputFormat | None) -> None:
+    """Subcommand 레벨에서 --format이 명시되면 글로벌 포맷을 override한다.
+
+    `mdp <cmd> --format json` 패턴을 지원한다. 명시되지 않으면(None)
+    `mdp --format json <cmd>` 최상위 옵션이 그대로 유지된다.
+    """
+    if fmt is not None:
+        set_output_format(fmt)
+
+
 def build_result(
     *,
     command: str,

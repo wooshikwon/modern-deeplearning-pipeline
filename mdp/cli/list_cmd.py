@@ -171,15 +171,35 @@ def _list_models(task_filter: str | None = None) -> None:
 # ── callbacks ──
 
 
-def _list_callbacks() -> None:
-    from mdp.training.callbacks import __all__ as callback_names
+def _load_aliases_by_category() -> dict[str, dict[str, str]]:
+    """aliases.yaml을 카테고리별 dict로 로드한다 ({category: {alias: class_path}})."""
+    aliases_path = Path(__file__).parent.parent / "aliases.yaml"
+    if not aliases_path.exists():
+        return {}
+    return yaml.safe_load(aliases_path.read_text()) or {}
 
-    names = sorted(callback_names)
+
+def _list_callbacks() -> None:
+    """Recipe에 `_component_:`로 쓸 수 있는 콜백 alias 목록을 보여준다.
+
+    aliases.yaml의 callback 카테고리가 권위 있는 소스 — agent는 여기 표시된
+    alias를 그대로 Recipe에 사용해야 한다 (클래스명을 직접 쓰면 ValueError).
+    """
+    aliases = _load_aliases_by_category().get("callback", {})
+    items = sorted(aliases.items())  # [(alias, class_path), ...]
 
     if is_json_mode():
         from mdp.cli.schemas import ListCallbacksResult
-        result = ListCallbacksResult(callbacks=names)
-        emit_result(build_result(command="list", **result.model_dump()))
+        # 풀 정보로 표시 — 단순 리스트가 아닌 alias→class_path 매핑
+        result = ListCallbacksResult(callbacks=[a for a, _ in items])
+        emit_result(build_result(
+            command="list",
+            **result.model_dump(),
+            callback_aliases=[
+                {"alias": a, "class_path": p, "class_name": p.rsplit(".", 1)[-1]}
+                for a, p in items
+            ],
+        ))
         return
 
     from rich.console import Console
@@ -187,10 +207,13 @@ def _list_callbacks() -> None:
 
     console = Console()
     table = Table(title="Available Callbacks", show_header=True, header_style="bold cyan")
-    table.add_column("Name", style="bold")
+    table.add_column("Alias (use in _component_)", style="bold")
+    table.add_column("Class")
+    table.add_column("Module")
 
-    for name in names:
-        table.add_row(name)
+    for alias, class_path in items:
+        module, _, cls_name = class_path.rpartition(".")
+        table.add_row(alias, cls_name, module)
 
     console.print(table)
 
@@ -198,18 +221,42 @@ def _list_callbacks() -> None:
 # ── strategies ──
 
 
-_STRATEGIES = [
-    {"name": "ddp", "strategy": "DistributedDataParallel", "description": "멀티 GPU 데이터 병렬"},
-    {"name": "fsdp", "strategy": "FullyShardedDataParallel", "description": "메모리 효율적 모델 병렬"},
-    {"name": "deepspeed_zero2", "strategy": "DeepSpeed ZeRO-2", "description": "ZeRO Stage 2 최적화"},
-    {"name": "deepspeed_zero3", "strategy": "DeepSpeed ZeRO-3", "description": "ZeRO Stage 3 전체 분할"},
-]
+_STRATEGY_DESCRIPTIONS = {
+    "ddp": "멀티 GPU 데이터 병렬",
+    "fsdp": "메모리 효율적 모델 병렬",
+    "deepspeed": "DeepSpeed (기본 ZeRO Stage)",
+    "deepspeed_zero2": "DeepSpeed ZeRO-2",
+    "deepspeed_zero3": "DeepSpeed ZeRO-3 (전체 분할)",
+    "auto": "GPU 수에 따라 ddp/fsdp 자동 선택",
+    # CamelCase 변형도 동일한 설명으로 처리
+    "DDPStrategy": "멀티 GPU 데이터 병렬",
+    "FSDPStrategy": "메모리 효율적 모델 병렬",
+    "DeepSpeedStrategy": "DeepSpeed (기본 ZeRO Stage)",
+    "DeepSpeedZeRO2": "DeepSpeed ZeRO-2",
+    "DeepSpeedZeRO3": "DeepSpeed ZeRO-3 (전체 분할)",
+}
 
 
 def _list_strategies() -> None:
+    """Recipe/Config의 distributed.strategy 또는 _component_에 쓸 수 있는 alias 목록.
+
+    aliases.yaml의 strategy 카테고리가 권위 있는 소스. 소문자 단축형(ddp, fsdp 등)과
+    `auto`를 포함한다.
+    """
+    aliases = _load_aliases_by_category().get("strategy", {})
+    items = sorted(aliases.items())
+
     if is_json_mode():
         from mdp.cli.schemas import ListStrategiesResult
-        result = ListStrategiesResult(strategies=_STRATEGIES)
+        strategies = [
+            {
+                "name": alias,
+                "strategy": class_path.rsplit(".", 1)[-1],
+                "description": _STRATEGY_DESCRIPTIONS.get(alias, ""),
+            }
+            for alias, class_path in items
+        ]
+        result = ListStrategiesResult(strategies=strategies)
         emit_result(build_result(command="list", **result.model_dump()))
         return
 
@@ -218,12 +265,13 @@ def _list_strategies() -> None:
 
     console = Console()
     table = Table(title="Distributed Strategies", show_header=True, header_style="bold cyan")
-    table.add_column("Name", style="bold")
+    table.add_column("Alias", style="bold")
     table.add_column("Strategy")
     table.add_column("설명")
 
-    for s in _STRATEGIES:
-        table.add_row(s["name"], s["strategy"], s["description"])
+    for alias, class_path in items:
+        cls_name = class_path.rsplit(".", 1)[-1]
+        table.add_row(alias, cls_name, _STRATEGY_DESCRIPTIONS.get(alias, ""))
 
     console.print(table)
 

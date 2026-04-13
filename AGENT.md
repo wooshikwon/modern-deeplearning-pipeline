@@ -369,6 +369,16 @@ Factory는 `_component_` 유무를 먼저 확인하고, duck typing으로 HF 클
 
 학습 시작 전에 3단 검증(Catalog → Business → Compat)이 모든 에러를 수집하여 한 번에 보고한다.
 
+### 검증 스코프 (어느 명령에서 어느 검증이 도는가)
+
+| 명령 | 실행되는 검증 |
+|------|--------------|
+| `mdp train`, `mdp rl-train` | **전체** — head_task, adapter, rl_models, component_imports, **data_components, task_fields, streaming_distributed**, GPU/strategy 호환성 |
+| `mdp estimate`, `mdp inference --run-id`/`--model-dir` | **모델 관련만** — head_task, adapter, rl_models, component_imports |
+| `mdp inference --pretrained`, `mdp generate --pretrained` | Recipe 자체가 없으므로 검증 스킵. 런타임 에러로만 잡힘 |
+
+따라서 `mdp estimate`가 통과해도 `data.dataset._component_` 누락 같은 데이터 측 결함은 잡히지 않는다 — 학습 시작 시점에야 발견. **검증 누락을 미리 잡으려면 작은 max_steps로 `mdp train`을 한 번 돌려본다**.
+
 ### Task-Head Compatibility
 
 | Task | Allowed Head | AutoModel alias (head 생략) |
