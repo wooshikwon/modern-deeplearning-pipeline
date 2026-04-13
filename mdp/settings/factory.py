@@ -118,6 +118,12 @@ class SettingsFactory:
         """
         from mdp.cli._override import apply_overrides
 
+        # Config 최상위 필드명 — recipe에 동일 키가 없으면 config. 접두사 누락 의심
+        _CONFIG_TOP_KEYS = {
+            "environment", "compute", "environment_setup",
+            "mlflow", "storage", "serving", "job",
+        }
+
         recipe_ovr: list[str] = []
         config_ovr: list[str] = []
         for o in overrides:
@@ -126,6 +132,17 @@ class SettingsFactory:
                 config_ovr.append(o[len("config."):])
             else:
                 recipe_ovr.append(o)
+
+        # config. 접두사 누락 경고
+        for o in recipe_ovr:
+            top_key = o.partition("=")[0].split(".")[0]
+            if top_key in _CONFIG_TOP_KEYS and top_key not in recipe_dict:
+                logger.warning(
+                    "Override '%s'의 키 '%s'는 Config 필드입니다. "
+                    "'config.%s'를 사용하세요.",
+                    o, top_key, o,
+                )
+
         if recipe_ovr:
             apply_overrides(recipe_dict, recipe_ovr)
         if config_ovr:
@@ -214,7 +231,9 @@ class SettingsFactory:
         result.errors.extend(cat_result.errors)
 
         # Business: head-task 호환성 + adapter 제약 (data/distributed 제외)
-        biz_result = BusinessValidator.validate_partial(settings, checks=["head_task", "adapter", "rl_models"])
+        biz_result = BusinessValidator.validate_partial(
+            settings, checks=["head_task", "adapter", "rl_models", "component_imports"],
+        )
         result.errors.extend(biz_result.errors)
         for w in biz_result.warnings:
             logger.warning(w)

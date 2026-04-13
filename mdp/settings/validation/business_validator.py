@@ -47,6 +47,7 @@ class BusinessValidator:
             "streaming_distributed": cls._check_streaming_distributed,
             "task_fields": cls._check_task_fields,
             "data_components": cls._check_data_components,
+            "component_imports": cls._check_component_imports,
         }
         targets = checks or list(all_checks.keys())
         for name in targets:
@@ -280,3 +281,57 @@ class BusinessValidator:
                 "data.collator에 '_component_' 키가 없습니다. "
                 "예: {_component_: CausalLMCollator, tokenizer: gpt2}"
             )
+
+    @staticmethod
+    def _check_component_imports(
+        settings: Settings, result: ValidationResult
+    ) -> None:
+        """6. _component_ 경로 import 가능 여부 검증.
+
+        모델 weights를 로딩하지 않고 클래스만 import하여, 오타나
+        잘못된 모듈 경로를 모델 로딩 전에 잡는다.
+        """
+        from mdp.settings.resolver import ComponentResolver
+
+        resolver = ComponentResolver()
+        recipe = settings.recipe
+
+        # Recipe 내 모든 _component_ 경로 수집: (필드명, 경로)
+        targets: list[tuple[str, str]] = []
+
+        # SFT
+        if recipe.model.get("_component_"):
+            targets.append(("model", recipe.model["_component_"]))
+        if recipe.adapter and recipe.adapter.get("_component_"):
+            targets.append(("adapter", recipe.adapter["_component_"]))
+        if recipe.head and recipe.head.get("_component_"):
+            targets.append(("head", recipe.head["_component_"]))
+        if recipe.loss and recipe.loss.get("_component_"):
+            targets.append(("loss", recipe.loss["_component_"]))
+
+        # Data
+        if recipe.data.dataset.get("_component_"):
+            targets.append(("data.dataset", recipe.data.dataset["_component_"]))
+        if recipe.data.collator.get("_component_"):
+            targets.append(("data.collator", recipe.data.collator["_component_"]))
+        if recipe.data.val_dataset and recipe.data.val_dataset.get("_component_"):
+            targets.append(("data.val_dataset", recipe.data.val_dataset["_component_"]))
+
+        # RL
+        if recipe.rl:
+            if recipe.rl.algorithm.get("_component_"):
+                targets.append(("rl.algorithm", recipe.rl.algorithm["_component_"]))
+            for name, spec in recipe.rl.models.items():
+                if spec.get("_component_"):
+                    targets.append((f"rl.models.{name}", spec["_component_"]))
+                if isinstance(spec.get("adapter"), dict) and spec["adapter"].get("_component_"):
+                    targets.append((f"rl.models.{name}.adapter", spec["adapter"]["_component_"]))
+
+        for field, path in targets:
+            try:
+                resolved = resolver._resolve_alias(path)
+                resolver.import_class(resolved)
+            except (ImportError, ModuleNotFoundError, AttributeError, ValueError) as e:
+                result.warnings.append(
+                    f"{field}._component_ '{path}' import 실패: {e}"
+                )
