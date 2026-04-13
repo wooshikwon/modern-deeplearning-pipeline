@@ -65,10 +65,10 @@ class Factory:
     ) -> nn.Module:
         """모델 dict로부터 5단계 조립을 수행한다.
 
-        1. Pretrained 로딩 (또는 _component_ 인스턴스화)
+        1. 모델 로딩 (_component_ 유무에 따라 경로 결정)
         2. MoE 감지 + moe_info 모델 인스턴스 부착
         3. Head 교체 (head_config가 있을 때)
-        4. BaseModel 검증 (pretrained가 없는 커스텀 모델)
+        4. BaseModel 검증 (커스텀 모델은 BaseModel 필수)
         5. Adapter 적용 (adapter_config가 있을 때)
 
         QLoRA는 1+5를 한 번에 수행하는 특수 경로를 탄다.
@@ -99,9 +99,11 @@ class Factory:
             head = self.resolver.resolve(hc)
             self._attach_head(model, head, target_attr)
 
-        # 단계 4: BaseModel 검증 (pretrained가 없는 커스텀 모델)
+        # 단계 4: BaseModel 검증 (커스텀 모델은 BaseModel 필수)
+        # HF 모델(from_pretrained 보유)은 자체 인터페이스를 가지므로 면제.
+        # 커스텀 모델은 pretrained 유무와 무관하게 BaseModel을 상속해야 한다.
         from mdp.models.base import BaseModel
-        if not skip_base_check and model_config.get("pretrained") is None and not isinstance(model, BaseModel):
+        if not skip_base_check and not hasattr(model, "from_pretrained") and not isinstance(model, BaseModel):
             raise TypeError(
                 f"{model.__class__.__name__}이 BaseModel을 상속하지 않습니다. "
                 "커스텀 모델은 BaseModel을 상속하여 forward, training_step, "
@@ -115,7 +117,13 @@ class Factory:
         return model
 
     def _load_pretrained(self, model_config: dict[str, Any]) -> nn.Module:
-        """PretrainedResolver를 통해 pretrained 모델을 로딩한다."""
+        """_component_와 pretrained 조합에 따라 모델을 로딩한다.
+
+        분기 기준은 _component_ 유무이다:
+        - _component_ 있음: 그 클래스가 인스턴스화를 소유한다.
+          duck typing(hasattr from_pretrained)으로 HF 클래스와 커스텀 클래스를 구분.
+        - _component_ 없음: PretrainedResolver가 URI에서 클래스까지 추론한다.
+        """
         from mdp.models.pretrained import PretrainedResolver
 
         config = dict(model_config)
@@ -132,17 +140,25 @@ class Factory:
         if attn_impl is not None:
             kwargs["attn_implementation"] = attn_impl
 
-        if pretrained is not None:
-            return PretrainedResolver.load(
-                pretrained,
-                class_path=component,
-                **kwargs,
-            )
-        elif component is not None:
+        # _component_ 명시: 그 클래스가 인스턴스화를 소유한다
+        if component is not None:
             klass = self.resolver.import_class(
                 self.resolver._resolve_alias(component)
             )
-            return klass(**kwargs)
+            if pretrained is not None and hasattr(klass, "from_pretrained"):
+                # HF 호환 클래스: URI에서 identifier를 추출하고 from_pretrained
+                _, identifier = PretrainedResolver._parse_uri(pretrained)
+                return klass.from_pretrained(identifier, **kwargs)
+            elif pretrained is not None:
+                # 커스텀 클래스: pretrained는 생성자 인자
+                return klass(pretrained=pretrained, **kwargs)
+            else:
+                return klass(**kwargs)
+
+        # _component_ 없음: PretrainedResolver가 클래스까지 추론
+        elif pretrained is not None:
+            return PretrainedResolver.load(pretrained, **kwargs)
+
         else:
             raise ValueError("model에 _component_ 또는 pretrained가 필요합니다")
 

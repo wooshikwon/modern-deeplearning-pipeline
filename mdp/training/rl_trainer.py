@@ -304,8 +304,8 @@ class RLTrainer:
         try:
             import mlflow
             mlflow.log_metric(key, value, step=step)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MLflow metric 로깅 실패 (key=%s): %s", key, e)
 
     def _log_mlflow_params(self) -> None:
         try:

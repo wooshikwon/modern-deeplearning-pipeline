@@ -793,8 +793,8 @@ class Trainer:
             import mlflow
 
             mlflow.log_metric(key, value, step=step)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("MLflow metric 로깅 실패 (key=%s): %s", key, e)
 
     def _log_mlflow_params(self) -> None:
         """Run 시작 시 실험 재현에 필요한 하이퍼파라미터를 기록한다."""
