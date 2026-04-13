@@ -4,6 +4,43 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+
+
+def _init_distributed_if_torchrun(settings) -> None:
+    """torchrun 워커로 실행 중이면 process group을 초기화한다.
+
+    분산 환경 초기화는 프로세스 생명주기의 문제이지 Trainer 생명주기의
+    문제가 아니다. ``Factory.create_dataloaders()``가 ``DistributedSampler``를
+    만들 때 ``dist.get_world_size()``를 호출하는데, 이 시점에 process group이
+    이미 초기화되어 있어야 한다.
+
+    기존에는 FSDPStrategy/Trainer 내부에서 ``init_process_group()``을 호출했으나,
+    그 호출은 create_dataloaders 이후에 발생하므로 DataLoader 생성이 실패했다.
+    이 함수는 entry point에서 먼저 초기화를 수행하고, 기존 trainer/strategy의
+    중복 호출은 ``is_initialized()`` 가드로 no-op이 된다.
+
+    torchrun이 아닌 단일 프로세스 실행(예: 라이브러리 import)에서는
+    RANK/WORLD_SIZE 환경변수가 없으므로 조기 return한다.
+    """
+    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
+        return
+
+    import torch
+    import torch.distributed as dist
+
+    if dist.is_initialized():
+        return
+
+    # backend: Config.compute.distributed.backend → fallback nccl(cuda)/gloo(cpu)
+    dist_cfg = settings.config.compute.distributed
+    backend = None
+    if isinstance(dist_cfg, dict):
+        backend = dist_cfg.get("backend")
+    if backend is None:
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+
+    dist.init_process_group(backend=backend)
 
 
 def run_training(settings) -> dict:
@@ -63,6 +100,10 @@ def main() -> None:
     with open(args.settings_path) as f:
         raw = json.load(f)
     settings = Settings(**raw)
+
+    # DistributedSampler가 dataloader 생성 시 분산 통신을 요구하므로,
+    # create_dataloaders 이전에 process group을 초기화한다.
+    _init_distributed_if_torchrun(settings)
 
     result = run_training(settings)
 
