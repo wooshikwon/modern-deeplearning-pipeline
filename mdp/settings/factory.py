@@ -120,7 +120,7 @@ class SettingsFactory:
 
         # Config 최상위 필드명 — recipe에 동일 키가 없으면 config. 접두사 누락 의심
         _CONFIG_TOP_KEYS = {
-            "environment", "compute", "environment_setup",
+            "environment", "compute",
             "mlflow", "storage", "serving", "job",
         }
 

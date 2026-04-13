@@ -169,30 +169,16 @@ class Recipe(BaseModel):
 
 
 class ComputeConfig(BaseModel):
-    """실행 환경 설정."""
+    """실행 환경 설정.
+
+    로컬/torchrun 기반 학습만 지원한다. 원격·클라우드 오케스트레이션
+    (SSH job submission, SkyPilot 런칭 등)은 mdp의 책임이 아니다 —
+    사용자가 이미 실행 환경 안에 있다고 가정한다.
+    """
 
     target: str = "local"
     gpus: int | str | list[int] = "auto"
-    host: str | None = None
-    user: str | None = None
-    ssh_key: str | None = None
-    working_dir: str | None = None
-    nodes: list[dict[str, Any]] | None = None
     distributed: dict[str, Any] | None = None
-    # cloud 전용 필드
-    provider: str | None = None
-    accelerators: str | None = None
-    spot: bool = False
-    region: str | None = None
-    disk_size: int = 256
-
-
-class EnvironmentSetupConfig(BaseModel):
-    """원격/클라우드 환경 준비."""
-
-    container: str | None = None
-    dependencies: str | None = None
-    setup_commands: list[str] = Field(default_factory=list)
 
 
 class MLflowConfig(BaseModel):
@@ -235,9 +221,6 @@ class Config(BaseModel):
 
     environment: dict[str, Any] = Field(default_factory=lambda: {"name": "local"})
     compute: ComputeConfig = Field(default_factory=ComputeConfig)
-    environment_setup: EnvironmentSetupConfig = Field(
-        default_factory=EnvironmentSetupConfig
-    )
     mlflow: MLflowConfig = Field(default_factory=MLflowConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
     serving: ServingConfig | None = None

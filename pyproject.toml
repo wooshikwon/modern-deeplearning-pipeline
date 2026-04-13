@@ -33,14 +33,7 @@ serving = [
     "fastapi>=0.104",
     "uvicorn>=0.24",
 ]
-cloud = [
-    "skypilot>=0.5",
-]
-remote = [
-    "paramiko>=3.4",
-    "fabric>=3.2",
-]
-all = ["mdp[vision,language,serving,cloud,remote]"]
+all = ["mdp[vision,language,serving]"]
 
 [project.scripts]
 mdp = "mdp.__main__:app"

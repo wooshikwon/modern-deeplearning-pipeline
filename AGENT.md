@@ -286,29 +286,18 @@ environment:                    # 환경 메타데이터
   name: str                     # 기본 "local"
 
 compute:
-  target: str                   # local (기본)
+  target: str                   # local (기본) — mdp는 로컬/torchrun 실행만 지원
   gpus: int | "auto"
-  host: str                     # SSH 호스트 (원격 실행)
-  user: str                     # SSH 유저
-  ssh_key: str                  # SSH 키 경로
-  working_dir: str              # 원격 작업 디렉토리
-  nodes: [{...}]                # 멀티노드 설정
   distributed:                  # 분산 전략 (멀티 GPU 시 필수)
     strategy: str | dict        # ddp | fsdp | deepspeed_zero3 | auto | {_component_: FSDPStrategy, ...}
+    accelerators: str           # (선택) "A100" 등 — estimate 커맨드의 VRAM 추정용
     moe:                        # MoE Expert Parallelism
       enabled: bool
       ep_size: int              # Expert Parallel degree
-  # 클라우드 전용
-  provider: str                 # aws | gcp | azure
-  accelerators: str             # A100 등
-  spot: bool                    # 기본 false
-  region: str
-  disk_size: int                # 기본 256 GB
 
-environment_setup:              # 원격/클라우드 환경 준비
-  container: str                # Docker 이미지 URI
-  dependencies: str             # requirements 파일 경로
-  setup_commands: [str]         # 실행할 쉘 커맨드
+# 원격·클라우드 오케스트레이션(SSH job 제출, SkyPilot 런칭 등)은 mdp의 책임이 아니다.
+# 사용자가 이미 실행 환경(로컬 머신 / SSH로 접속한 원격 서버 / 클라우드 컨테이너) 안에 있다고
+# 가정한다. 원격 실행을 자동화하려면 SkyPilot, Ray, SLURM, K8s 등 전용 오케스트레이터를 쓴다.
 
 mlflow:
   tracking_uri: str             # 기본 ./mlruns
