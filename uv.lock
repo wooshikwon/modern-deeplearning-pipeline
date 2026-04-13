@@ -1829,7 +1829,7 @@ requires-dist = [
     { name = "mdp", extras = ["vision", "language", "serving"], marker = "extra == 'all'" },
     { name = "mlflow", specifier = ">=2.10" },
     { name = "onnxruntime", marker = "extra == 'serving'", specifier = ">=1.16" },
-    { name = "peft", marker = "extra == 'language'", specifier = ">=0.7" },
+    { name = "peft", marker = "extra == 'language'", specifier = ">=0.10" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "python-dotenv", specifier = ">=1.0" },
     { name = "pyyaml", specifier = ">=6.0" },

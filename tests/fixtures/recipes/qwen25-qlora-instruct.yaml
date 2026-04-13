@@ -11,7 +11,7 @@ adapter:
   r: 64
   alpha: 128
   dropout: 0.1
-  target_modules: "all_linear"
+  target_modules: "all-linear"
   quantization:
     bits: 4
     type: nf4

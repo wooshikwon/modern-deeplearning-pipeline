@@ -173,7 +173,7 @@ adapter:                        # _component_ 패턴 — 파라미터 효율 학
   r: int                        # LoRA rank 또는 prefix 토큰 수
   alpha: int                    # LoRA alpha
   dropout: float                # LoRA dropout
-  target_modules: list | str    # 적용 대상 모듈 (기본 "all_linear")
+  target_modules: list | str    # 적용 대상 모듈 (기본 "all-linear" — PEFT 표준)
   quantization:                 # QLoRA 전용
     bits: 4 | 8
   modules_to_save: list         # freeze하지 않을 모듈 (예: [lm_head, embed_tokens])

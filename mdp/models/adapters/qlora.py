@@ -25,7 +25,7 @@ def apply_qlora(
     r: int = 8,
     lora_alpha: int | None = None,
     lora_dropout: float | None = None,
-    target_modules: list[str] | str = "all_linear",
+    target_modules: list[str] | str = "all-linear",
     task_type: str | None = None,
     bits: int = 4,
     class_path: str | None = None,

@@ -120,7 +120,7 @@ class BusinessValidator:
             if adapter.get("dropout", 0.0) != 0.0:
                 lora_only_fields.append("dropout")
             target_modules = adapter.get("target_modules")
-            if target_modules and target_modules != "all_linear":
+            if target_modules and target_modules != "all-linear":
                 lora_only_fields.append("target_modules")
             if lora_only_fields:
                 result.warnings.append(
