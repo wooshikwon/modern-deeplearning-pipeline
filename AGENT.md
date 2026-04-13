@@ -402,14 +402,20 @@ adapter:
 
 **Family별 번역 예시**:
 
-| Semantic | Llama | BERT | GPT-2 | ViT-timm | ConvNeXt |
-|----------|-------|------|-------|----------|----------|
-| `attn.q` | q_proj | query | - | - | - |
-| `attn.qkv` | - | - | c_attn | qkv | - |
-| `attn.o` | o_proj | output.dense | c_proj | proj | - |
-| `head.cls` | - | classifier | - | head | head |
-| `head.lm` | lm_head | - | lm_head | - | - |
-| `conv.dw` | - | - | - | - | conv_dw |
+| Semantic | Llama | BERT | GPT-2 | ViT(HF) | ViT-timm | ConvNeXt |
+|----------|-------|------|-------|---------|----------|----------|
+| `attn.q` | q_proj | query | - | query | - | - |
+| `attn.qkv` | - | - | c_attn | - | qkv | - |
+| `attn.o` | o_proj | attention.output.dense | attn.c_proj | attention.output.dense | proj | - |
+| `mlp.fc1` | - | intermediate.dense | c_fc | intermediate.dense | fc1 | fc1 |
+| `mlp.fc2` | - | *미지원* | mlp.c_proj | *미지원* | fc2 | fc2 |
+| `head.cls` | - | classifier | - | classifier | head | head |
+| `head.lm` | lm_head | - | lm_head | - | - | - |
+| `conv.dw` | - | - | - | - | - | conv_dw |
+
+> **ViT(HF) vs ViT-timm**: HF ViT(`config.model_type="vit"`, family=`vit`)는 BERT-style 모듈명을 사용한다. timm ViT(family=`vit_timm`)는 timm 고유 모듈명을 사용한다. HF Swin(family=`swin`)도 BERT-style이며, timm Swin은 `swin_timm` family로 분리되어 있다.
+
+> **BERT-style `mlp.fc2` 미지원**: BERT/ViT(HF)/Swin(HF) 및 이들의 alias(roberta, dinov2, segformer)에서 `mlp.fc2`는 semantic target으로 사용할 수 없다. PEFT의 suffix 매칭에서 `"output.dense"`가 `"attention.output.dense"`까지 매칭하여 의도하지 않은 attention 모듈에도 LoRA가 적용되기 때문이다. MLP output에 LoRA를 적용하려면 `target_modules: [output.dense]`로 raw name을 직접 지정하되, attention output도 함께 매칭됨을 인지해야 한다.
 
 dot(`.`)이 없는 이름은 raw name으로 취급되어 번역 없이 PEFT에 직접 전달된다. `target`과 `target_modules`를 동시에 지정하면 ValueError로 차단된다.
 

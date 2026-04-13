@@ -1,5 +1,5 @@
 name: qwen25-72b
-family: qwen
+family: qwen2
 class_path: transformers.AutoModelForCausalLM
 head_builtin: true
 

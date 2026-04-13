@@ -1,5 +1,5 @@
 name: phi3-mini
-family: phi
+family: phi3
 class_path: transformers.AutoModelForCausalLM
 head_builtin: true
 

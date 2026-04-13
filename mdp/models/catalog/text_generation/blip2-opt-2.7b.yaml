@@ -1,7 +1,7 @@
 # BLIP-2 OPT-2.7B — Q-Former 브릿지로 비전 인코더와 LLM을 연결하는 멀티모달 모델
 # 이미지 이해, 캡셔닝, 시각적 질의응답 등 다양한 비전-언어 태스크 지원
 name: blip2-opt-2.7b
-family: blip2
+family: blip-2
 class_path: transformers.Blip2ForConditionalGeneration
 head_builtin: true
 

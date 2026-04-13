@@ -1,5 +1,5 @@
 name: gpt2
-family: gpt
+family: gpt2
 class_path: transformers.AutoModelForCausalLM
 head_builtin: true
 

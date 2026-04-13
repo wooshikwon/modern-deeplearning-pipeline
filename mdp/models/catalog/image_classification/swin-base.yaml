@@ -1,6 +1,6 @@
 # Swin Transformer Base — 윈도우 기반 계층적 비전 트랜스포머
 name: swin-base-patch4-window7-224
-family: swin
+family: swin_timm
 class_path: timm.create_model
 head_builtin: false
 

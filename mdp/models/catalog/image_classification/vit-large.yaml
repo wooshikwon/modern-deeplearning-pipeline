@@ -1,6 +1,6 @@
 # ViT-Large/16 — 대규모 Vision Transformer
 name: vit-large-patch16-224
-family: vit
+family: vit_timm
 class_path: timm.create_model
 head_builtin: false
 

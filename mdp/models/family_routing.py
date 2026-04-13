@@ -45,8 +45,13 @@ _FAMILY_ROUTING: dict[str, dict[str, str] | str] = {
 
     "bert": {
         "attn.q": "query", "attn.k": "key", "attn.v": "value",
-        "attn.o": "output.dense",
-        "mlp.fc1": "intermediate.dense", "mlp.fc2": "output.dense",
+        "attn.o": "attention.output.dense",
+        "mlp.fc1": "intermediate.dense",
+        # mlp.fc2 의도적 미지원: BERT의 MLP output은 "output.dense"이나,
+        # PEFT suffix 매칭에서 endswith(".output.dense")가 attention의
+        # "attention.output.dense"까지 매칭한다. 구분 불가능하므로 제거.
+        # MLP LoRA가 필요하면 mlp.fc1 (intermediate.dense)을 사용하거나
+        # raw target_modules로 직접 지정.
         "head.cls": "classifier",
         "embed.token": "embeddings.word_embeddings",
         "embed.pos": "embeddings.position_embeddings",
@@ -62,8 +67,12 @@ _FAMILY_ROUTING: dict[str, dict[str, str] | str] = {
     },
 
     "gpt2": {
-        "attn.qkv": "c_attn", "attn.o": "c_proj",
-        "mlp.fc1": "c_fc", "mlp.fc2": "c_proj",
+        # GPT-2의 attention output은 "attn.c_proj",
+        # MLP output은 "mlp.c_proj"이다. 짧은 "c_proj"는
+        # PEFT suffix 매칭에서 양쪽 모두 매칭되므로,
+        # 더 구체적인 경로를 사용하여 두 매핑이 구분되도록 한다.
+        "attn.qkv": "c_attn", "attn.o": "attn.c_proj",
+        "mlp.fc1": "c_fc", "mlp.fc2": "mlp.c_proj",
         "head.lm": "lm_head",
         "embed.token": "wte", "embed.pos": "wpe",
     },
@@ -76,14 +85,35 @@ _FAMILY_ROUTING: dict[str, dict[str, str] | str] = {
     "siglip": "clip",
     "detr": "clip",
     "florence2": "clip",
-    "blip2": "clip",
+    "blip-2": "clip",
 
+    # HF ViT (google/vit-*): BERT-style 모듈명.
+    # config.model_type="vit"으로 감지되며, query/key/value/attention.output.dense를 사용한다.
+    # mlp.fc2 미지원 — bert family와 동일 사유 (PEFT suffix 충돌).
     "vit": {
+        "attn.q": "query", "attn.k": "key",
+        "attn.v": "value", "attn.o": "attention.output.dense",
+        "mlp.fc1": "intermediate.dense",
+        "head.cls": "classifier",
+    },
+    # timm ViT (vit_base_patch16_224 등): timm 고유 모듈명.
+    # _TIMM_PREFIX_MAP을 통해 detect_family가 "vit_timm"을 반환한다.
+    "vit_timm": {
         "attn.qkv": "qkv", "attn.o": "proj",
         "mlp.fc1": "fc1", "mlp.fc2": "fc2",
         "head.cls": "head",
     },
-    "swin": "vit",
+    # HF Swin (microsoft/swin-*): BERT-style 모듈명.
+    # config.model_type="swin"으로 감지된다.
+    # mlp.fc2 미지원 — bert family와 동일 사유 (PEFT suffix 충돌).
+    "swin": {
+        "attn.q": "query", "attn.k": "key",
+        "attn.v": "value", "attn.o": "attention.output.dense",
+        "mlp.fc1": "intermediate.dense",
+        "head.cls": "classifier",
+    },
+    # timm Swin은 timm ViT와 동일한 모듈명 규약을 사용한다.
+    "swin_timm": "vit_timm",
 
     "convnext": {
         "conv.dw": "conv_dw",
@@ -110,8 +140,8 @@ _FAMILY_ROUTING: dict[str, dict[str, str] | str] = {
 
 # timm architecture prefix → family 매핑
 _TIMM_PREFIX_MAP: dict[str, str] = {
-    "vit": "vit",
-    "swin": "vit",
+    "vit": "vit_timm",
+    "swin": "swin_timm",
     "convnext": "convnext",
     "efficientnet": "efficientnet",
     "tf_efficientnet": "efficientnet",
@@ -180,6 +210,12 @@ def detect_family_from_pretrained_uri(
         ValueError: ``hf://`` 프로토콜이 아닌 경우, 또는 model_type이
             ``_FAMILY_ROUTING``에 없는 경우.
     """
+    if pretrained is None:
+        raise ValueError(
+            "QLoRA에서 semantic target/save를 사용하려면 pretrained URI가 필요합니다. "
+            "Recipe의 model.pretrained를 지정하거나, raw target_modules로 우회하세요."
+        )
+
     if not pretrained.startswith("hf://"):
         raise ValueError(
             f"detect_family_from_pretrained_uri는 hf:// 프로토콜만 지원합니다: "
@@ -274,6 +310,15 @@ def resolve_targets(
     # 리스트 내에 "*" 또는 "all-linear"가 유일 원소로 들어온 경우
     if len(targets) == 1 and targets[0] in ("*", "all-linear"):
         return "all-linear"
+
+    # 전체 Linear 와일드("*" 또는 "all-linear")는 단독으로만 사용 가능.
+    # 다른 semantic과 함께 리스트에 들어오면 의미적으로 모순이므로 거부한다.
+    wild = {"*", "all-linear"} & set(targets)
+    if wild and len(targets) > 1:
+        raise ValueError(
+            "전체 Linear 와일드('*' 또는 'all-linear')는 단독으로만 사용할 수 있습니다. "
+            "다른 semantic과 혼용할 수 없습니다."
+        )
 
     mapping = resolve_family(family)
 

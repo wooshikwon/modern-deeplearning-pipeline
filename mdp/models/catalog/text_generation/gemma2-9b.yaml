@@ -1,5 +1,5 @@
 name: gemma2-9b
-family: gemma
+family: gemma2
 class_path: transformers.AutoModelForCausalLM
 head_builtin: true
 

@@ -1,5 +1,5 @@
 name: vit-base-patch16-224
-family: vit
+family: vit_timm
 class_path: timm.create_model
 head_builtin: false
 

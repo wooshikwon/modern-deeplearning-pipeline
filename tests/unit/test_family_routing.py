@@ -17,6 +17,7 @@ from torch import nn
 from mdp.models.family_routing import (
     _FAMILY_ROUTING,
     detect_family,
+    detect_family_from_pretrained_uri,
     resolve_family,
     resolve_head_slot,
     resolve_save_modules,
@@ -122,11 +123,12 @@ class TestFamilyRoutingStructure:
             "bert", "roberta", "dinov2", "segformer",
             "t5",
             "gpt2",
-            "clip", "siglip", "detr", "florence2", "blip2",
-            "vit", "swin",
+            "clip", "siglip", "detr", "florence2", "blip-2",
+            "vit", "vit_timm", "swin", "swin_timm",
             "convnext",
             "efficientnet",
             "resnet",
+            "llava",
             "mixtral",
         }
         actual = set(_FAMILY_ROUTING.keys())
@@ -188,9 +190,9 @@ class TestDetectFamily:
         "llama", "mistral", "qwen2", "gemma2", "phi3",
         "bert", "roberta", "dinov2", "segformer",
         "t5", "gpt2",
-        "clip", "siglip", "detr", "florence2", "blip2",
+        "clip", "siglip", "detr", "florence2", "blip-2",
         "vit", "swin", "convnext", "efficientnet",
-        "mixtral",
+        "mixtral", "llava",
     ])
     def test_hf_model_type_detection(self, model_type: str) -> None:
         """HF config.model_type로 family를 정확히 감지해야 한다."""
@@ -198,9 +200,9 @@ class TestDetectFamily:
         assert detect_family(model) == model_type
 
     @pytest.mark.parametrize("arch,expected_family", [
-        ("vit_base_patch16_224", "vit"),
-        ("vit_large_patch32_384", "vit"),
-        ("swin_base_patch4_window7_224", "vit"),
+        ("vit_base_patch16_224", "vit_timm"),
+        ("vit_large_patch32_384", "vit_timm"),
+        ("swin_base_patch4_window7_224", "swin_timm"),
         ("convnext_base", "convnext"),
         ("convnext_tiny", "convnext"),
         ("efficientnet_b0", "efficientnet"),
@@ -287,9 +289,9 @@ class TestResolveTargets:
         assert set(result) == {"gate_proj", "up_proj", "down_proj"}
 
     def test_wildcard_expansion_bert_attn(self) -> None:
-        """BERT: attn.* → [query, key, value, output.dense]."""
+        """BERT: attn.* → [query, key, value, attention.output.dense]."""
         result = resolve_targets(["attn.*"], "bert")
-        assert set(result) == {"query", "key", "value", "output.dense"}
+        assert set(result) == {"query", "key", "value", "attention.output.dense"}
 
     def test_wildcard_and_semantic_mixed(self) -> None:
         """wildcard와 개별 semantic을 섞어 사용할 수 있다."""
@@ -356,7 +358,12 @@ class TestResolveHeadSlot:
         assert resolve_head_slot("head.lm", "llama") == "lm_head"
 
     def test_vit_head_cls(self) -> None:
-        assert resolve_head_slot("head.cls", "vit") == "head"
+        """HF ViT는 BERT-style이므로 head.cls → classifier."""
+        assert resolve_head_slot("head.cls", "vit") == "classifier"
+
+    def test_vit_timm_head_cls(self) -> None:
+        """timm ViT는 head.cls → head."""
+        assert resolve_head_slot("head.cls", "vit_timm") == "head"
 
     def test_resnet_head_cls(self) -> None:
         assert resolve_head_slot("head.cls", "resnet") == "fc"
@@ -412,7 +419,7 @@ _HF_TINY_MODELS: list[tuple[str, str]] = [
 ]
 
 _TIMM_MODELS: list[tuple[str, str]] = [
-    ("vit", "vit_base_patch16_224"),
+    ("vit_timm", "vit_base_patch16_224"),
     ("convnext", "convnext_base"),
     ("efficientnet", "efficientnet_b0"),
 ]
@@ -532,3 +539,213 @@ class TestIntegrationTimm:
                 f"family={family} model={model_name} semantic={semantic} "
                 f"actual={actual} not found in named_modules"
             )
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 8. 회귀 테스트: HF ViT/Swin vs timm ViT/Swin 분리 (1-1)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestHfTimmViTSwinSeparation:
+    """HF ViT/Swin은 BERT-style, timm ViT/Swin은 timm 고유 매핑을 사용해야 한다."""
+
+    def test_hf_vit_detects_as_vit(self) -> None:
+        """HF ViT (config.model_type='vit')은 family='vit'으로 감지된다."""
+        model = _mock_hf_model("vit")
+        assert detect_family(model) == "vit"
+
+    def test_timm_vit_detects_as_vit_timm(self) -> None:
+        """timm ViT는 _TIMM_PREFIX_MAP을 통해 family='vit_timm'으로 감지된다."""
+        model = _mock_timm_model("vit_base_patch16_224")
+        assert detect_family(model) == "vit_timm"
+
+    def test_hf_swin_detects_as_swin(self) -> None:
+        """HF Swin (config.model_type='swin')은 family='swin'으로 감지된다."""
+        model = _mock_hf_model("swin")
+        assert detect_family(model) == "swin"
+
+    def test_timm_swin_detects_as_swin_timm(self) -> None:
+        """timm Swin은 family='swin_timm'으로 감지된다."""
+        model = _mock_timm_model("swin_base_patch4_window7_224")
+        assert detect_family(model) == "swin_timm"
+
+    def test_hf_vit_target_attn_q(self) -> None:
+        """HF ViT: target [attn.q] → [query] (BERT-style)."""
+        result = resolve_targets(["attn.q"], "vit")
+        assert result == ["query"]
+
+    def test_timm_vit_target_attn_qkv(self) -> None:
+        """timm ViT: target [attn.qkv] → [qkv]."""
+        result = resolve_targets(["attn.qkv"], "vit_timm")
+        assert result == ["qkv"]
+
+    def test_hf_swin_target_attn_q_v(self) -> None:
+        """HF Swin: target [attn.q, attn.v] → [query, value] (BERT-style)."""
+        result = resolve_targets(["attn.q", "attn.v"], "swin")
+        assert result == ["query", "value"]
+
+    def test_timm_swin_target_attn_qkv(self) -> None:
+        """timm Swin (alias → vit_timm): target [attn.qkv] → [qkv]."""
+        result = resolve_targets(["attn.qkv"], "swin_timm")
+        assert result == ["qkv"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 9. 회귀 테스트: BERT/GPT-2 attn.o vs mlp.fc2 매핑 구분 (1-2)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestAttnOvsMlpFc2Uniqueness:
+    """attn.o와 mlp.fc2가 서로 다른 actual name으로 번역되어야 한다."""
+
+    def test_bert_attn_o_unique(self) -> None:
+        """BERT: attn.o → attention.output.dense. mlp.fc2는 제거됨 (suffix 충돌 방지)."""
+        mapping = resolve_family("bert")
+        assert mapping["attn.o"] == "attention.output.dense"
+        assert "mlp.fc2" not in mapping
+
+    def test_gpt2_attn_o_vs_mlp_fc2_unique(self) -> None:
+        """GPT-2: attn.o → attn.c_proj, mlp.fc2 → mlp.c_proj (서로 다름)."""
+        mapping = resolve_family("gpt2")
+        assert mapping["attn.o"] == "attn.c_proj"
+        assert mapping["mlp.fc2"] == "mlp.c_proj"
+        assert mapping["attn.o"] != mapping["mlp.fc2"]
+
+    def test_bert_target_attn_o_only(self) -> None:
+        """BERT: target [attn.o] → [attention.output.dense] (MLP 경로 미포함)."""
+        result = resolve_targets(["attn.o"], "bert")
+        assert result == ["attention.output.dense"]
+
+    def test_bert_target_mlp_fc2_raises(self) -> None:
+        """BERT: mlp.fc2가 제거되었으므로 ValueError 발생."""
+        with pytest.raises(ValueError, match="알 수 없는 semantic target"):
+            resolve_targets(["mlp.fc2"], "bert")
+
+    def test_gpt2_target_attn_o_only(self) -> None:
+        """GPT-2: target [attn.o] → [attn.c_proj]."""
+        result = resolve_targets(["attn.o"], "gpt2")
+        assert result == ["attn.c_proj"]
+
+    def test_gpt2_target_mlp_fc2_only(self) -> None:
+        """GPT-2: target [mlp.fc2] → [mlp.c_proj]."""
+        result = resolve_targets(["mlp.fc2"], "gpt2")
+        assert result == ["mlp.c_proj"]
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 10. 회귀 테스트: detect_family_from_pretrained_uri None 가드 (1-3)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestDetectFamilyPretrainedNoneGuard:
+    """pretrained=None 전달 시 AttributeError 대신 명시적 ValueError."""
+
+    def test_none_pretrained_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="pretrained URI가 필요합니다"):
+            detect_family_from_pretrained_uri(None)
+
+    def test_none_pretrained_not_attribute_error(self) -> None:
+        """AttributeError가 아닌 ValueError가 발생해야 한다."""
+        try:
+            detect_family_from_pretrained_uri(None)
+        except ValueError:
+            pass  # 기대한 동작
+        except AttributeError:
+            pytest.fail("AttributeError가 발생했다 — None 가드가 누락됨")
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 11. 회귀 테스트: blip-2 하이픈 정합성 (1-4)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestBlip2HyphenKey:
+    """_FAMILY_ROUTING 키가 HF model_type 'blip-2' (하이픈 포함)와 일치해야 한다."""
+
+    def test_blip_2_key_exists(self) -> None:
+        """'blip-2' 키가 _FAMILY_ROUTING에 존재해야 한다."""
+        assert "blip-2" in _FAMILY_ROUTING
+
+    def test_blip2_without_hyphen_not_exists(self) -> None:
+        """하이픈 없는 'blip2'는 더 이상 존재하지 않아야 한다."""
+        assert "blip2" not in _FAMILY_ROUTING
+
+    def test_hf_blip2_model_detects_correctly(self) -> None:
+        """HF BLIP-2 mock (model_type='blip-2')이 정상 감지되어야 한다."""
+        model = _mock_hf_model("blip-2")
+        assert detect_family(model) == "blip-2"
+
+    def test_blip2_resolves_to_clip(self) -> None:
+        """blip-2는 clip의 alias이므로 clip과 동일한 매핑을 반환해야 한다."""
+        blip2_mapping = resolve_family("blip-2")
+        clip_mapping = resolve_family("clip")
+        assert blip2_mapping is clip_mapping
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 12. 회귀 테스트: all-linear 혼용 차단 (1-5)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestAllLinearMixedValidation:
+    """'all-linear'이나 '*'가 다른 semantic과 리스트에 함께 있으면 ValueError."""
+
+    def test_all_linear_with_other_raises(self) -> None:
+        with pytest.raises(ValueError, match="단독으로만 사용"):
+            resolve_targets(["all-linear", "attn.q"], "llama")
+
+    def test_star_with_other_raises(self) -> None:
+        with pytest.raises(ValueError, match="단독으로만 사용"):
+            resolve_targets(["*", "attn.q"], "llama")
+
+    def test_all_linear_alone_still_works(self) -> None:
+        """단독 'all-linear'은 정상 동작해야 한다."""
+        assert resolve_targets(["all-linear"], "llama") == "all-linear"
+
+    def test_star_alone_still_works(self) -> None:
+        """단독 '*'은 정상 동작해야 한다."""
+        assert resolve_targets(["*"], "llama") == "all-linear"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 13. 회귀 테스트: BERT-style family mlp.fc2 제거 (c2 1-1)
+# ──────────────────────────────────────────────────────────────────────
+
+
+class TestBertStyleMlpFc2Removed:
+    """BERT-style family에서 mlp.fc2 매핑이 제거되어 ValueError가 발생해야 한다.
+
+    PEFT suffix 매칭에서 "output.dense"가 "attention.output.dense"까지
+    매칭하는 문제를 구조적으로 차단한다.
+    """
+
+    @pytest.mark.parametrize("family", [
+        "bert", "roberta", "dinov2", "segformer", "vit", "swin",
+    ])
+    def test_mlp_fc2_raises_value_error(self, family: str) -> None:
+        """BERT-style family에서 target: [mlp.fc2] → ValueError."""
+        with pytest.raises(ValueError, match="알 수 없는 semantic target"):
+            resolve_targets(["mlp.fc2"], family)
+
+    @pytest.mark.parametrize("family", [
+        "bert", "roberta", "dinov2", "segformer", "vit", "swin",
+    ])
+    def test_mlp_wildcard_expands_to_fc1_only(self, family: str) -> None:
+        """BERT-style family에서 mlp.* → [intermediate.dense] (fc1만)."""
+        result = resolve_targets(["mlp.*"], family)
+        assert result == ["intermediate.dense"]
+
+    def test_gpt2_mlp_fc2_still_works(self) -> None:
+        """GPT-2의 mlp.fc2는 영향받지 않아야 한다."""
+        result = resolve_targets(["mlp.fc2"], "gpt2")
+        assert result == ["mlp.c_proj"]
+
+    def test_clip_mlp_fc2_still_works(self) -> None:
+        """CLIP의 mlp.fc2는 영향받지 않아야 한다."""
+        result = resolve_targets(["mlp.fc2"], "clip")
+        assert result == ["fc2"]
+
+    def test_vit_timm_mlp_fc2_still_works(self) -> None:
+        """timm ViT의 mlp.fc2는 영향받지 않아야 한다."""
+        result = resolve_targets(["mlp.fc2"], "vit_timm")
+        assert result == ["fc2"]

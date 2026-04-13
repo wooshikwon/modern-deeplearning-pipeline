@@ -1,7 +1,7 @@
 # Microsoft Florence-2 Base — 통합 비전-언어 모델 (프롬프트 기반 멀티태스크)
 # 단일 모델로 캡셔닝, 객체 탐지, 세그멘테이션, OCR 등 다양한 비전 태스크를 텍스트 프롬프트로 수행
 name: florence-2-base
-family: florence
+family: florence2
 class_path: transformers.AutoModelForCausalLM
 head_builtin: true
 
