@@ -67,7 +67,7 @@ def rl_train(
     callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe callbacks를 override)"),
     override: list[str] | None = typer.Option(None, "--override", help="Recipe/Config 오버라이드 (KEY=VALUE). config. 접두사로 Config 필드 지정"),
 ):
-    """RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO)."""
+    """RL alignment 학습. 내장 DPO/GRPO/PPO + `_component_`로 외부 알고리즘 주입."""
     from mdp.cli.rl_train import run_rl_train
 
     run_rl_train(recipe, config, overrides=override, callbacks_file=callbacks)

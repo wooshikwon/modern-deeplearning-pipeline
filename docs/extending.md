@@ -64,6 +64,57 @@ model:
   num_classes: 100
 ```
 
+### Pretrained backbone 조합
+
+커스텀 BaseModel이 외부 pretrained 모델을 backbone으로 사용할 수 있다. Factory는 클래스에 `from_pretrained` 메서드가 없으면 `pretrained` 키를 생성자 인자로 전달한다 — 클래스가 내부에서 backbone을 로드하고 그 위에 자신의 컴포넌트를 얹는 패턴이다:
+
+```python
+# my_models/value_model.py
+from transformers import AutoModel
+from mdp.models.base import BaseModel
+
+class ValueModel(BaseModel):
+    def __init__(self, pretrained: str, value_head_dropout: float = 0.2, **kwargs):
+        super().__init__()
+        # URI 스킴 제거
+        name = pretrained.removeprefix("hf://").removeprefix("local://")
+        # backbone 로딩 (아키텍처는 불변 — 이 클래스가 적응한다)
+        self.backbone = AutoModel.from_pretrained(name)
+        hidden_dim = self.backbone.config.hidden_size  # backbone에 물어본다
+        # 자신의 컴포넌트는 backbone 차원에 맞춰 구성
+        self.value_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 4),
+            nn.GELU(),
+            nn.Dropout(value_head_dropout),
+            nn.Linear(hidden_dim // 4, 1),
+        )
+
+    def forward(self, batch):
+        out = self.backbone(input_ids=batch["input_ids"], attention_mask=batch.get("attention_mask"))
+        return {"logits": self.value_head(out.last_hidden_state)}
+
+    def training_step(self, batch): ...
+    def validation_step(self, batch): ...
+```
+
+```yaml
+model:
+  _component_: my_models.value_model.ValueModel
+  pretrained: hf://meta-llama/Meta-Llama-3-8B
+  value_head_dropout: 0.2
+```
+
+**로딩 동작 정리** (Factory가 `_component_`와 `pretrained`를 어떻게 해석하는가):
+
+| `_component_` | `pretrained` | 동작 |
+|:-:|:-:|---|
+| 없음 | 있음 | PretrainedResolver가 `config.architectures[0]`에서 클래스 추론 (CLI `--pretrained` 경로) |
+| HF 클래스 (`from_pretrained` 있음) | 있음 | `klass.from_pretrained(identifier, **kwargs)` |
+| 커스텀 클래스 (`from_pretrained` 없음) | 있음 | `klass(pretrained=uri, **kwargs)` — 위 예시 |
+| 있음 | 없음 | `klass(**kwargs)` — 랜덤 초기화 (BaseModel 상속 필수) |
+
+**제약**: pretrained backbone의 아키텍처(`hidden_size`, `num_layers` 등)는 불변이다. 커스텀 클래스는 `backbone.config`를 읽어 적응해야지, 치수를 하드코딩하면 다른 모델로 교체할 때 깨진다.
+
 ### Loss 선택 분기
 
 - `loss:` 지정 → `model.forward(batch)` 호출 → `loss_fn(outputs["logits"], batch["labels"])`
@@ -294,19 +345,50 @@ compute:
 
 ## 커스텀 RL 알고리즘
 
+RLTrainer는 알고리즘 클래스를 일반 Python 객체로 취급한다 (`nn.Module` 불필요). 다음 규약을 따르면 된다:
+
+- **클래스 속성**
+  - `needs_generation: bool` — `True`면 매 스텝마다 policy가 응답을 생성(`model.generate`)하고, 그 출력을 reward model에 넣어 reward를 계산 (GRPO/PPO 패턴). `False`면 offline 배치를 그대로 사용 (DPO, weighted-NTP 패턴)
+  - `mini_epochs: int` — 생성된 배치당 optimizer step 횟수 (PPO는 4~8, DPO/weighted-NTP는 1)
+
+- **필수 메서드**: `compute_loss(trainable_out, frozen_out, batch) -> dict[str, Tensor]`
+  - `trainable_out[name]`: trainable 모델(예: `"policy"`)의 forward 출력
+  - `frozen_out[name]`: frozen 모델(예: `"reference"`, `"value"`, `"reward"`)의 forward 출력
+  - 반환: `{trainable_name: scalar_loss}`. 키는 `rl.models.*`의 이름과 일치해야 optimizer가 매칭된다
+
 ```python
 # my_algorithms/custom.py
-import torch.nn as nn
+import torch
+import torch.nn.functional as F
 
-class CustomRLLoss(nn.Module):
+class CustomRLLoss:
+    needs_generation = False
+    mini_epochs = 1
+
     def __init__(self, beta: float = 0.1):
-        super().__init__()
         self.beta = beta
 
-    def forward(self, policy_logps, reference_logps, **kwargs):
-        # 커스텀 RL loss 계산
-        ...
-        return loss
+    def compute_loss(self, trainable_out, frozen_out, batch):
+        policy_logits = trainable_out["policy"]["logits"]       # (B, S, V)
+        reference_logits = frozen_out["reference"]["logits"]    # (B, S, V)
+        labels = batch["labels"]                                 # (B, S)
+
+        # 예: KL-regularized CE loss
+        shift_policy = policy_logits[:, :-1].contiguous()
+        shift_ref = reference_logits[:, :-1].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+
+        ce = F.cross_entropy(
+            shift_policy.view(-1, shift_policy.size(-1)),
+            shift_labels.view(-1),
+            ignore_index=-100,
+        )
+        kl = F.kl_div(
+            F.log_softmax(shift_policy, dim=-1),
+            F.softmax(shift_ref, dim=-1),
+            reduction="batchmean",
+        )
+        return {"policy": ce + self.beta * kl}
 ```
 
 ```yaml
@@ -314,4 +396,56 @@ rl:
   algorithm:
     _component_: my_algorithms.custom.CustomRLLoss
     beta: 0.2
+  models:
+    policy:
+      _component_: AutoModelForCausalLM
+      pretrained: hf://some-base-model
+      optimizer: {_component_: AdamW, lr: 1.0e-5}
+    reference:
+      _component_: AutoModelForCausalLM
+      pretrained: hf://some-base-model
+      # optimizer 없음 → frozen
 ```
+
+> **모델 출력 형태**: `trainable_out[name]`/`frozen_out[name]`의 값은 `model(input_ids=..., attention_mask=...)`의 출력이다. HF 모델은 `{"logits": ...}` 형태, 커스텀 BaseModel은 `forward()`가 반환한 dict 그대로. 단, `role="value"` 모델은 RLTrainer가 자동으로 `{"values": (B, S)}` 형태로 변환한다 (logits 마지막 차원이 1이면 squeeze).
+
+---
+
+## 로깅 규약
+
+### mdp가 적용하는 서드파티 경고 억제
+
+`mdp/__init__.py`가 import 시점에 다음을 수행한다:
+- `FutureWarning` 전역 필터링 (의존성 라이브러리의 API deprecation 예고)
+- `torch` beta feature `UserWarning` 필터링
+- `transformers`, `datasets`, `accelerate`, `bitsandbytes` 로거를 WARNING 레벨로 설정
+
+따라서 커스텀 코드에서 `import mdp`를 거친 뒤에는 이 의존성들의 INFO 로그가 보이지 않는다. 디버깅 시 필요하면 해당 로거의 레벨을 수동으로 낮춘다:
+
+```python
+import logging
+logging.getLogger("transformers").setLevel(logging.INFO)
+```
+
+### 커스텀 코드의 로깅 권장
+
+mdp 내부 규약은 다음과 같다. 커스텀 확장도 동일한 패턴을 따르는 것을 권장한다:
+
+```python
+import logging
+logger = logging.getLogger(__name__)  # 모듈마다 __name__으로 생성
+
+# 일회성 이벤트: warning
+logger.warning("MLflow params 로깅 실패: %s", e)
+
+# 반복 호출 이벤트 (매 step/batch): debug
+# 실패해도 학습을 막지 않는 텔레메트리/로깅 호출은 debug로 낮춰
+# 장애 시 경고 폭주를 방지한다
+logger.debug("MLflow metric 로깅 실패 (key=%s): %s", key, e)
+
+# 치명적 실패: exception (traceback 포함)
+logger.exception("학습 실패 상세")
+```
+
+- **`print()` 지양**: mdp는 사용자 출력에만 `typer.echo`를 쓰고, 내부 메시지는 모두 logging 모듈로 통일. `print()`는 JSON 모드에서 stdout을 오염시켜 agent 파싱을 깨뜨린다
+- **`critical = True` 콜백**: 예외가 학습 루프로 전파되어 중단을 일으킨다. 일회성 이벤트(체크포인트 저장 등)에만 사용

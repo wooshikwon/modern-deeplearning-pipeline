@@ -1,7 +1,8 @@
 """RLTrainer — RL alignment 학습 루프.
 
-SFT Trainer와 독립된 학습 루프. DPO, weighted-NTP, GRPO, PPO를 지원한다.
-복수 모델(policy + frozen reference/critic)을 관리하며,
+SFT Trainer와 독립된 학습 루프. 내장 DPO/GRPO/PPO 외에도 `_component_` 패턴으로
+외부 알고리즘(compute_loss + needs_generation/mini_epochs 규약)을 주입할 수 있다.
+복수 모델(policy + frozen reference/critic/reward/value)을 관리하며,
 optimizer는 trainable 모델별로 독립 운용한다.
 """
 

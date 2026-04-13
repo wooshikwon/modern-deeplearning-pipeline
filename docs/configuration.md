@@ -219,7 +219,7 @@ rl:
     group_size: 4                           # GRPO K개 응답
 ```
 
-지원 알고리즘: `DPO`, `weighted-NTP`, `GRPO`, `PPO`
+내장 알고리즘: `DPO`, `GRPO`, `PPO`. 외부 알고리즘은 `rl.algorithm._component_`에 풀 경로(`weighted_ntp.algorithms.WeightedNTPLoss` 등)를 지정하면 주입된다.
 
 ---
 
@@ -241,6 +241,7 @@ mlflow:
 
 storage:
   checkpoint_dir: ./checkpoints
+  checkpoint_every_n_steps: 500             # (선택) N 스텝마다 체크포인트 저장
   output_dir: ./outputs
 
 serving:                                    # mdp serve 전용
@@ -324,7 +325,7 @@ compute:
 - _component_: EMACallback
   decay: 0.999
 
-- _component_: LearningRateMonitor
+- _component_: LRMonitor
 
 - _component_: ProgressBar
 ```
@@ -338,7 +339,7 @@ compute:
 | `ModelCheckpoint` | 체크포인트 저장 (best/latest, top-k) |
 | `EarlyStopping` | 메트릭 정체 시 조기 종료 |
 | `EMACallback` | Exponential Moving Average |
-| `LearningRateMonitor` | 학습률 로깅 |
+| `LRMonitor` | 학습률 로깅 (풀 경로: `LearningRateMonitor`) |
 | `ProgressBar` | Rich 진행 바 |
 
 ---

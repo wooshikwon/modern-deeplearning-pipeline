@@ -110,14 +110,15 @@ Mid-epoch resume도 지원된다 — `trainer_state.json`의 `step_in_epoch` 기
 mdp rl-train -r rl-recipe.yaml -c config.yaml
 ```
 
-### 지원 알고리즘
+### 내장 알고리즘
 
 | 알고리즘 | 필요 모델 | 생성 필요 | 용도 |
 |---------|----------|---------|------|
 | **DPO** | policy + reference | 아니오 | 선호 최적화 |
-| **weighted-NTP** | policy + critic | 아니오 | 토큰 수준 선호 |
 | **GRPO** | policy + reference + reward | 예 (K개 응답) | 그룹 상대 최적화 |
 | **PPO** | policy + reference + value + reward | 예 | 근접 정책 최적화 |
+
+> **외부 알고리즘 주입**: RLTrainer는 `rl.algorithm._component_`로 임의의 loss 클래스를 받는다. `compute_loss(trainable_out, frozen_out, batch) -> {"policy": Tensor}` 규약과 `needs_generation`/`mini_epochs` 속성만 맞추면 외부 패키지의 loss 클래스를 그대로 주입할 수 있다 (예: `weighted_ntp.algorithms.WeightedNTPLoss`).
 
 ### DPO 학습 예시
 

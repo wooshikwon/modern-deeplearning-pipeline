@@ -2010,6 +2010,7 @@ all = [
     { name = "bitsandbytes" },
     { name = "datasets" },
     { name = "fabric" },
+    { name = "fastapi" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "paramiko" },
@@ -2021,6 +2022,7 @@ all = [
     { name = "torchvision" },
     { name = "transformers" },
     { name = "ultralytics" },
+    { name = "uvicorn" },
 ]
 cloud = [
     { name = "skypilot" },
@@ -2038,9 +2040,11 @@ remote = [
 ]
 serving = [
     { name = "accelerate" },
+    { name = "fastapi" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "torchserve" },
+    { name = "uvicorn" },
 ]
 vision = [
     { name = "albumentations" },
@@ -2056,6 +2060,7 @@ requires-dist = [
     { name = "bitsandbytes", marker = "extra == 'language'", specifier = ">=0.41" },
     { name = "datasets", marker = "extra == 'language'", specifier = ">=2.16" },
     { name = "fabric", marker = "extra == 'remote'", specifier = ">=3.2" },
+    { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.104" },
     { name = "mdp", extras = ["vision", "language", "serving", "cloud", "remote"], marker = "extra == 'all'" },
     { name = "mlflow", specifier = ">=2.10" },
     { name = "onnxruntime", marker = "extra == 'serving'", specifier = ">=1.16" },
@@ -2074,6 +2079,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'language'", specifier = ">=4.36" },
     { name = "typer", specifier = ">=0.9" },
     { name = "ultralytics", marker = "extra == 'vision'", specifier = ">=8.0" },
+    { name = "uvicorn", marker = "extra == 'serving'", specifier = ">=0.24" },
 ]
 provides-extras = ["vision", "language", "serving", "cloud", "remote", "all"]
 

@@ -39,9 +39,22 @@ mdp list models --task text_generation
 mdp init my_project --task text_generation --model llama3-8b
 ```
 
-`mdp init`은 다음 파일을 생성한다:
-- `my_project/recipe.yaml` — 실험 정의 (모델, 데이터, 학습 설정)
-- `my_project/config.yaml` — 인프라 설정 (GPU, MLflow, 체크포인트)
+`mdp init`은 다음 구조를 생성한다:
+
+```
+my_project/
+├── recipes/example.yaml   # 실험 정의 (모델, 데이터, 학습 설정)
+├── configs/local.yaml     # 인프라 설정 (GPU, MLflow, 체크포인트)
+├── data/                  # (빈 디렉토리) 로컬 데이터 둘 곳
+├── checkpoints/           # (빈 디렉토리) 체크포인트 저장 경로
+└── .gitignore
+```
+
+이후 명령은 이 경로를 참조하면 된다:
+
+```bash
+mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml
+```
 
 생성된 Recipe에서 `???`로 표시된 필드만 채우면 된다:
 - `data.dataset.source` — 데이터셋 이름 또는 경로
@@ -53,7 +66,7 @@ mdp init my_project --task text_generation --model llama3-8b
 학습 전에 필요한 GPU 메모리를 확인한다:
 
 ```bash
-mdp estimate -r recipe.yaml
+mdp estimate -r my_project/recipes/example.yaml
 ```
 
 출력 예시:
@@ -83,13 +96,13 @@ adapter:
 
 ```bash
 # 단일 GPU
-mdp train -r recipe.yaml -c config.yaml
+mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml
 
 # 멀티 GPU (자동 감지 — GPU가 2개 이상이면 torchrun 자동 실행)
-mdp train -r recipe.yaml -c config.yaml
+mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml
 
 # 런타임 override
-mdp train -r recipe.yaml -c config.yaml \
+mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml \
   --override training.epochs=5 \
   --override data.dataloader.batch_size=8
 ```

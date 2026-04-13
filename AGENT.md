@@ -8,15 +8,57 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 |---------|---------|
 | `mdp init <name> --task <task> --model <model>` | 프로젝트 스캐폴딩 + Recipe 템플릿 생성 |
 | `mdp train -r recipe.yaml -c config.yaml` | SFT 학습. `--callbacks <yaml>` 으로 Recipe 콜백 override 가능 |
-| `mdp rl-train -r rl-recipe.yaml -c config.yaml` | RL alignment 학습 (DPO, weighted-NTP, GRPO, PPO). `--callbacks <yaml>` 지원 |
-| `mdp inference --run-id <id> --data <path>` | 배치 추론 + 평가. `--pretrained <uri>`, `--dtype`, `--trust-remote-code`, `--attn-impl`, `--callbacks <yaml>`, `--save-output`, `--batch-size` (기본 32), `--max-length` (기본 512) |
-| `mdp generate --run-id <id> --prompts <jsonl> -o <out>` | autoregressive 생성. `--pretrained <uri>`, `--dtype`, `--trust-remote-code`, `--attn-impl`, `--callbacks <yaml>`, `--max-new-tokens` (기본 256), `--temperature` (기본 1.0), `--top-p` (기본 1.0), `--top-k` (기본 50), `--do-sample`, `--batch-size` (기본 1) |
+| `mdp rl-train -r rl-recipe.yaml -c config.yaml` | RL alignment 학습. 내장 알고리즘: DPO, GRPO, PPO. `_component_` 패턴으로 외부 알고리즘 주입 가능. `--callbacks <yaml>` 지원 |
+| `mdp inference` | 배치 추론 + 평가. 모델 소스 3택: `--run-id`, `--model-dir`, `--pretrained <uri>`. 상세 플래그는 아래 참조 |
+| `mdp generate` | autoregressive 생성. 모델 소스 3택 동일. 상세 플래그는 아래 참조 |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 + 전략 추천 |
-| `mdp export --run-id <id> --output <dir>` | adapter merge + 서빙용 패키징 (`--checkpoint`로 로컬 체크포인트도 가능) |
-| `mdp serve --run-id <id>` | REST API 서빙 |
+| `mdp export --run-id <id> -o <dir>` | adapter merge + 서빙용 패키징. `--checkpoint`로 로컬 체크포인트도 가능 |
+| `mdp serve --run-id <id>` | REST API 서빙. `--model-dir`, `--device-map`, `--max-memory` 지원 |
 | `mdp list models\|tasks\|callbacks\|strategies` | 카탈로그 조회 |
 
 모든 명령은 `--format json` 옵션을 지원한다. `mdp train`/`rl-train`/`inference`/`generate`는 `--override KEY=VALUE` 옵션을 공통으로 지원하여 Recipe/Config의 필드를 런타임에 덮어쓸 수 있다 (예: `--override training.epochs=0.1 --override data.dataloader.batch_size=8`). 각 명령의 상세 인자는 `mdp <command> --help`로 확인.
+
+### inference 플래그
+
+```
+--run-id <id>              MLflow run ID (학습된 모델)
+--model-dir <path>         로컬 모델 디렉토리 (mdp export 결과)
+--pretrained <uri>         사전학습 모델 URI (hf://, timm://, ultralytics://, local://)
+--tokenizer <name>         토크나이저 명시 (--pretrained 시 자동 추론, 명시 가능)
+--data <path>              추론 대상 데이터 (HF Hub 이름 또는 로컬 경로, 필수)
+--fields role=col ...      필드 매핑 오버라이드 (예: image=img label=class)
+--metrics Metric ...       평가 metric (예: Accuracy F1Score)
+--callbacks <yaml>         추론 콜백 YAML 파일
+--save-output              콜백 전용 모드에서도 DefaultOutputCallback으로 결과 저장
+--output-format fmt        결과 포맷: parquet (기본) | csv | jsonl
+--output-dir <path>        결과 저장 디렉토리 (기본 ./output)
+--device-map <strategy>    multi-GPU 분산 배치: auto | balanced | sequential
+--dtype <type>             모델 로딩 dtype: float32 | float16 | bfloat16
+--trust-remote-code        HF 모델의 remote code 신뢰
+--attn-impl <impl>         어텐션 구현: flash_attention_2 | sdpa | eager
+--batch-size N             pretrained 추론 배치 크기 (기본 32)
+--max-length N             토큰화 최대 길이 (기본 512)
+```
+
+### generate 플래그
+
+```
+--run-id / --model-dir / --pretrained   모델 소스 (inference와 동일)
+--tokenizer <name>         토크나이저 명시
+--prompts <jsonl>          프롬프트 JSONL 파일 (필수)
+--prompt-field <name>      JSONL에서 프롬프트 텍스트 필드명 (기본 "prompt")
+-o, --output <path>        출력 JSONL 경로 (기본 ./generated.jsonl)
+--max-new-tokens N         생성 최대 토큰 수 (기본 256)
+--temperature F            샘플링 temperature (기본 1.0)
+--top-p F                  nucleus sampling p (기본 1.0)
+--top-k N                  top-k sampling (기본 50)
+--do-sample                샘플링 사용 여부
+--num-samples N            프롬프트당 생성 횟수 (기본 1)
+--batch-size N             배치 크기 (기본 1)
+--callbacks <yaml>         추론 콜백 YAML 파일
+--device-map <strategy>    multi-GPU 분산 배치
+--dtype / --trust-remote-code / --attn-impl   모델 로딩 옵션 (inference와 동일)
+```
 
 ## Agent Discovery Flow
 
@@ -49,6 +91,8 @@ mdp inference --run-id <id> --data test.jsonl --format json  # 추론
 ```bash
 # 학습된 모델 (기존 방식)
 mdp inference --run-id abc123 --data test.jsonl
+# 로컬 export 모델
+mdp inference --model-dir ./exported-model --data test.jsonl
 # 오픈소스 모델 직접 로드 (Recipe 없이)
 mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B --data prompts.jsonl
 # 토크나이저 명시 (자동 추론이 안 될 때)
@@ -85,7 +129,8 @@ from mdp.callbacks.base import BaseInferenceCallback
 class MyAnalysisCallback(BaseInferenceCallback):
     def setup(self, model, tokenizer=None, **kwargs):
         """추론 시작 전. 모델에 forward hook 등록, 버퍼 준비."""
-        self._handle = model.layer[20].register_forward_hook(self._capture)
+        target = dict(model.named_modules())["model.layers.20"]
+        self._handle = target.register_forward_hook(self._capture)
 
     def on_batch(self, batch_idx, batch, outputs, **kwargs):
         """매 배치 forward 후. hook이 캡처한 활성화를 처리."""
@@ -112,7 +157,7 @@ task: str (9종: image_classification, object_detection, semantic_segmentation,
            seq2seq, image_generation, feature_extraction)
 
 model:                          # _component_ 패턴 — 모델 클래스 + pretrained 가중치
-  _component_: str              # alias (AutoModelForCausalLM, AutoModel 등) 또는 풀 경로
+  _component_: str              # alias (AutoModelForCausalLM 등) 또는 풀 경로
   pretrained: str               # URI (hf://, timm://, ultralytics://, local://). 없으면 직접 인스턴스화
   torch_dtype: str              # float32 | float16 | bfloat16 (선택)
   attn_implementation: str      # eager | sdpa | flash_attention_2 (선택)
@@ -152,9 +197,12 @@ data:                           # 데이터 파이프라인
     tokenizer: str              # 언어 Collator는 tokenizer 필수
     max_length: int
   dataloader:                   # 순수 설정값 (DataLoader kwargs)
-    batch_size: int
-    num_workers: int
-    drop_last: bool
+    batch_size: int             # 기본 32
+    num_workers: int            # 기본 4
+    drop_last: bool             # 기본 true
+    pin_memory: bool            # 기본 true
+    persistent_workers: bool    # 기본 true (num_workers=0이면 자동 false)
+    prefetch_factor: int        # 기본 2 (num_workers=0이면 자동 null)
 
 training:                       # 학습 루프 설정
   epochs: float                 # epochs 또는 max_steps 중 하나 필수 (float 허용)
@@ -166,7 +214,6 @@ training:                       # 학습 루프 설정
   val_check_interval: int | float
   val_check_unit: str           # "epoch" (기본) 또는 "step"
   compile: bool | str
-  # strategy는 Config.compute.distributed에서 관리 (아래 Config 섹션 참조)
 
 optimizer:                      # _component_ 패턴
   _component_: str              # AdamW, Adam, SGD 또는 풀 경로
@@ -174,14 +221,35 @@ optimizer:                      # _component_ 패턴
   ...
 
 scheduler:                      # _component_ 패턴 (선택)
+  _component_: str              # CosineAnnealingLR, StepLR, LinearLR 등
+  warmup_steps: int             # 절대 warmup 스텝 (선택)
+  warmup_ratio: float           # 비율 warmup (warmup_steps와 상호 배타)
+  interval: str                 # "step" (기본) 또는 "epoch"
+  ...
+
 loss:                           # _component_ 패턴 (선택 — 생략 시 model.training_step() 사용)
 callbacks: [...]                # _component_ 패턴 리스트
+
 evaluation:
-  metrics: [...]                # metric 이름 문자열 리스트
+  metrics: [...]                # metric 이름 문자열 리스트 (Accuracy, F1Score 등)
+
+generation:                     # 서빙/추론 전용 (rl.generation과 독립)
+  max_new_tokens: int           # 기본 256
+  temperature: float            # 기본 1.0
+  top_p: float                  # 기본 1.0
+  top_k: int                    # 기본 50
+  do_sample: bool               # 기본 true
+  num_beams: int                # 기본 1
+  repetition_penalty: float     # 기본 1.0
+
+monitoring:                     # 데이터 분포 모니터링
+  enabled: bool                 # 기본 false
+  baseline: {}
+  drift: {}
 
 # RL 전용 (mdp rl-train) — rl: 키 아래에 중첩
 rl:
-  algorithm:                    # _component_ 패턴 (DPO, GRPO, PPO, ...)
+  algorithm:                    # _component_ 패턴. 내장: DPO, GRPO, PPO. 풀 경로로 외부 알고리즘 주입 가능
     _component_: str
     ...
   models:                       # 역할별 model dict. 각 역할이 독립된 _component_ dict
@@ -195,7 +263,7 @@ rl:
     reference:                  # frozen (optimizer 생략)
       _component_: str
       pretrained: str
-    value: {...}                # PPO 전용
+    value: {...}                # PPO 또는 외부 알고리즘용 (frozen)
     reward: {...}               # frozen
   generation:                   # GRPO/PPO 전용
     max_new_tokens: int
@@ -214,31 +282,56 @@ metadata:
 ## Config YAML — 구조
 
 ```
+environment:                    # 환경 메타데이터
+  name: str                     # 기본 "local"
+
 compute:
   target: str                   # local (기본)
   gpus: int | "auto"
+  host: str                     # SSH 호스트 (원격 실행)
+  user: str                     # SSH 유저
+  ssh_key: str                  # SSH 키 경로
+  working_dir: str              # 원격 작업 디렉토리
+  nodes: [{...}]                # 멀티노드 설정
   distributed:                  # 분산 전략 (멀티 GPU 시 필수)
     strategy: str | dict        # ddp | fsdp | deepspeed_zero3 | auto | {_component_: FSDPStrategy, ...}
-    # strategy 외 키(offload_optimizer 등)는 strategy 인스턴스에 kwargs로 전달
-    # moe: {enabled: true, ep_size: N} — MoE Expert Parallelism 설정
+    moe:                        # MoE Expert Parallelism
+      enabled: bool
+      ep_size: int              # Expert Parallel degree
+  # 클라우드 전용
+  provider: str                 # aws | gcp | azure
+  accelerators: str             # A100 등
+  spot: bool                    # 기본 false
+  region: str
+  disk_size: int                # 기본 256 GB
+
+environment_setup:              # 원격/클라우드 환경 준비
+  container: str                # Docker 이미지 URI
+  dependencies: str             # requirements 파일 경로
+  setup_commands: [str]         # 실행할 쉘 커맨드
 
 mlflow:
   tracking_uri: str             # 기본 ./mlruns
   experiment_name: str
 
 storage:
-  checkpoint_dir: str
-  output_dir: str
+  checkpoint_dir: str           # 기본 ./checkpoints
+  checkpoint_every_n_steps: int # 체크포인트 저장 간격 (선택)
+  output_dir: str               # 기본 ./outputs
 
 serving:                        # mdp serve 전용
-  backend: str                  # torchserve | vllm | onnx
-  max_batch_size: int
-  batch_window_ms: float
+  backend: str                  # torchserve | vllm
+  model_repository: str
+  max_batch_size: int           # 기본 1
+  instance_count: int           # 기본 1
+  batch_window_ms: float        # 기본 50.0ms
+  device_map: str               # auto | balanced | sequential
+  max_memory: {gpu_id: size}    # GPU별 메모리 한도
 
 job:
   name: str
-  resume: str                   # disabled | auto | 체크포인트 경로
-  max_retries: int
+  resume: str                   # auto (기본) | never | always
+  max_retries: int              # 기본 0
 ```
 
 > 로컬 단일 GPU 학습이면 Config 전체를 생략해도 기본값으로 동작한다.
@@ -262,8 +355,20 @@ optimizer:
 `_component_` 값에 점(`.`)이 없으면 `mdp/aliases.yaml`에서 풀 경로로 치환되고, 점이 있으면 그대로 import된다. 따라서 내장이든 외부 패키지든 동일한 문법으로 주입된다.
 
 **`_component_`를 쓰지 않는 영역**:
-- 순수 설정값 묶음: `training`(precision/epochs/gradient_* 등), `generation`, `data.dataloader`, `metadata`, `evaluation`
-- `pretrained` 특수 키: `model._component_`와 함께 쓰이는 URI 전용 키. Factory가 URI 스킴에 따라 로더를 선택한다
+- 순수 설정값 묶음: `training`, `generation`, `monitoring`, `data.dataloader`, `metadata`, `evaluation`
+
+### 모델 로딩 규칙 (`_component_` + `pretrained` 조합)
+
+Factory는 `_component_` 유무를 먼저 확인하고, duck typing으로 HF 클래스와 커스텀 클래스를 구분한다:
+
+| `_component_` | `pretrained` | 동작 |
+|:-:|:-:|---|
+| 없음 | 있음 | **PretrainedResolver가 클래스 추론**: `config.architectures[0]`에서 HF 클래스 결정 |
+| 있음 (`from_pretrained` 보유) | 있음 | **HF 프로토콜**: `klass.from_pretrained(identifier, **kwargs)` |
+| 있음 (`from_pretrained` 없음) | 있음 | **생성자 호출**: `klass(pretrained=uri, **kwargs)` — 커스텀 BaseModel용 |
+| 있음 | 없음 | **생성자 호출**: `klass(**kwargs)` — 랜덤 초기화 |
+
+커스텀 모델(`from_pretrained` 없음)은 `pretrained` 유무와 무관하게 **BaseModel 상속 필수**.
 
 내장 alias 목록은 `mdp list callbacks`, `mdp list strategies` 등으로 조회.
 
@@ -277,11 +382,11 @@ optimizer:
 
 ### Task-Head Compatibility
 
-| Task | Allowed Head | AutoModel (head 생략) |
+| Task | Allowed Head | AutoModel alias (head 생략) |
 |------|-------------|----------------------|
-| image_classification | ClassificationHead | AutoModelForImageClassification |
-| object_detection | DetectionHead | AutoModelForObjectDetection |
-| semantic_segmentation | SegmentationHead | AutoModelForSemanticSegmentation |
+| image_classification | ClassificationHead | (alias 없음 — 풀 경로 사용) |
+| object_detection | DetectionHead | (alias 없음) |
+| semantic_segmentation | SegmentationHead | (alias 없음) |
 | text_classification | ClassificationHead | AutoModelForSequenceClassification |
 | token_classification | TokenClassificationHead, ClassificationHead | AutoModelForTokenClassification |
 | text_generation | CausalLMHead | AutoModelForCausalLM |
@@ -289,6 +394,8 @@ optimizer:
 | image_generation | (head 생략 권장) | 모델 내장 |
 | feature_extraction | ClassificationHead, DualEncoderHead | (head 생략 가능) |
 
+> vision 태스크(`image_classification`, `object_detection`, `semantic_segmentation`)에는 AutoModel alias가 `aliases.yaml`에 없다. HF 풀 경로(`transformers.AutoModelForImageClassification`)를 사용하거나 `timm://` 프로토콜을 사용한다.
+>
 > `vision_language`는 별도 task가 아니다. multimodal은 `text_generation` 또는 `feature_extraction` + `fields: {image, text}`로 표현.
 
 ### Adapter Constraints
@@ -316,6 +423,24 @@ optimizer:
 - Dataset/Collator 클래스가 자체 `__init__`에서 파라미터 검증(예: `source` 필수, `tokenizer` 필수)을 수행한다 — 프레임워크는 "`_component_` 키가 있는 dict인가"까지만 확인
 - `HuggingFaceDataset`의 `streaming: true` + multimodal(vision+language) → Dataset 클래스가 `ValueError`로 차단
 - 검증 데이터는 `data.val_dataset` dict를 명시적으로 선언해야 활성화됨 (자동 추론 없음)
+
+---
+
+## Logging & Warning Behavior
+
+### 서드파티 경고 억제
+
+`mdp/__init__.py`에서 의존성 라이브러리의 노이즈를 억제한다:
+- `FutureWarning` 전역 필터링 (transformers/datasets의 deprecated API 예고)
+- `torch` beta feature `UserWarning` 필터링
+- `transformers`, `datasets`, `accelerate`, `bitsandbytes` 로거를 WARNING 레벨로 설정
+
+mdp 자체 로그(`logger = logging.getLogger(__name__)`)는 영향받지 않는다.
+
+### MLflow 에러 처리
+
+- 1회성 호출(`_log_mlflow_params`, `_log_mlflow_summary`): 실패 시 `logger.warning`
+- 매 step 호출(`_mlflow_log_metric`): 실패 시 `logger.debug` (MLflow 장애 시 경고 폭주 방지)
 
 ---
 
@@ -397,7 +522,6 @@ training:
   epochs: 30
   precision: bf16
   gradient_clip_max_norm: 1.0
-  # strategy는 Config.compute.distributed에서 설정
 
 optimizer:
   _component_: AdamW
@@ -480,7 +604,6 @@ training:
   precision: bf16
   gradient_accumulation_steps: 4
   gradient_checkpointing: true
-  # strategy는 Config에서 distributed.strategy: deepspeed_zero3로 설정
 
 optimizer:
   _component_: bitsandbytes.optim.AdamW8bit
@@ -595,3 +718,26 @@ class MyModel(BaseModel):
 ```
 
 Recipe에서 `model._component_: my_models.custom.MyModel` 지정. `PYTHONPATH`에 프로젝트 루트 포함 필요.
+
+### 커스텀 모델 + pretrained backbone
+
+커스텀 BaseModel이 외부 pretrained 모델을 backbone으로 사용할 수 있다. `pretrained`는 생성자 인자로 전달된다:
+
+```python
+class CriticValueModel(BaseModel):
+    def __init__(self, pretrained: str, value_head_dropout: float = 0.2, **kwargs):
+        super().__init__()
+        model_name = pretrained.removeprefix("hf://")
+        self.backbone = AutoModel.from_pretrained(model_name)
+        hidden_dim = self.backbone.config.hidden_size  # backbone에 적응
+        self.value_head = ValueHead(hidden_dim, dropout=value_head_dropout)
+```
+
+```yaml
+model:
+  _component_: my_models.CriticValueModel
+  pretrained: hf://meta-llama/Meta-Llama-3-8B
+  value_head_dropout: 0.2
+```
+
+Factory는 `CriticValueModel`에 `from_pretrained`가 없으므로 **생성자 호출**: `CriticValueModel(pretrained="hf://...", value_head_dropout=0.2)`. backbone의 아키텍처(hidden_size 등)는 불변이며, 커스텀 클래스는 `backbone.config`를 읽어 적응해야 한다.

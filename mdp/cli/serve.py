@@ -29,7 +29,7 @@ def run_serve(
         import uvicorn
     except ImportError:
         typer.echo(
-            "[error] 서빙에 fastapi와 uvicorn이 필요합니다: pip install mdp[serve]",
+            "[error] 서빙에 fastapi와 uvicorn이 필요합니다: pip install mdp[serving]",
             err=True,
         )
         raise typer.Exit(code=1)

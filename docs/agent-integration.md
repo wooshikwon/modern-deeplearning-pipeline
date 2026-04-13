@@ -133,11 +133,11 @@ mdp list models --task text_generation --format json
 **Estimate**:
 ```json
 {
-  "model_memory_gb": 16.1,
-  "gradient_memory_gb": 32.2,
-  "optimizer_memory_gb": 64.4,
-  "activation_memory_gb": 8.0,
-  "total_memory_gb": 120.7,
+  "model_mem_gb": 16.1,
+  "gradient_mem_gb": 32.2,
+  "optimizer_mem_gb": 64.4,
+  "activation_mem_gb": 8.0,
+  "total_mem_gb": 120.7,
   "suggested_gpus": 4,
   "suggested_strategy": "fsdp"
 }
