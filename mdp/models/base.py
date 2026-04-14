@@ -43,10 +43,20 @@ class BaseModel(nn.Module, ABC):
                 self._block_classes = set(bc)
                 return
             # HF 호환: _no_split_modules → _block_classes로 변환
+            # _no_split_modules는 단축명("LlamaDecoderLayer")만 제공하므로
+            # named_modules()를 스캔하여 전체 경로로 resolve한다.
             ns = getattr(child, "_no_split_modules", None)
             if ns:
-                self._block_classes = set(ns)
-                return
+                full_paths: set[str] = set()
+                for short_name in ns:
+                    for _, module in child.named_modules():
+                        if type(module).__name__ == short_name:
+                            cls = type(module)
+                            full_paths.add(f"{cls.__module__}.{cls.__qualname__}")
+                            break
+                if full_paths:
+                    self._block_classes = full_paths
+                    return
 
     @abstractmethod
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
