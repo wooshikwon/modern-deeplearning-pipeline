@@ -23,6 +23,8 @@ class TinyVisionModel(BaseModel):
                   -> Linear(hidden_dim,num_classes) [.head]
     """
 
+    _block_classes = None  # 반복 블록 없는 단순 CNN
+
     def __init__(self, num_classes: int = 2, hidden_dim: int = 16) -> None:
         super().__init__()
         self.num_classes = num_classes
@@ -66,6 +68,8 @@ class TinyFeatureMapModel(BaseModel):
     forward returns feature maps with shape (B, C, H, W).
     """
 
+    _block_classes = None  # 반복 블록 없는 단순 CNN
+
     def __init__(self, out_channels: int = 16) -> None:
         super().__init__()
         self.out_channels = out_channels
@@ -98,6 +102,8 @@ class TinyLanguageModel(BaseModel):
                   -> 1-layer TransformerEncoder
                   -> .lm_head = Linear(hidden_dim, vocab_size, bias=False)
     """
+
+    _block_classes = None  # PyTorch TransformerEncoderLayer (테스트용, 커스텀 블록 없음)
 
     def __init__(
         self,
@@ -164,6 +170,8 @@ class TinyTokenClassModel(BaseModel):
     Like TinyLanguageModel but .head = Linear(hidden_dim, num_classes).
     training_step uses CE with ignore_index=-100.
     """
+
+    _block_classes = None  # 반복 블록 없는 테스트용 모델
 
     def __init__(
         self,
@@ -237,6 +245,8 @@ class TinyMoEModel(BaseModel):
     Mimics HuggingFace MoE structure (gate + experts ModuleList)
     so MoEStrategy hooks can detect and wrap it.
     """
+
+    _block_classes = None  # 테스트용 MoE (실제 MoE 모델이면 DecoderLayer 지정)
 
     def __init__(
         self,
@@ -333,6 +343,8 @@ class TinyDualEncoderModel(BaseModel):
     text_encoder: Embedding(128, hidden_dim) -> mean pool
                   -> Linear(hidden_dim, projection_dim)
     """
+
+    _block_classes = None  # 반복 블록 없는 테스트용 모델
 
     def __init__(
         self,

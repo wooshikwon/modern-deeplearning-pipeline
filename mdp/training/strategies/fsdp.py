@@ -40,7 +40,7 @@ class FSDPStrategy(BaseStrategy):
         cpu_offload: bool = False,
         precision: str = "bf16",
         min_num_params: int = 1_000_000,
-        auto_wrap_cls: str | None = None,
+        auto_wrap_cls: str | list[str] | None = None,
     ) -> None:
         self.sharding_strategy_name = sharding_strategy
         self.mixed_precision = mixed_precision
@@ -75,18 +75,12 @@ class FSDPStrategy(BaseStrategy):
 
         sharding = getattr(ShardingStrategy, self.sharding_strategy_name)
 
-        # Auto-wrap policy: transformer layer class 또는 size 기반
-        if self.auto_wrap_cls is not None:
-            from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-            layer_cls = self._resolve_layer_class(self.auto_wrap_cls)
-            auto_wrap_policy = functools.partial(
-                transformer_auto_wrap_policy,
-                transformer_layer_cls={layer_cls},
-            )
-        else:
-            auto_wrap_policy = functools.partial(
-                size_based_auto_wrap_policy, min_num_params=self.min_num_params,
-            )
+        # Auto-wrap policy: 4단계 우선순위
+        # 1) 사용자 명시 auto_wrap_cls (escape hatch, 최우선)
+        # 2) MDP 계약: BaseModel._block_classes
+        # 3) HF 호환: PreTrainedModel._no_split_modules
+        # 4) size 기반 (LoRA+FSDP 조합에서는 에러)
+        auto_wrap_policy = self._resolve_wrap_policy(model, size_based_auto_wrap_policy)
 
         fsdp_kwargs: dict[str, Any] = {
             "sharding_strategy": sharding,
@@ -172,6 +166,81 @@ class FSDPStrategy(BaseStrategy):
 
         if dist.is_initialized():
             dist.destroy_process_group()
+
+    def _resolve_wrap_policy(
+        self,
+        model: nn.Module,
+        size_based_auto_wrap_policy: Any,
+    ) -> Any:
+        """Wrap policy를 4단계 우선순위로 결정한다.
+
+        1. 사용자 명시 ``auto_wrap_cls`` — escape hatch, 최우선
+        2. MDP 계약 — ``BaseModel._block_classes`` 가 non-None 이면
+           ``transformer_auto_wrap_policy`` 로 해당 클래스들을 wrap unit 으로 사용
+        3. HF 호환 폴백 — ``_no_split_modules`` 가 있으면 그것을 사용
+        4. size 기반 폴백 — 위 모두 없을 때.
+           단, LoRA(PEFT)+FSDP 조합이면 size 기반은 위험하므로 즉시 에러
+        """
+        block_classes: set[str] | None = None
+        source: str = ""
+
+        # 1) 사용자 명시
+        if self.auto_wrap_cls is not None:
+            if isinstance(self.auto_wrap_cls, str):
+                block_classes = {self.auto_wrap_cls}
+            else:
+                block_classes = set(self.auto_wrap_cls)
+            source = "auto_wrap_cls (user override)"
+
+        # 2) MDP 계약: BaseModel._block_classes
+        elif getattr(model, "_block_classes", None):
+            block_classes = set(model._block_classes)
+            source = "_block_classes"
+
+        # 3) HF 호환: _no_split_modules
+        elif getattr(model, "_no_split_modules", None):
+            block_classes = set(model._no_split_modules)
+            source = "_no_split_modules (HF compat)"
+
+        if block_classes:
+            from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
+            layer_classes = {
+                self._resolve_layer_class(name) for name in block_classes
+            }
+            logger.info(
+                "FSDP wrap policy: transformer_auto_wrap_policy "
+                "(source=%s, classes=%s)",
+                source,
+                block_classes,
+            )
+            return functools.partial(
+                transformer_auto_wrap_policy,
+                transformer_layer_cls=layer_classes,
+            )
+
+        # 4) 위험 조합 차단: LoRA(PEFT) + FSDP + block 미선언 → 즉시 에러
+        if hasattr(model, "peft_config"):
+            raise ValueError(
+                "LoRA(PEFT) + FSDP 조합에는 모델의 반복 블록 선언이 필수입니다.\n"
+                "해결 방법:\n"
+                "  1. BaseModel을 사용하여 _block_classes를 선언하세요.\n"
+                "  2. 또는 HF PreTrainedModel을 직접 사용하세요 "
+                "(_no_split_modules가 자동 제공됩니다).\n"
+                "  3. timm 모델이라면 BaseModel로 감싸서 "
+                "_block_classes를 선언하세요."
+            )
+
+        # non-LoRA FSDP: size_based는 안전 (heterogeneous requires_grad 없음)
+        logger.info(
+            "FSDP wrap policy: size_based_auto_wrap_policy "
+            "(min_num_params=%d)",
+            self.min_num_params,
+        )
+        return functools.partial(
+            size_based_auto_wrap_policy,
+            min_num_params=self.min_num_params,
+        )
 
     @staticmethod
     def _resolve_layer_class(cls_name: str) -> type:

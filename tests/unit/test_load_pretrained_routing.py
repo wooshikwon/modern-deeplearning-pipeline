@@ -40,6 +40,8 @@ class TinyCustomWithPretrained(BaseModel):
     테스트에서는 실제 모델을 로드하지 않고 dummy backbone을 사용.
     """
 
+    _block_classes = None
+
     def __init__(self, pretrained: str, hidden_dim: int = 8, **kwargs: Any) -> None:
         super().__init__()
         self.pretrained_source = pretrained

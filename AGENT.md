@@ -612,6 +612,8 @@ compute:
 from mdp.models.base import BaseModel
 
 class MyModel(BaseModel):
+    _block_classes = None  # 필수 선언 (아래 참조)
+
     def forward(self, batch: dict) -> dict:
         ...  # 최소 "logits" 키 반환
 
@@ -628,18 +630,37 @@ class MyModel(BaseModel):
 
 Recipe에서 `model._component_: my_models.custom.MyModel` 지정. `PYTHONPATH`에 프로젝트 루트 포함 필요.
 
+### `_block_classes` 필수 선언
+
+`BaseModel` 서브클래스는 `_block_classes` 를 반드시 선언해야 한다 (`forward`, `training_step`, `validation_step`과 동등한 수준의 필수 계약). 미선언 시 **클래스 정의 시점**에 `TypeError`가 발생한다.
+
+`_block_classes`는 모델의 반복 블록 클래스 이름의 `set[str]`이다. FSDP wrap policy, gradient checkpointing 등에서 모델을 효율적인 단위로 분할할 때 사용된다.
+
+| 모델 유형 | `_block_classes` 선언 예시 |
+|-----------|--------------------------|
+| LLM (decoder-only) | `_block_classes = {"LlamaDecoderLayer"}` |
+| VLM (복수 블록) | `_block_classes = {"LlamaDecoderLayer", "CLIPEncoderLayer"}` |
+| CNN (ResNet) | `_block_classes = {"Bottleneck"}` |
+| 단순 MLP / 반복 블록 없음 | `_block_classes = None` |
+
+HF backbone을 감싸는 커스텀 모델에서는 `_inherit_block_classes()` helper를 `__init__` 마지막에 호출하면 backbone의 블록 클래스 정보를 자동으로 상속받는다 (HF `_no_split_modules` → `_block_classes` 변환).
+
 ### 커스텀 모델 + pretrained backbone
 
 커스텀 BaseModel이 외부 pretrained 모델을 backbone으로 사용할 수 있다. `pretrained`는 생성자 인자로 전달된다:
 
 ```python
 class CriticValueModel(BaseModel):
+    _block_classes = None  # placeholder (아래 _inherit_block_classes가 채움)
+
     def __init__(self, pretrained: str, value_head_dropout: float = 0.2, **kwargs):
         super().__init__()
         model_name = pretrained.removeprefix("hf://")
         self.backbone = AutoModel.from_pretrained(model_name)
         hidden_dim = self.backbone.config.hidden_size  # backbone에 적응
         self.value_head = ValueHead(hidden_dim, dropout=value_head_dropout)
+        self._inherit_block_classes()
+        # → _block_classes = {"LlamaDecoderLayer"} (backbone에서 상속)
 ```
 
 ```yaml

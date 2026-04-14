@@ -166,6 +166,8 @@ def test_inference_callback_teardown_on_error(tmp_path: Path) -> None:
 
     class _ExplodingModel(BaseModel):
         """2번째 배치에서 에러를 발생시키는 모델."""
+        _block_classes = None
+
         def __init__(self) -> None:
             super().__init__()
             self.linear = nn.Linear(3 * 8 * 8, 2)
