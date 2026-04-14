@@ -64,6 +64,7 @@ class RLTrainer:
         self.epochs = training.epochs
         self.grad_accum_steps = training.gradient_accumulation_steps
         self.grad_clip_norm = training.gradient_clip_max_norm
+        self.compile_mode = training.compile
 
         # AMP
         self.amp_enabled, self.amp_dtype, self.scaler = setup_amp(training.precision, self.device)
@@ -640,15 +641,27 @@ class RLTrainer:
                 self.frozen[name] = self.frozen[name].to(self.device)
             self.policy = self.trainable["policy"]
 
+        # Training/eval mode 명시 설정
+        # HF 모델은 from_pretrained() 후 eval() 상태로 반환된다.
+        # FSDP 래핑은 training mode를 변경하지 않으므로 여기서 명시적으로 설정한다.
+        # GC guard: LlamaModel.forward의 `self.gradient_checkpointing and self.training`에서
+        # self.training이 False이면 GC가 비활성화되어 모든 activation이 저장된다 → OOM.
+        for model in self.trainable.values():
+            model.train()
+        for model in self.frozen.values():
+            model.eval()
+
         # ── FSDP 샤딩 + 메모리 베이스라인 진단 ──
         # FSDP wrap 직후, compile/학습 이전 시점의 순수 모델 메모리를 측정한다.
-        # 세 가지를 확인한다:
-        #   1. allocated: 실제 라이브 텐서가 차지하는 GPU 메모리
-        #   2. reserved: allocator가 OS로부터 확보한 총 풀 (allocated + 빈 블록)
-        #   3. trainable_params: LoRA 어댑터만 grad=True여야 함
-        # 해석 기준 (FULL_SHARD, 8B bf16, 4 GPU):
-        #   정상: allocated ≈ 4 GiB (param shard) + α (FSDP buffer + NCCL)
-        #   비정상(미샤딩): allocated ≈ 16 GiB+ → wrap policy 실패 의심
+        #
+        # 메모리 구성 (FULL_SHARD policy + NO_SHARD frozen, 8B bf16, 4 GPU):
+        #   policy shard  : 16 GiB / world_size  (FULL_SHARD, GPU당 param 조각)
+        #   frozen replica: frozen 모델 전체 × dtype bytes  (NO_SHARD, GPU당 복제본)
+        #   예: policy 4 GiB + reference 16 GiB = ~20 GiB baseline
+        #
+        # 확인 항목:
+        #   1. allocated vs expected_total: policy 샤딩 + frozen 복제본 합계와 비교
+        #   2. trainable_params: LoRA 어댑터만 requires_grad여야 함 (~0.5% of total)
         if torch.cuda.is_available():
             _rank = int(os.environ.get("RANK", "0"))
             _local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -659,33 +672,38 @@ class RLTrainer:
                 p.numel() for p in self.policy.parameters() if p.requires_grad
             )
             _total_params = sum(p.numel() for p in self.policy.parameters())
+            # frozen 모델은 NO_SHARD → 각 GPU가 전체 복제본을 보유
+            _frozen_replica_gib = sum(
+                sum(p.numel() * p.element_size() for p in m.parameters()) / 1024 ** 3
+                for m in self.frozen.values()
+            )
             logger.info(
-                "[FSDP-DIAG] rank=%d | allocated=%.2f GiB | reserved=%.2f GiB"
-                " | trainable=%.1fM / total_orig=%.2fB",
+                "FSDP shard baseline: rank=%d | allocated=%.2f GiB | reserved=%.2f GiB"
+                " | policy trainable=%.1fM params | frozen replica=%.1f GiB (NO_SHARD)",
                 _rank, _mem_alloc, _mem_resv,
-                _trainable_params / 1e6, _total_params / 1e9,
+                _trainable_params / 1e6, _frozen_replica_gib,
             )
             if _rank == 0:
-                _expected_shard_gib = 16.0 / _world_size  # 8B × 2 bytes ÷ GPUs
-                _ratio = _mem_alloc / _expected_shard_gib if _expected_shard_gib else 0
-                logger.info(
-                    "[FSDP-DIAG] 해석: FULL_SHARD %d-GPU 정상 → param shard ≈ %.1f GiB 예상."
-                    " 현재 allocated=%.2f GiB (예상 대비 %.1f×)."
-                    " >>3× 이면 샤딩 미적용 또는 early all-gather 의심.",
-                    _world_size, _expected_shard_gib, _mem_alloc, _ratio,
-                )
                 # use_orig_params=True에서 total_orig는 unsharded 원본 크기를 반환한다.
-                # trainable_params가 LoRA adapter 크기(~45M)이면 freeze 정상.
+                _policy_shard_gib = 16.0 / _world_size  # 8B bf16 ÷ world_size
+                _expected_total_gib = _policy_shard_gib + _frozen_replica_gib
+                _ratio = _mem_alloc / _expected_total_gib if _expected_total_gib else 0
+                logger.info(
+                    "FSDP shard baseline: expected policy shard=%.1f GiB"
+                    " + frozen replica=%.1f GiB = %.1f GiB total."
+                    " actual=%.2f GiB (%.1f×). >>3× → policy shard 미적용 의심.",
+                    _policy_shard_gib, _frozen_replica_gib,
+                    _expected_total_gib, _mem_alloc, _ratio,
+                )
                 if _total_params / 1e9 > 1.0 and _trainable_params / _total_params > 0.1:
                     logger.warning(
-                        "[FSDP-DIAG] trainable 비율 %.1f%% — LoRA freeze 미적용 의심."
+                        "FSDP shard baseline: trainable ratio %.1f%% — LoRA freeze 미적용 의심."
                         " 기대값: LoRA만 trainable (전체의 ~0.5%% 수준)",
                         100 * _trainable_params / _total_params,
                     )
 
         # torch.compile — must be AFTER FSDP wrapping, trainable models only
         if self.compile_mode:
-            import torch
             mode = self.compile_mode if isinstance(self.compile_mode, str) else "default"
             for name in list(self.trainable.keys()):
                 self.trainable[name] = torch.compile(self.trainable[name], mode=mode)

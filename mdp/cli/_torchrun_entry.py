@@ -93,6 +93,11 @@ def main() -> None:
     # setdefault preserves any value the caller may have already exported.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+    # 워커 프로세스의 기본 로깅 레벨은 WARNING이라 logger.info()가 묻힌다.
+    # INFO로 설정하여 GC/FSDP 진단 메시지가 로그에 남도록 한다.
+    import logging
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
+
     parser = argparse.ArgumentParser(description="MDP torchrun worker")
     parser.add_argument(
         "--settings-path", required=True, help="Settings JSON 파일 경로"
