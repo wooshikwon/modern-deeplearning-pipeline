@@ -568,8 +568,13 @@ class RLTrainer:
                     # LoRA: 입력 텐서에 requires_grad가 없으면 GC recompute 구간에서 grad 소실.
                     if hasattr(base, "enable_input_require_grads"):
                         base.enable_input_require_grads()
-                    base.gradient_checkpointing_enable()
-                    logger.info("Gradient checkpointing enabled for %s", name)
+                    # FSDP + GC: use_reentrant=True(기본값)는 FSDP가 all-gathered params를
+                    # recompute forward 동안 조기에 해제하지 못해 전 레이어 파라미터가 동시
+                    # 상주 → OOM. use_reentrant=False(비재진입)로 FSDP 호환성을 확보한다.
+                    base.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs={"use_reentrant": False}
+                    )
+                    logger.info("Gradient checkpointing enabled for %s (use_reentrant=False)", name)
                 else:
                     logger.warning("gradient_checkpointing_enable not found on %s (%s)", name, type(base).__name__)
 
