@@ -640,6 +640,49 @@ class RLTrainer:
                 self.frozen[name] = self.frozen[name].to(self.device)
             self.policy = self.trainable["policy"]
 
+        # ── FSDP 샤딩 + 메모리 베이스라인 진단 ──
+        # FSDP wrap 직후, compile/학습 이전 시점의 순수 모델 메모리를 측정한다.
+        # 세 가지를 확인한다:
+        #   1. allocated: 실제 라이브 텐서가 차지하는 GPU 메모리
+        #   2. reserved: allocator가 OS로부터 확보한 총 풀 (allocated + 빈 블록)
+        #   3. trainable_params: LoRA 어댑터만 grad=True여야 함
+        # 해석 기준 (FULL_SHARD, 8B bf16, 4 GPU):
+        #   정상: allocated ≈ 4 GiB (param shard) + α (FSDP buffer + NCCL)
+        #   비정상(미샤딩): allocated ≈ 16 GiB+ → wrap policy 실패 의심
+        if torch.cuda.is_available():
+            _rank = int(os.environ.get("RANK", "0"))
+            _local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+            _world_size = int(os.environ.get("WORLD_SIZE", "1"))
+            _mem_alloc = torch.cuda.memory_allocated(_local_rank) / 1024 ** 3
+            _mem_resv = torch.cuda.memory_reserved(_local_rank) / 1024 ** 3
+            _trainable_params = sum(
+                p.numel() for p in self.policy.parameters() if p.requires_grad
+            )
+            _total_params = sum(p.numel() for p in self.policy.parameters())
+            logger.info(
+                "[FSDP-DIAG] rank=%d | allocated=%.2f GiB | reserved=%.2f GiB"
+                " | trainable=%.1fM / total_orig=%.2fB",
+                _rank, _mem_alloc, _mem_resv,
+                _trainable_params / 1e6, _total_params / 1e9,
+            )
+            if _rank == 0:
+                _expected_shard_gib = 16.0 / _world_size  # 8B × 2 bytes ÷ GPUs
+                _ratio = _mem_alloc / _expected_shard_gib if _expected_shard_gib else 0
+                logger.info(
+                    "[FSDP-DIAG] 해석: FULL_SHARD %d-GPU 정상 → param shard ≈ %.1f GiB 예상."
+                    " 현재 allocated=%.2f GiB (예상 대비 %.1f×)."
+                    " >>3× 이면 샤딩 미적용 또는 early all-gather 의심.",
+                    _world_size, _expected_shard_gib, _mem_alloc, _ratio,
+                )
+                # use_orig_params=True에서 total_orig는 unsharded 원본 크기를 반환한다.
+                # trainable_params가 LoRA adapter 크기(~45M)이면 freeze 정상.
+                if _total_params / 1e9 > 1.0 and _trainable_params / _total_params > 0.1:
+                    logger.warning(
+                        "[FSDP-DIAG] trainable 비율 %.1f%% — LoRA freeze 미적용 의심."
+                        " 기대값: LoRA만 trainable (전체의 ~0.5%% 수준)",
+                        100 * _trainable_params / _total_params,
+                    )
+
         # torch.compile — must be AFTER FSDP wrapping, trainable models only
         if self.compile_mode:
             import torch
