@@ -555,7 +555,7 @@ class RLTrainer:
                 )
 
         # Gradient Checkpointing (FSDP/DDP wrap 전에 적용해야 한다)
-        gc_cfg = getattr(self.settings.recipe, "gradient_checkpointing", False)
+        gc_cfg = self.settings.recipe.training.gradient_checkpointing
         if gc_cfg:
             for name, model in self.trainable.items():
                 unwrapped = getattr(model, "module", model)
