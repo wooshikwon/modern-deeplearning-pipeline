@@ -819,7 +819,19 @@ class RLTrainer:
                 training_duration = time.time() - start_time
                 # FSDP artifact export needs all ranks for parameter all-gather.
                 # Must happen BEFORE strategy.cleanup() which destroys the process group.
-                fsdp_policy_sd = self._gather_fsdp_policy_state_dict()
+                # Skip if an exception is in flight (e.g. OOM during forward): FSDP
+                # training state would be FORWARD, not IDLE, causing AssertionError
+                # inside state_dict() pre-hook before any NCCL call can start.
+                import sys as _sys
+                _training_exc = _sys.exc_info()[0]
+                if _training_exc is not None:
+                    logger.warning(
+                        "Training aborted (%s) — skipping FSDP state dict gather",
+                        _training_exc.__name__,
+                    )
+                    fsdp_policy_sd = None
+                else:
+                    fsdp_policy_sd = self._gather_fsdp_policy_state_dict()
 
                 if self.strategy is not None:
                     try:
