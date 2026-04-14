@@ -103,6 +103,12 @@ class FSDPStrategy(BaseStrategy):
             from torch.distributed.fsdp import CPUOffload
             fsdp_kwargs["cpu_offload"] = CPUOffload(offload_params=True)
 
+        # LoRA 어댑터는 float32로 초기화되어 base 모델 dtype(bf16/fp16)과 충돌.
+        # FSDP FlatParameter 생성 전에 전체를 target dtype으로 통일한다.
+        if self.mixed_precision and device.type == "cuda":
+            cast_dtype = torch.float16 if self.precision == "fp16" else torch.bfloat16
+            model = model.to(cast_dtype)
+
         return FSDP(model, **fsdp_kwargs)
 
     def save_checkpoint(self, model: nn.Module, path: str) -> None:
