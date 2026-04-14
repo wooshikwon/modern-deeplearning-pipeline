@@ -7,6 +7,7 @@ and backward/optimizer step logic.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import torch
@@ -81,9 +82,14 @@ def create_callbacks(configs: list[dict[str, Any]], resolver: Any) -> list:
 
 
 def detect_device() -> torch.device:
-    """Detect the best available device (CUDA > MPS > CPU)."""
+    """Detect the best available device (CUDA > MPS > CPU).
+
+    분산 학습(torchrun)에서는 LOCAL_RANK 환경 변수를 읽어 각 rank의
+    전용 GPU를 반환한다. LOCAL_RANK가 없으면 cuda:0(단일 GPU)을 반환.
+    """
     if torch.cuda.is_available():
-        return torch.device("cuda")
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        return torch.device(f"cuda:{local_rank}")
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
