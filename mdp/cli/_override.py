@@ -9,20 +9,32 @@ from typing import Any
 def apply_overrides(
     target: dict[str, Any], overrides: list[str],
 ) -> dict[str, Any]:
-    """dotted key=value 오버라이드를 deep-merge한다.
+    """dotted key=value 오버라이드 또는 JSON dict를 deep-merge한다.
 
     Examples::
 
         apply_overrides(recipe_dict, ["training.epochs=0.1"])
-        apply_overrides(config_dict, ["compute.gpus=4"])
+        apply_overrides(config_dict, ['{"compute.gpus": 4, "compute.precision": "bf16"}'])
     """
     for item in overrides:
-        key, sep, value = item.partition("=")
-        if not sep:
-            raise ValueError(f"올바른 형식: KEY=VALUE. 입력: '{item}'")
-        keys = key.split(".")
-        parsed = parse_value(value)
-        _deep_set(target, keys, parsed)
+        stripped = item.strip()
+        if stripped.startswith("{"):
+            # JSON dict: {"dotted.key": value, ...}
+            try:
+                d = json.loads(stripped)
+            except json.JSONDecodeError as e:
+                raise ValueError(f"JSON dict 파싱 실패: {e}. 입력: '{item}'") from e
+            if not isinstance(d, dict):
+                raise ValueError(f"JSON dict여야 합니다. 입력: '{item}'")
+            for k, v in d.items():
+                _deep_set(target, k.split("."), v)
+        else:
+            key, sep, value = item.partition("=")
+            if not sep:
+                raise ValueError(f"올바른 형식: KEY=VALUE 또는 JSON dict. 입력: '{item}'")
+            keys = key.split(".")
+            parsed = parse_value(value)
+            _deep_set(target, keys, parsed)
     return target
 
 

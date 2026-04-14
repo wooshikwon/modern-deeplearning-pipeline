@@ -24,6 +24,24 @@ app = typer.Typer(
 _FORMAT_HELP = "출력 형식: text | json. 최상위 옵션과 동일하며 subcommand 위치에서도 사용 가능"
 
 
+def _flatten_overrides(override: list[str] | None) -> list[str] | None:
+    """--override 값을 정규화한다.
+
+    - JSON dict: ``--override '{"k1": v1, "k2": v2}'`` → 그대로 전달 (공백 분리 금지)
+    - key=value: ``--override 'k1=v1 k2=v2'`` → 공백 분리 후 개별 항목으로 전달
+    - 반복 플래그: ``--override k1=v1 --override k2=v2`` → 기존대로 작동
+    """
+    if not override:
+        return override
+    result = []
+    for item in override:
+        if item.strip().startswith("{"):
+            result.append(item)  # JSON dict: 공백 분리하지 않음
+        else:
+            result.extend(item.split())
+    return result
+
+
 @app.callback()
 def main(
     format: OutputFormat = typer.Option(
@@ -61,14 +79,14 @@ def train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
     callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe callbacks를 override)"),
-    override: list[str] | None = typer.Option(None, "--override", help="Recipe/Config 오버라이드 (KEY=VALUE). config. 접두사로 Config 필드 지정"),
+    override: list[str] | None = typer.Option(None, "--override", help="오버라이드. 형식: KEY=VALUE | JSON dict. 예: --override epochs=3, --override 'ep=3 bs=8', --override '{\"training.epochs\": 3}'"),
     format: OutputFormat | None = typer.Option(None, "--format", help=_FORMAT_HELP),
 ):
     """모델을 학습한다."""
     apply_format_override(format)
     from mdp.cli.train import run_train
 
-    run_train(recipe, config, overrides=override, callbacks_file=callbacks)
+    run_train(recipe, config, overrides=_flatten_overrides(override), callbacks_file=callbacks)
 
 
 @app.command(name="rl-train")
@@ -76,14 +94,14 @@ def rl_train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="RL Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
     callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe callbacks를 override)"),
-    override: list[str] | None = typer.Option(None, "--override", help="Recipe/Config 오버라이드 (KEY=VALUE). config. 접두사로 Config 필드 지정"),
+    override: list[str] | None = typer.Option(None, "--override", help="오버라이드. 형식: KEY=VALUE | JSON dict. 예: --override epochs=3, --override 'ep=3 bs=8', --override '{\"training.epochs\": 3}'"),
     format: OutputFormat | None = typer.Option(None, "--format", help=_FORMAT_HELP),
 ):
     """RL alignment 학습. 내장 DPO/GRPO/PPO + `_component_`로 외부 알고리즘 주입."""
     apply_format_override(format)
     from mdp.cli.rl_train import run_rl_train
 
-    run_rl_train(recipe, config, overrides=override, callbacks_file=callbacks)
+    run_rl_train(recipe, config, overrides=_flatten_overrides(override), callbacks_file=callbacks)
 
 
 @app.command()
@@ -114,7 +132,7 @@ def inference(
 
     run_inference(
         run_id, model_dir, data, fields, metrics, output_format, output_dir,
-        device_map=device_map, overrides=override,
+        device_map=device_map, overrides=_flatten_overrides(override),
         pretrained=pretrained, tokenizer_name=tokenizer,
         callbacks_file=callbacks,
         dtype=dtype, trust_remote_code=trust_remote_code, attn_impl=attn_impl,
