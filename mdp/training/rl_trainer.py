@@ -640,6 +640,15 @@ class RLTrainer:
                 self.frozen[name] = self.frozen[name].to(self.device)
             self.policy = self.trainable["policy"]
 
+        # torch.compile — must be AFTER FSDP wrapping, trainable models only
+        if self.compile_mode:
+            import torch
+            mode = self.compile_mode if isinstance(self.compile_mode, str) else "default"
+            for name in list(self.trainable.keys()):
+                self.trainable[name] = torch.compile(self.trainable[name], mode=mode)
+            self.policy = self.trainable["policy"]
+            logger.info("torch.compile applied to trainable models (mode=%s)", mode)
+
         # Gap 5: Resume from checkpoint
         self._maybe_resume()
         sampler = getattr(self.train_loader, "sampler", None)
