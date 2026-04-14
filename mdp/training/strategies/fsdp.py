@@ -198,9 +198,19 @@ class FSDPStrategy(BaseStrategy):
             source = "_block_classes"
 
         # 3) HF 호환: _no_split_modules
+        # _no_split_modules는 단축명("LlamaDecoderLayer")만 제공하므로
+        # named_modules()를 스캔하여 전체 경로로 resolve한다.
         elif getattr(model, "_no_split_modules", None):
-            block_classes = set(model._no_split_modules)
+            short_names = set(model._no_split_modules)
             source = "_no_split_modules (HF compat)"
+            full_paths: set[str] = set()
+            for short_name in short_names:
+                for _, mod in model.named_modules():
+                    if type(mod).__name__ == short_name:
+                        cls = type(mod)
+                        full_paths.add(f"{cls.__module__}.{cls.__qualname__}")
+                        break
+            block_classes = full_paths if full_paths else short_names
 
         if block_classes:
             from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
