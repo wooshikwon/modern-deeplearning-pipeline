@@ -558,14 +558,20 @@ class RLTrainer:
         gc_cfg = self.settings.recipe.training.gradient_checkpointing
         if gc_cfg:
             for name, model in self.trainable.items():
-                unwrapped = getattr(model, "module", model)
-                if hasattr(unwrapped, "gradient_checkpointing_enable"):
-                    # LoRA 모델은 입력에 requires_grad가 없어 GC 체크포인트가 동작하지 않는다.
-                    # enable_input_require_grads()로 입력에 대한 grad 추적을 활성화한다.
-                    if hasattr(unwrapped, "enable_input_require_grads"):
-                        unwrapped.enable_input_require_grads()
-                    unwrapped.gradient_checkpointing_enable()
+                # DDP/FSDP 이전이므로 .module 없음. PEFT 래퍼를 뚫고 실제 PreTrainedModel까지 내려간다.
+                # PeftModel은 gradient_checkpointing_enable을 노출하지 않으므로
+                # base_model.model (LoraModel → PreTrainedModel) 경로로 접근한다.
+                base = getattr(model, "module", model)          # DDP/FSDP 대비 (현재 no-op)
+                base = getattr(base, "base_model", base)        # PeftModel → LoraModel
+                base = getattr(base, "model", base)             # LoraModel → PreTrainedModel
+                if hasattr(base, "gradient_checkpointing_enable"):
+                    # LoRA: 입력 텐서에 requires_grad가 없으면 GC recompute 구간에서 grad 소실.
+                    if hasattr(base, "enable_input_require_grads"):
+                        base.enable_input_require_grads()
+                    base.gradient_checkpointing_enable()
                     logger.info("Gradient checkpointing enabled for %s", name)
+                else:
+                    logger.warning("gradient_checkpointing_enable not found on %s (%s)", name, type(base).__name__)
 
         # Strategy setup
         if self.strategy is not None:
