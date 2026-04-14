@@ -82,11 +82,19 @@ class FSDPStrategy(BaseStrategy):
         # 4) size 기반 (LoRA+FSDP 조합에서는 에러)
         auto_wrap_policy = self._resolve_wrap_policy(model, size_based_auto_wrap_policy)
 
+        # LoRA+FSDP: FSDP init 시점에 mixed requires_grad(base=False, adapter=True)가
+        # NCCL collective 교착을 유발한다. wrap 전에 일시적으로 전체를 True로 통일하여
+        # FSDP init 경로를 단순화한다. wrap 후 base 파라미터는 다시 freeze한다.
+        is_peft = hasattr(model, "peft_config")
+        if is_peft:
+            for p in model.parameters():
+                p.requires_grad_(True)
+
         fsdp_kwargs: dict[str, Any] = {
             "sharding_strategy": sharding,
             "auto_wrap_policy": auto_wrap_policy,
-            # LoRA+FSDP에서 mixed requires_grad(frozen base + trainable adapter)를 허용.
-            # PyTorch 2.0+에서 원본 파라미터 객체를 유지하여 FlatParameter 균일성 제약 제거.
+            # LoRA optimizer는 FSDP wrap 전에 원본 파라미터로 생성되므로,
+            # use_orig_params=True로 wrap 후에도 원본 파라미터 객체를 보존해야 한다.
             "use_orig_params": True,
         }
 
@@ -109,7 +117,21 @@ class FSDPStrategy(BaseStrategy):
             from torch.distributed.fsdp import CPUOffload
             fsdp_kwargs["cpu_offload"] = CPUOffload(offload_params=True)
 
-        return FSDP(model, **fsdp_kwargs)
+        wrapped = FSDP(model, **fsdp_kwargs)
+
+        # LoRA+FSDP: wrap 후 base 파라미터를 다시 freeze한다.
+        # use_orig_params=True이므로 named_parameters()가 원본 이름을 반환한다.
+        if is_peft:
+            for name, p in wrapped.named_parameters():
+                if not any(k in name for k in ("lora_", "modules_to_save")):
+                    p.requires_grad_(False)
+            trainable_count = sum(1 for p in wrapped.parameters() if p.requires_grad)
+            logger.info(
+                "FSDP LoRA: base params frozen post-wrap, trainable params=%d",
+                trainable_count,
+            )
+
+        return wrapped
 
     def save_checkpoint(self, model: nn.Module, path: str) -> None:
         import torch.distributed as dist

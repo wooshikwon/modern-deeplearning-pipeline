@@ -554,6 +554,19 @@ class RLTrainer:
                     "device_map은 추론/서빙 전용이며, 학습에는 DDP/FSDP 전략을 사용하세요."
                 )
 
+        # Gradient Checkpointing (FSDP/DDP wrap 전에 적용해야 한다)
+        gc_cfg = getattr(self.settings.recipe, "gradient_checkpointing", False)
+        if gc_cfg:
+            for name, model in self.trainable.items():
+                unwrapped = getattr(model, "module", model)
+                if hasattr(unwrapped, "gradient_checkpointing_enable"):
+                    # LoRA 모델은 입력에 requires_grad가 없어 GC 체크포인트가 동작하지 않는다.
+                    # enable_input_require_grads()로 입력에 대한 grad 추적을 활성화한다.
+                    if hasattr(unwrapped, "enable_input_require_grads"):
+                        unwrapped.enable_input_require_grads()
+                    unwrapped.gradient_checkpointing_enable()
+                    logger.info("Gradient checkpointing enabled for %s", name)
+
         # Strategy setup
         if self.strategy is not None:
             trainable_names = set(self.trainable.keys())
