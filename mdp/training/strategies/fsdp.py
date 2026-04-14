@@ -85,6 +85,9 @@ class FSDPStrategy(BaseStrategy):
         fsdp_kwargs: dict[str, Any] = {
             "sharding_strategy": sharding,
             "auto_wrap_policy": auto_wrap_policy,
+            # LoRA+FSDP에서 mixed requires_grad(frozen base + trainable adapter)를 허용.
+            # PyTorch 2.0+에서 원본 파라미터 객체를 유지하여 FlatParameter 균일성 제약 제거.
+            "use_orig_params": True,
         }
 
         if device.type == "cuda":
