@@ -339,7 +339,7 @@ class RLTrainer:
         except Exception as e:
             logger.warning(f"MLflow params 로깅 실패: {e}")
 
-    def _log_mlflow_summary(self, training_duration: float, stopped_reason: str = "completed") -> None:
+    def _log_mlflow_summary(self, training_duration: float, stopped_reason: str = "completed", policy_state_dict: "dict | None" = None) -> None:
         try:
             import mlflow
             from mdp.utils.sanitize import sanitize_config
@@ -353,14 +353,39 @@ class RLTrainer:
             mlflow.log_dict(config_dict, "config/settings.json")
 
             # policy adapter를 MLflow artifact로 저장
-            self._export_policy_artifact()
+            self._export_policy_artifact(policy_state_dict=policy_state_dict)
         except Exception as e:
             logger.warning(f"MLflow summary 로깅 실패: {e}")
 
-    def _export_policy_artifact(self) -> None:
-        """Policy 모델을 MLflow artifact로 저장한다. LoRA면 adapter만."""
-        import json
-        import shutil
+    def _gather_fsdp_policy_state_dict(self) -> "dict | None":
+        """FSDP 모델의 full state dict를 all-rank 협력으로 수집한다.
+
+        모든 랭크가 반드시 호출해야 한다 (NCCL all-gather가 내부에서 실행됨).
+        rank0_only=True이므로 실제 weight는 rank 0에만 채워지고, 나머지는 빈 dict.
+        FSDP가 아닌 경우 None을 반환한다.
+        """
+        try:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            if not isinstance(self.policy, FSDP):
+                return None
+            from torch.distributed.fsdp import FullStateDictConfig, StateDictType
+
+            cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            with FSDP.state_dict_type(self.policy, StateDictType.FULL_STATE_DICT, cfg):
+                # All ranks participate in NCCL all-gather here.
+                # rank0_only=True → result populated on rank 0 only; others get {}.
+                state_dict = self.policy.state_dict()
+            return state_dict if self._is_main_process else None
+        except Exception as e:
+            logger.warning("FSDP state dict cooperative gather failed: %s", e)
+            return None
+
+    def _export_policy_artifact(self, policy_state_dict: "dict | None" = None) -> None:
+        """Policy 모델을 MLflow artifact로 저장한다. LoRA면 adapter만.
+
+        policy_state_dict가 제공된 경우 FSDP cooperative gather로 수집한 full state dict를
+        사용한다 (FSDP 모델에서 직접 save_pretrained를 호출하면 모든 랭크가 필요하므로).
+        """
         import tempfile
 
         import mlflow
@@ -371,13 +396,29 @@ class RLTrainer:
 
             with tempfile.TemporaryDirectory() as tmp:
                 output_dir = Path(tmp)
-                if has_adapter:
+
+                if policy_state_dict is not None:
+                    # FSDP path: use pre-gathered full state dict to avoid NCCL on rank 0 only.
+                    if has_adapter:
+                        # Extract adapter-only weights via PEFT helper (respects state_dict arg).
+                        from peft import get_peft_model_state_dict
+                        adapter_sd = get_peft_model_state_dict(target, state_dict=policy_state_dict)
+                        from safetensors.torch import save_file
+                        save_file(adapter_sd, str(output_dir / "adapter_model.safetensors"))
+                        # Save adapter config for each adapter name.
+                        peft_config = target.peft_config  # dict[adapter_name, PeftConfigMixin]
+                        for adapter_name, cfg in peft_config.items():
+                            cfg.save_pretrained(str(output_dir))
+                    else:
+                        from safetensors.torch import save_file
+                        save_file(policy_state_dict, str(output_dir / "model.safetensors"))
+                elif has_adapter:
                     target.save_pretrained(output_dir)
                 elif hasattr(target, "save_pretrained"):
                     target.save_pretrained(output_dir)
                 else:
                     from safetensors.torch import save_file
-                    save_file(target.state_dict(), output_dir / "model.safetensors")
+                    save_file(target.state_dict(), str(output_dir / "model.safetensors"))
 
                 # tokenizer — collator _component_의 init_args에서 추출
                 recipe = self.settings.recipe
@@ -760,12 +801,6 @@ class RLTrainer:
                         self.last_metrics.update(val_metrics)
 
             finally:
-                if self.strategy is not None:
-                    try:
-                        self.strategy.cleanup()
-                    except Exception as e:
-                        logger.warning(f"Strategy cleanup 실패: {e}")
-
                 avg_loss = total_loss / max(num_steps, 1)
                 self._fire("on_train_end", metrics={"loss": avg_loss})
 
@@ -778,8 +813,18 @@ class RLTrainer:
                     stopped_reason = "completed"
 
                 training_duration = time.time() - start_time
+                # FSDP artifact export needs all ranks for parameter all-gather.
+                # Must happen BEFORE strategy.cleanup() which destroys the process group.
+                fsdp_policy_sd = self._gather_fsdp_policy_state_dict()
+
+                if self.strategy is not None:
+                    try:
+                        self.strategy.cleanup()
+                    except Exception as e:
+                        logger.warning(f"Strategy cleanup 실패: {e}")
+
                 if self._is_main_process:
-                    self._log_mlflow_summary(training_duration, stopped_reason)
+                    self._log_mlflow_summary(training_duration, stopped_reason, policy_state_dict=fsdp_policy_sd)
 
         # Monitoring baseline (policy 모델 사용)
         monitoring = self._maybe_compute_baseline()

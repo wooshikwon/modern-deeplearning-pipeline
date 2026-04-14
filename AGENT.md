@@ -18,6 +18,8 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 
 모든 명령은 `--format json` 옵션을 지원한다. `mdp train`/`rl-train`/`inference`/`generate`는 `--override KEY=VALUE` 옵션을 공통으로 지원하여 Recipe/Config의 필드를 런타임에 덮어쓸 수 있다 (예: `--override training.epochs=0.1 --override data.dataloader.batch_size=8`). 각 명령의 상세 인자는 `mdp <command> --help`로 확인.
 
+> **멀티 GPU 실행 주의**: `mdp train` / `mdp rl-train`은 `compute.gpus`와 `compute.distributed.strategy` 설정을 읽어 내부적으로 `_torchrun_entry.py`를 통해 멀티 GPU를 직접 관리한다. **절대로 외부 `torchrun`으로 감싸지 말 것** — `torchrun ... mdp rl-train ...` 패턴은 이중 torchrun(`torchrun → MDP → 내부 torchrun`)이 되어 포트 충돌로 실패한다. 올바른 실행: `mdp rl-train -r recipe.yaml -c config.yaml`.
+
 ### inference 플래그
 
 ```
