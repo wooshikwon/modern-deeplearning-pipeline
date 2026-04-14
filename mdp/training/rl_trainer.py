@@ -369,16 +369,18 @@ class RLTrainer:
             if not isinstance(self.policy, FSDP):
                 return None
             from torch.distributed.fsdp import FullStateDictConfig, StateDictType
-
-            cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            with FSDP.state_dict_type(self.policy, StateDictType.FULL_STATE_DICT, cfg):
-                # All ranks participate in NCCL all-gather here.
-                # rank0_only=True → result populated on rank 0 only; others get {}.
-                state_dict = self.policy.state_dict()
-            return state_dict if self._is_main_process else None
         except Exception as e:
             logger.warning("FSDP state dict cooperative gather failed: %s", e)
             return None
+
+        # NCCL collective — outside try/except so a raise here propagates to all ranks
+        # instead of one rank silently returning None while others block in all-gather.
+        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with FSDP.state_dict_type(self.policy, StateDictType.FULL_STATE_DICT, cfg):
+            # All ranks participate in NCCL all-gather here.
+            # rank0_only=True → result populated on rank 0 only; others get {}.
+            state_dict = self.policy.state_dict()
+        return state_dict if self._is_main_process else None
 
     def _export_policy_artifact(self, policy_state_dict: "dict | None" = None) -> None:
         """Policy 모델을 MLflow artifact로 저장한다. LoRA면 adapter만.
@@ -402,7 +404,9 @@ class RLTrainer:
                     if has_adapter:
                         # Extract adapter-only weights via PEFT helper (respects state_dict arg).
                         from peft import get_peft_model_state_dict
-                        adapter_sd = get_peft_model_state_dict(target, state_dict=policy_state_dict)
+                        adapter_names = list(target.peft_config.keys())
+                        adapter_name = adapter_names[0] if adapter_names else "default"
+                        adapter_sd = get_peft_model_state_dict(target, state_dict=policy_state_dict, adapter_name=adapter_name)
                         from safetensors.torch import save_file
                         save_file(adapter_sd, str(output_dir / "adapter_model.safetensors"))
                         # Save adapter config for each adapter name.

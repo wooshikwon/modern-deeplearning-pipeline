@@ -86,6 +86,13 @@ def run_rl_training(settings) -> dict:
 
 
 def main() -> None:
+    # PYTORCH_CUDA_ALLOC_CONF must be set before any CUDA allocation (including
+    # dist.init_process_group(nccl)). expandable_segments:True lets the caching
+    # allocator grow existing memory segments instead of creating new fixed-size
+    # blocks, eliminating fragmentation-driven OOM in FSDP training.
+    # setdefault preserves any value the caller may have already exported.
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
     parser = argparse.ArgumentParser(description="MDP torchrun worker")
     parser.add_argument(
         "--settings-path", required=True, help="Settings JSON 파일 경로"
