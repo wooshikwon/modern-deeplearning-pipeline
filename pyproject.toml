@@ -25,6 +25,7 @@ language = [
     "datasets>=2.16",
     "peft>=0.10",
     "bitsandbytes>=0.41",
+    "flash-attn>=2.5",
 ]
 serving = [
     "torchserve>=0.9",
