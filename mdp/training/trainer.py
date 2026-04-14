@@ -243,15 +243,31 @@ class Trainer:
                 "device_map은 추론/서빙 전용이며, 학습에는 DDP/FSDP 전략을 사용하세요."
             )
 
+        # Gradient Checkpointing (DDP/FSDP wrap 전에 적용해야 한다)
+        # FSDP 이후에 활성화하면 use_reentrant=True(기본값)가 FSDP의 param 조기 해제를 막아 OOM.
+        # LoRA: 입력 텐서에 requires_grad가 없으면 GC recompute 구간에서 grad 소실 → silent failure.
+        if self.gradient_checkpointing:
+            base = getattr(self.model, "module", self.model)   # DDP/FSDP 대비 (현재 no-op)
+            base = getattr(base, "base_model", base)           # PeftModel → LoraModel
+            base = getattr(base, "model", base)                # LoraModel → PreTrainedModel
+            if hasattr(base, "gradient_checkpointing_enable"):
+                if hasattr(base, "enable_input_require_grads"):
+                    base.enable_input_require_grads()
+                base.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+                logger.info("Gradient checkpointing enabled (use_reentrant=False)")
+            else:
+                logger.warning(
+                    "gradient_checkpointing_enable not found on %s — skipping",
+                    type(base).__name__,
+                )
+
         # Strategy setup (DDP/FSDP/DeepSpeed wrapping)
         if self.strategy is not None:
             self.model = self.strategy.setup(self.model, self.device, optimizer=self.optimizer)
         else:
             self.model = self.model.to(self.device)
-
-        # Gradient checkpointing
-        if self.gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
-            self.model.gradient_checkpointing_enable()
 
         # torch.compile — must be AFTER distributed wrapping
         if self.compile_mode:
