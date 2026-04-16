@@ -483,7 +483,11 @@ class RLTrainer:
         """모든 모델의 상태를 저장한다."""
         import json
 
-        for name, model in {**self.trainable, **self.frozen}.items():
+        # Only save trainable models — frozen models don't change during training and
+        # are always reloaded from their original pretrained path on resume.
+        # Saving frozen replicas wastes disk (e.g. ~14 GB for Llama backbone) and
+        # causes strategy.save_checkpoint to fail if the model is not DDP/FSDP-wrapped.
+        for name, model in self.trainable.items():
             model_dir = ckpt_dir / name
             model_dir.mkdir(parents=True, exist_ok=True)
 
