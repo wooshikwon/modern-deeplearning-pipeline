@@ -58,6 +58,44 @@ class BaseModel(nn.Module, ABC):
                     self._block_classes = full_paths
                     return
 
+    # ------------------------------------------------------------------ #
+    #  Gradient Checkpointing — HF 백본 자동 위임                        #
+    #  직계 자식 중 gradient_checkpointing_enable을 가진 첫 번째 모듈에   #
+    #  위임한다. _inherit_block_classes()와 동일한 탐색 패턴.             #
+    #  덕분에 어떤 HF 백본을 감싸더라도 Trainer GC 설정이 자동 적용된다.  #
+    # ------------------------------------------------------------------ #
+
+    def enable_input_require_grads(self) -> None:
+        """LoRA+GC 조합에서 input이 requires_grad=False여도 grad가 흐르게 한다.
+
+        Trainer가 FSDP wrap 전에 호출. HF 백본에 위임한다.
+        직계 자식에서 해당 인터페이스를 찾아 최초 1회만 호출한다.
+        """
+        for child in self.children():
+            if hasattr(child, "enable_input_require_grads"):
+                child.enable_input_require_grads()
+                return
+
+    def gradient_checkpointing_enable(
+        self,
+        gradient_checkpointing_kwargs: dict | None = None,
+    ) -> None:
+        """Trainer가 FSDP wrap 전에 호출하는 GC 활성화 인터페이스.
+
+        직계 자식 중 HF PreTrainedModel을 찾아 위임한다.
+        커스텀 BaseModel이 어떤 HF 백본을 감싸든 자동으로 동작한다.
+        subclass에서 오버라이드할 필요 없음.
+        """
+        for child in self.children():
+            if hasattr(child, "gradient_checkpointing_enable"):
+                if gradient_checkpointing_kwargs is not None:
+                    child.gradient_checkpointing_enable(
+                        gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
+                    )
+                else:
+                    child.gradient_checkpointing_enable()
+                return
+
     @abstractmethod
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """순전파. batch dict를 받아 출력 dict를 반환한다."""

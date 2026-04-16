@@ -526,6 +526,20 @@ class Trainer:
                 raise ValueError("배치에 'labels' 키가 없습니다")
             return self.loss_fn(logits, labels)
         else:
+            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+            if isinstance(self.model, FSDP):
+                # self.model.training_step bypasses FSDP.__call__ via __getattr__ delegation:
+                # Python resolves .training_step to a bound method on the inner model,
+                # so FSDP's root all-gather hooks never fire and embed_tokens.weight
+                # remains a 1-D shard → RuntimeError: 'weight' must be 2-D.
+                # Fix: swap inner module's forward ← training_step, then call through FSDP.
+                inner = self.model.module
+                _saved_fwd = inner.forward
+                inner.forward = inner.training_step
+                try:
+                    return self.model(batch)
+                finally:
+                    inner.forward = _saved_fwd
             return self.model.training_step(batch)
 
     @torch.no_grad()
