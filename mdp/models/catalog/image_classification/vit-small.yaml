@@ -1,0 +1,44 @@
+name: vit-small-patch16-224
+family: vit_timm
+class_path: timm.create_model
+head_builtin: false
+
+pretrained_sources:
+  - "timm://vit_small_patch16_224"
+
+supported_tasks:
+  - image_classification
+  - feature_extraction
+
+default_head:
+  task: image_classification
+  slot: head.cls
+  _component_: ClassificationHead
+  hidden_dim: 384
+  dropout: 0.1
+  pooling: cls
+
+input_spec:
+  channels: 3
+  height: 224
+  width: 224
+  dtype: float32
+
+init_args_schema:
+  num_classes:
+    type: int
+    default: 1000
+  pretrained:
+    type: bool
+    default: true
+
+adapter_defaults:
+  lora:
+    target: [attn.qkv, attn.proj]
+    r: 16
+    alpha: 32
+
+memory:
+  params_m: 22.1
+  fp32_gb: 0.08
+  fp16_gb: 0.04
