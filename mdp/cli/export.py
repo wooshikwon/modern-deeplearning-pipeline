@@ -55,7 +55,11 @@ def run_export(
         output_dir.mkdir(parents=True, exist_ok=True)
 
         # 모델 저장
-        if hasattr(target, "save_pretrained"):
+        # BaseModel.export()가 있으면 우선 위임 (backbone+head 분리 저장 등 커스텀 구조 지원).
+        # 순수 HF 모델(save_pretrained)과 generic fallback은 이후 처리.
+        if hasattr(target, "export"):
+            target.export(output_dir)
+        elif hasattr(target, "save_pretrained"):
             target.save_pretrained(output_dir)
         else:
             from safetensors.torch import save_file

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, ClassVar
 
 from torch import Tensor, nn
@@ -118,3 +119,27 @@ class BaseModel(nn.Module, ABC):
     def configure_optimizers(self) -> dict[str, Any] | None:
         """모델 전용 옵티마이저 설정. None이면 Recipe의 optimizer를 사용한다."""
         return None
+
+    def export(self, output_dir: Path) -> None:
+        """모델을 output_dir에 export한다.
+
+        ``mdp export`` 가 호출한다. 기본 구현은 safetensors 단일 파일로 저장한다.
+
+        **커스텀 구조(backbone + head 등)는 반드시 오버라이드해야 한다.**
+
+        오버라이드 예시 (backbone + value_head 분리 저장)::
+
+            def export(self, output_dir: Path) -> None:
+                import torch
+                self.backbone.save_pretrained(output_dir / "backbone")
+                torch.save(self.value_head.state_dict(), output_dir / "value_head.pt")
+
+        로딩 측 인터페이스(``CriticValueModel.__init__``의
+        ``pretrained``/``value_head_checkpoint`` 등)는 모델 설계에 따라
+        대응되어야 한다.
+        """
+        if hasattr(self, "save_pretrained"):
+            self.save_pretrained(output_dir)
+        else:
+            from safetensors.torch import save_file as _save_file
+            _save_file(self.state_dict(), Path(output_dir) / "model.safetensors")
