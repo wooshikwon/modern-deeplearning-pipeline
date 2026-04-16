@@ -12,11 +12,16 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 | `mdp inference` | 배치 추론 + 평가. 모델 소스 3택: `--run-id`, `--model-dir`, `--pretrained <uri>`. 상세 플래그는 아래 참조 |
 | `mdp generate` | autoregressive 생성. 모델 소스 3택 동일. 상세 플래그는 아래 참조 |
 | `mdp estimate -r recipe.yaml` | GPU 메모리 추정 + 전략 추천 |
-| `mdp export --run-id <id> -o <dir>` | adapter merge + 서빙용 패키징. `--checkpoint`로 로컬 체크포인트도 가능 |
+| `mdp export --run-id <id> --output <dir>` | adapter merge + 서빙용 패키징. 소스는 `--run-id` 또는 `--checkpoint <path>` (상호 배타). `--output` 기본값 `./exported-model` |
 | `mdp serve --run-id <id>` | REST API 서빙. `--model-dir`, `--device-map`, `--max-memory` 지원 |
 | `mdp list models\|tasks\|callbacks\|strategies` | 카탈로그 조회 |
 
-모든 명령은 `--format json` 옵션을 지원한다. `mdp train`/`rl-train`/`inference`/`generate`는 `--override KEY=VALUE` 옵션을 공통으로 지원하여 Recipe/Config의 필드를 런타임에 덮어쓸 수 있다 (예: `--override training.epochs=0.1 --override data.dataloader.batch_size=8`). 각 명령의 상세 인자는 `mdp <command> --help`로 확인.
+모든 명령은 `--format json` 옵션을 지원한다. `mdp train`/`rl-train`/`inference`/`generate`는 `--override` 옵션을 공통으로 지원하여 Recipe/Config의 필드를 런타임에 덮어쓸 수 있다. 두 가지 문법이 공존한다:
+
+- **KEY=VALUE 형식** (단일 항목 반복): `--override training.epochs=0.1 --override data.dataloader.batch_size=8`
+- **JSON dict 형식** (다건 일괄): `--override '{"training.epochs": 0.1, "data.dataloader.batch_size": 8}'`
+
+값은 자동 타입 추론된다 (`null`/`none` → None, `true`/`false` → bool, int → float → JSON(`{...}`, `[...]`) → str). 각 명령의 상세 인자는 `mdp <command> --help`로 확인.
 
 > **멀티 GPU 실행 주의**: `mdp train` / `mdp rl-train`은 `compute.gpus`와 `compute.distributed.strategy` 설정을 읽어 내부적으로 `_torchrun_entry.py`를 통해 멀티 GPU를 직접 관리한다. **절대로 외부 `torchrun`으로 감싸지 말 것** — `torchrun ... mdp rl-train ...` 패턴은 이중 torchrun(`torchrun → MDP → 내부 torchrun`)이 되어 포트 충돌로 실패한다. 올바른 실행: `mdp rl-train -r recipe.yaml -c config.yaml`.
 
@@ -628,6 +633,8 @@ class MyModel(BaseModel):
     # 선택:
     def generate(self, batch, **kwargs) -> dict: ...
     def configure_optimizers(self) -> dict | None: ...
+    # └─ 파라미터 그룹별 LR이 필요할 때. {"optimizer": optim_obj} 반환 필수.
+    #    None(기본) 또는 dict 형식 외의 반환값은 무시되고 recipe fallback 사용.
 ```
 
 Recipe에서 `model._component_: my_models.custom.MyModel` 지정. `PYTHONPATH`에 프로젝트 루트 포함 필요.
@@ -673,3 +680,19 @@ model:
 ```
 
 Factory는 `CriticValueModel`에 `from_pretrained`가 없으므로 **생성자 호출**: `CriticValueModel(pretrained="hf://...", value_head_dropout=0.2)`. backbone의 아키텍처(hidden_size 등)는 불변이며, 커스텀 클래스는 `backbone.config`를 읽어 적응해야 한다.
+
+### `configure_optimizers()` — 파라미터 그룹별 LR
+
+파라미터 그룹마다 다른 LR이 필요할 때 오버라이드한다 (backbone 낮은 LR + head 높은 LR 등).
+
+**반환 형식은 반드시 `{"optimizer": optimizer_객체}` dict이어야 한다.** optimizer를 직접 반환하면 `isinstance(custom, dict)` 체크에서 실패 → 무증상으로 recipe fallback 사용.
+
+정의하면 recipe의 `optimizer:` 전체가 무시된다. `scheduler:`는 recipe에서 그대로 적용.
+
+→ 전체 패턴: `docs/extending.md` — `### configure_optimizers() — 파라미터 그룹별 LR`
+
+### `export()` / `load_from_export()` 계약
+
+단일 네트워크는 기본 구현으로 충분. backbone + 커스텀 head처럼 이질적 구조는 두 메서드를 **반드시 함께** 오버라이드한다 — `export()`만 오버라이드하면 `reconstruct_model()`이 기본 safetensors 로더로 떨어져 실패.
+
+→ 전체 패턴: `docs/extending.md` — `### export() / load_from_export() 계약`
