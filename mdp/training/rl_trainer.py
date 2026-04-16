@@ -488,7 +488,58 @@ class RLTrainer:
             model_dir.mkdir(parents=True, exist_ok=True)
 
             if self.strategy is not None and hasattr(self.strategy, "save_checkpoint"):
-                self.strategy.save_checkpoint(model, model_dir / "model.safetensors")
+                # FSDP + PeftModel(LoRA): adapter만 저장한다.
+                # strategy.save_checkpoint는 rank0_only=True 방식으로 full state dict를 rank 0에 수집한다.
+                # rank 0에서 수집된 전체 state dict 중 LoRA + modules_to_save 키만 필터링해
+                # adapter_model.safetensors + adapter_config.json으로 저장한다.
+                _saved_as_peft = False
+                try:
+                    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                    from peft import PeftModel as _PeftModel
+                    _inner = getattr(model, "module", None)
+                    if isinstance(model, FSDP) and isinstance(_inner, _PeftModel):
+                        import json as _json
+                        import tempfile as _tempfile
+                        from safetensors import safe_open as _safe_open
+                        from safetensors.torch import save_file as _save_file
+
+                        with _tempfile.TemporaryDirectory() as _tmp:
+                            _full_path = Path(_tmp) / "full.safetensors"
+                            self.strategy.save_checkpoint(model, str(_full_path))
+
+                            # rank0_only=True: rank-0에서만 파일이 생성된다
+                            if _full_path.exists():
+                                with _safe_open(str(_full_path), framework="pt", device="cpu") as _f:
+                                    _full_sd = {k: _f.get_tensor(k) for k in _f.keys()}
+
+                                # LoRA 가중치 + modules_to_save(value_head 등)만 필터
+                                _adapter_tokens = {
+                                    "lora_A", "lora_B",
+                                    "lora_embedding_A", "lora_embedding_B",
+                                    "modules_to_save",
+                                }
+                                _adapter_sd = {
+                                    k: v for k, v in _full_sd.items()
+                                    if any(tok in k for tok in _adapter_tokens)
+                                }
+                                _save_file(_adapter_sd, model_dir / "adapter_model.safetensors")
+
+                                # adapter_config.json: peft_config에서 직렬화
+                                _peft_cfg = next(iter(_inner.peft_config.values()))
+                                (model_dir / "adapter_config.json").write_text(
+                                    _json.dumps(_peft_cfg.to_dict(), indent=2)
+                                )
+                                logger.info(
+                                    "Saved PEFT adapter only (FSDP+LoRA, %d keys): %s",
+                                    len(_adapter_sd),
+                                    model_dir,
+                                )
+                        _saved_as_peft = True
+                except ImportError:
+                    pass
+
+                if not _saved_as_peft:
+                    self.strategy.save_checkpoint(model, model_dir / "model.safetensors")
             else:
                 unwrapped = getattr(model, "module", model)
                 if hasattr(unwrapped, "save_pretrained"):
