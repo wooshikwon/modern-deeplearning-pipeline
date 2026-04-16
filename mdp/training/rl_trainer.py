@@ -777,13 +777,17 @@ class RLTrainer:
             sampler.set_epoch(self.epoch_counter)
 
         # Inject storage.checkpoint_dir into ModelCheckpoint callbacks that don't have an
-        # explicit dirpath set. This makes --override config.storage.checkpoint_dir=X the
-        # single control point, avoiding dual-setting conflicts between callback YAML and config.
-        _storage = getattr(self.settings.config, "storage", None)
-        if _storage and getattr(_storage, "checkpoint_dir", None):
+        # explicit dirpath set. Config takes precedence over recipe, so
+        # --override config.storage.checkpoint_dir=X overrides recipe's default.
+        _cfg_storage = getattr(self.settings.config, "storage", None)
+        _ckpt_dir = _cfg_storage and getattr(_cfg_storage, "checkpoint_dir", None)
+        if not _ckpt_dir:
+            _rec_storage = getattr(self.settings.recipe, "storage", None)
+            _ckpt_dir = _rec_storage and getattr(_rec_storage, "checkpoint_dir", None)
+        if _ckpt_dir:
             for _cb in self.callbacks:
                 if hasattr(_cb, "set_dirpath"):
-                    _cb.set_dirpath(_storage.checkpoint_dir)
+                    _cb.set_dirpath(_ckpt_dir)
 
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
