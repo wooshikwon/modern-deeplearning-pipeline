@@ -120,6 +120,32 @@ class BaseModel(nn.Module, ABC):
         """모델 전용 옵티마이저 설정. None이면 Recipe의 optimizer를 사용한다."""
         return None
 
+    def load_from_export(self, artifact_dir: Path) -> None:
+        """export() 역방향 — export 디렉토리에서 가중치를 로드한다.
+
+        ``reconstruct_model()``이 ``export_info.json``을 감지하면 호출한다.
+        기본 구현은 ``model.safetensors``를 ``load_state_dict``로 로드한다.
+
+        **커스텀 export 구조(backbone+head 분리 등)는 반드시 오버라이드해야 한다.**
+
+        오버라이드 예시 (backbone + value_head 분리 로드)::
+
+            def load_from_export(self, artifact_dir: Path) -> None:
+                from safetensors.torch import load_file
+                import torch
+                self.backbone.load_state_dict(
+                    load_file(artifact_dir / "backbone" / "model.safetensors")
+                )
+                self.value_head.load_state_dict(
+                    torch.load(artifact_dir / "value_head.pt",
+                               map_location="cpu", weights_only=True)
+                )
+        """
+        safetensors_path = Path(artifact_dir) / "model.safetensors"
+        if safetensors_path.exists():
+            from safetensors.torch import load_file as _load_file
+            self.load_state_dict(_load_file(safetensors_path))
+
     def export(self, output_dir: Path) -> None:
         """모델을 output_dir에 export한다.
 

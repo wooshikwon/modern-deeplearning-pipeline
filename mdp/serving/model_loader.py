@@ -112,12 +112,27 @@ def reconstruct_model(
     settings = SettingsFactory().from_artifact(str(artifact_dir), overrides=overrides)
     model = Factory(settings).create_model(skip_base_check=True)
 
+    # export_info.json이 있으면 BaseModel.export()가 생성한 커스텀 export artifact
+    # (e.g., backbone/ + value_head.pt 분리 저장). BaseModel.load_from_export()에 위임.
+    export_info_path = artifact_dir / "export_info.json"
+
     # adapter_config.json이 있으면 PEFT adapter artifact
     adapter_config_path = artifact_dir / "adapter_config.json"
     adapter_safetensors = artifact_dir / "adapter_model.safetensors"
     safetensors_path = artifact_dir / "model.safetensors"
 
-    if adapter_config_path.exists() or adapter_safetensors.exists():
+    if export_info_path.exists():
+        target = getattr(model, "module", model)
+        if hasattr(target, "load_from_export"):
+            target.load_from_export(artifact_dir)
+        else:
+            logger.warning(
+                "export_info.json 있지만 load_from_export() 없음 — "
+                "BaseModel 서브클래스인지 확인하세요: %s", type(target).__name__
+            )
+        # export는 이미 merge된 가중치이므로 merge_and_unload 불필요.
+        # device_map은 추후 필요 시 추가.
+    elif adapter_config_path.exists() or adapter_safetensors.exists():
         # adapter는 항상 CPU에서 먼저 로드 + merge
         load_checkpoint_weights(model, artifact_dir)
         if merge and hasattr(model, "merge_and_unload"):
