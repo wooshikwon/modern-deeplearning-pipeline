@@ -110,7 +110,15 @@ def reconstruct_model(
     from mdp.settings.factory import SettingsFactory
 
     settings = SettingsFactory().from_artifact(str(artifact_dir), overrides=overrides)
-    model = Factory(settings).create_model(skip_base_check=True)
+    # RL recipe는 top-level `model` 섹션에 pretrained가 없고 `rl.models.policy`에 있다.
+    # create_model()은 recipe.model만 보므로 RL recipe에서 크래시한다.
+    # RL recipe이면 create_models()["policy"]를 사용한다.
+    factory = Factory(settings)
+    if settings.recipe.rl is not None:
+        models = factory.create_models(skip_base_check=True)
+        model = models.get("policy") or next(iter(models.values()))
+    else:
+        model = factory.create_model(skip_base_check=True)
 
     # export_info.json이 있으면 BaseModel.export()가 생성한 커스텀 export artifact
     # (e.g., backbone/ + value_head.pt 분리 저장). BaseModel.load_from_export()에 위임.
