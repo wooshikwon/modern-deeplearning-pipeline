@@ -47,7 +47,7 @@ class ModelCheckpoint(BaseCallback):
 
     def __init__(
         self,
-        dirpath: str | Path = "checkpoints",
+        dirpath: str | Path | None = None,
         monitor: str = "val_loss",
         mode: str = "min",
         save_top_k: int = 3,
@@ -57,7 +57,11 @@ class ModelCheckpoint(BaseCallback):
             msg = f"mode must be 'min' or 'max', got '{mode}'"
             raise ValueError(msg)
 
-        self.dirpath = Path(dirpath)
+        # dirpath=None means "derive from trainer's storage.checkpoint_dir".
+        # Trainer injects the resolved path via set_dirpath() before training starts.
+        # dirpath=str/Path means explicitly set — trainer will not override.
+        self._dirpath_explicit = dirpath is not None
+        self.dirpath = Path(dirpath) if dirpath is not None else Path("checkpoints")
         self.monitor = monitor
         self.mode = mode
         self.save_top_k = save_top_k
@@ -66,6 +70,11 @@ class ModelCheckpoint(BaseCallback):
 
         # (metric_value, checkpoint_path) — worst first for easy eviction
         self.best_models: list[tuple[float, str]] = []
+
+    def set_dirpath(self, dirpath: str | Path) -> None:
+        """Trainer calls this to inject storage.checkpoint_dir when dirpath was not explicit."""
+        if not self._dirpath_explicit:
+            self.dirpath = Path(dirpath)
 
     # ------------------------------------------------------------------
     # Helpers

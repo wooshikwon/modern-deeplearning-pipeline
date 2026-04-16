@@ -277,6 +277,15 @@ class Trainer:
         # Resume
         self._maybe_resume()
 
+        # Inject storage.checkpoint_dir into ModelCheckpoint callbacks that don't have an
+        # explicit dirpath set. This makes --override config.storage.checkpoint_dir=X the
+        # single control point, avoiding dual-setting conflicts between callback YAML and config.
+        _storage = getattr(self.settings.config, "storage", None)
+        if _storage and getattr(_storage, "checkpoint_dir", None):
+            for _cb in self.callbacks:
+                if hasattr(_cb, "set_dirpath"):
+                    _cb.set_dirpath(_storage.checkpoint_dir)
+
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
         start_time = time.time()
