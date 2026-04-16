@@ -823,6 +823,7 @@ class RLTrainer:
             self._generation_kwargs = gen_config.model_dump(exclude_none=True) if hasattr(gen_config, "model_dump") else dict(gen_config)
 
         batch_idx = 0
+        step_logits = None  # on_batch_end 콜백용 마지막 스텝 logits
 
         with mlflow_ctx as mlflow_run:
             if self._is_main_process:
@@ -877,6 +878,8 @@ class RLTrainer:
                                     model=self.policy,
                                     optimizer=self.optimizers["policy"],
                                     scheduler=self.schedulers.get("policy"),
+                                    batch=batch,
+                                    logits=step_logits,
                                 )
 
                         self._fire("on_epoch_end", epoch=self.epoch_counter, metrics={"loss": total_loss / max(num_steps, 1)})
@@ -914,9 +917,9 @@ class RLTrainer:
                     self._fire("on_batch_start", step=self.global_step)
 
                     if needs_gen:
-                        step_loss = self._train_step_generation(batch, device_type)
+                        step_loss, step_logits = self._train_step_generation(batch, device_type)
                     else:
-                        step_loss = self._train_step_offline(batch, device_type, batch_idx)
+                        step_loss, step_logits = self._train_step_offline(batch, device_type, batch_idx)
 
                     batch_idx += 1
                     if step_loss is None:
@@ -936,6 +939,8 @@ class RLTrainer:
                             model=self.policy,
                             optimizer=self.optimizers["policy"],
                             scheduler=self.schedulers.get("policy"),
+                            batch=batch,
+                            logits=step_logits,
                         )
 
                     # RL step-based validation
@@ -1033,8 +1038,15 @@ class RLTrainer:
             }
         return out
 
-    def _train_step_offline(self, batch: dict, device_type: str, batch_idx: int) -> float:
-        """DPO — 데이터가 이미 완성된 경로."""
+    def _train_step_offline(
+        self, batch: dict, device_type: str, batch_idx: int
+    ) -> tuple[float | None, "torch.Tensor | None"]:
+        """DPO — 데이터가 이미 완성된 경로.
+
+        Returns:
+            (loss_scalar, policy_logits) — logits는 on_batch_end 콜백에 전달된다.
+            preference 배치는 logits가 chosen/rejected로 분리되어 있으므로 None을 반환한다.
+        """
         is_preference = "chosen_input_ids" in batch
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
             if is_preference:
@@ -1046,6 +1058,10 @@ class RLTrainer:
                     frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
                 trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
             losses = self.algorithm.compute_loss(trainable_out, frozen_out, batch)
+
+        # policy 로짓 추출 — pointwise 배치에서만 available
+        policy_out = trainable_out.get("policy", {}) if isinstance(trainable_out, dict) else {}
+        step_logits = policy_out.get("logits") if not is_preference else None
 
         step_schedulers = {
             n: s for n, s in self.schedulers.items()
@@ -1062,12 +1078,12 @@ class RLTrainer:
             grad_clip_norm=self.grad_clip_norm,
         )
         if result is None:
-            return None
+            return None, None
         if result is True:
             self.global_step += 1
-        return losses.get("policy", list(losses.values())[0]).item()
+        return losses.get("policy", list(losses.values())[0]).item(), step_logits
 
-    def _train_step_generation(self, batch: dict, device_type: str) -> float:
+    def _train_step_generation(self, batch: dict, device_type: str) -> tuple[float, None]:
         """GRPO / PPO — policy가 텍스트를 생성하고, 그 결과로 학습."""
         from mdp.training.losses.rl import compute_log_probs
 
@@ -1156,9 +1172,10 @@ class RLTrainer:
             last_loss = losses.get("policy", list(losses.values())[0]).item()
 
         if all_nan:
-            return None
+            return None, None
         self.global_step += 1
-        return last_loss
+        # generation 경로는 logits를 수집하지 않는다 (생성 루프 내 중간 logits를 노출하면 과도한 메모리 압력 발생)
+        return last_loss, None
 
     def _compute_rewards(
         self,
