@@ -46,6 +46,9 @@ include = ["mdp*"]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv.extra-build-dependencies]
+flash-attn = ["torch", "setuptools", "packaging"]
+
 [tool.pytest.ini_options]
 markers = [
     "slow: 실모델 로딩이 필요한 통합 테스트 (deselect: -m 'not slow')",
