@@ -9,6 +9,24 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _get_adapter_name(checkpoint_dir: Path) -> str:
+    """adapter_config.json에서 adapter_name을 읽는다. 없으면 PEFT 기본값 "default"로 폴백.
+
+    PEFT load_adapter()는 adapter_name이 필수 위치 인자이므로 반드시 명시해야 한다.
+    adapter_config.json에 adapter_name 필드가 없으면 (PEFT가 저장하지 않는 경우)
+    학습 시 적용된 이름인 "default"로 폴백한다.
+    """
+    import json as _json
+    adapter_cfg_path = checkpoint_dir / "adapter_config.json"
+    if adapter_cfg_path.exists():
+        try:
+            with open(adapter_cfg_path) as f:
+                return _json.load(f).get("adapter_name", "default")
+        except Exception:
+            pass
+    return "default"
+
+
 def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
     """checkpoint/ artifact에서 가중치를 로드한다. resume용 — adapter/safetensors/pt 3가지 분기."""
     import torch
@@ -21,17 +39,9 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
 
     if adapter_path.exists():
         if hasattr(target, "load_adapter"):
-            # adapter_name을 adapter_config.json에서 읽는다.
-            # PEFT load_adapter()는 adapter_name이 필수 위치 인자이므로 명시 필요.
-            import json as _json
-            adapter_cfg_path = checkpoint_dir / "adapter_config.json"
-            if adapter_cfg_path.exists():
-                with open(adapter_cfg_path) as _f:
-                    _adapter_name = _json.load(_f).get("adapter_name", "default")
-            else:
-                _adapter_name = "default"
-            target.load_adapter(str(checkpoint_dir), adapter_name=_adapter_name)
-            logger.info("LoRA adapter loaded from %s (adapter_name=%s)", checkpoint_dir, _adapter_name)
+            adapter_name = _get_adapter_name(checkpoint_dir)
+            target.load_adapter(str(checkpoint_dir), adapter_name=adapter_name)
+            logger.info("LoRA adapter loaded from %s (adapter_name=%s)", checkpoint_dir, adapter_name)
         else:
             logger.warning("adapter_model.safetensors가 있지만 load_adapter 메서드 없음")
     elif safetensors_path.exists():
@@ -122,6 +132,8 @@ def reconstruct_model(
     # RL recipe는 top-level `model` 섹션에 pretrained가 없고 `rl.models.policy`에 있다.
     # create_model()은 recipe.model만 보므로 RL recipe에서 크래시한다.
     # RL recipe이면 create_models()["policy"]를 사용한다.
+    # "policy" 고정은 의도적 — generate/serve/export/inference는 항상 policy 모델을 사용.
+    # value/critic 모델은 훈련 전용이며 serving 경로에서는 필요하지 않다.
     factory = Factory(settings)
     if settings.recipe.rl is not None:
         models = factory.create_models(skip_base_check=True)

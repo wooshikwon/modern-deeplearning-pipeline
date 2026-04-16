@@ -647,8 +647,10 @@ class Trainer:
         if adapter_path.exists():
             # LoRA / PEFT adapter
             if hasattr(target, "load_adapter"):
-                target.load_adapter(str(ckpt_path))
-                logger.info("LoRA adapter loaded from %s", ckpt_path)
+                from mdp.serving.model_loader import _get_adapter_name
+                adapter_name = _get_adapter_name(ckpt_path)
+                target.load_adapter(str(ckpt_path), adapter_name=adapter_name)
+                logger.info("LoRA adapter loaded from %s (adapter_name=%s)", ckpt_path, adapter_name)
             else:
                 logger.warning(
                     "adapter_model.safetensors found but model has no load_adapter method"
