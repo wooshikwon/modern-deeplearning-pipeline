@@ -135,7 +135,6 @@ class ModelCheckpoint(BaseCallback):
                 from peft import PeftModel as _PeftModel
                 _inner = getattr(model, "module", None)
                 if isinstance(model, FSDP) and isinstance(_inner, _PeftModel):
-                    import json as _json
                     import tempfile as _tempfile
                     from safetensors import safe_open as _safe_open
                     from safetensors.torch import save_file as _save_file
@@ -161,11 +160,9 @@ class ModelCheckpoint(BaseCallback):
                             }
                             _save_file(_adapter_sd, ckpt_dir / "adapter_model.safetensors")
 
-                            # adapter_config.json: peft_config에서 직렬화
+                            # adapter_config.json: PEFT 자체 직렬화 사용 (set → list 자동 변환)
                             _peft_cfg = next(iter(_inner.peft_config.values()))
-                            (ckpt_dir / "adapter_config.json").write_text(
-                                _json.dumps(_peft_cfg.to_dict(), indent=2)
-                            )
+                            _peft_cfg.save_pretrained(str(ckpt_dir))
                             logger.info(
                                 "Saved PEFT adapter only (FSDP+LoRA, %d keys): %s",
                                 len(_adapter_sd),
