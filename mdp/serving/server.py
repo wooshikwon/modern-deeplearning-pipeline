@@ -79,7 +79,7 @@ def create_handler(
     """
     from mdp.serving.handlers import GenerateHandler, PredictHandler
 
-    tokenizer = _load_tokenizer(model_dir, recipe)
+    tokenizer = _load_tokenizer(model_dir, recipe, model)
     transform = _load_transform(recipe)
 
     if recipe.task in ("text_generation", "seq2seq"):
@@ -93,21 +93,28 @@ def create_handler(
         return PredictHandler(model, tokenizer, transform, recipe, serving_config=serving_config)
 
 
-def _load_tokenizer(model_dir: Path | None, recipe: Any) -> Any:
-    """tokenizer를 로드한다. model_dir 우선, 없으면 recipe fallback."""
+def _load_tokenizer(model_dir: Path | None, recipe: Any, model: Any = None) -> Any:
+    """tokenizer를 로드한다. model_dir 우선, 없으면 recipe fallback.
+
+    model이 주어지면 아키텍처에 맞는 padding_side를 자동 설정한다.
+    decoder-only(LLaMA 등) → 'left', encoder-decoder(T5, BART 등) → 'right'.
+    """
+    from mdp.serving.model_loader import _resolve_padding_side
+    padding_side = _resolve_padding_side(model) if model is not None else "left"
+
     # 1. model_dir에서 시도
     if model_dir is not None:
         tokenizer_json = model_dir / "tokenizer.json"
         tokenizer_config = model_dir / "tokenizer_config.json"
         if tokenizer_json.exists() or tokenizer_config.exists():
             from transformers import AutoTokenizer
-            return AutoTokenizer.from_pretrained(str(model_dir))
+            return AutoTokenizer.from_pretrained(str(model_dir), padding_side=padding_side)
 
     # 2. recipe에서 fallback — tokenizer는 collator _component_의 init_args
     tokenizer_name = recipe.data.collator.get("tokenizer") if isinstance(recipe.data.collator, dict) else None
     if tokenizer_name:
         from transformers import AutoTokenizer
-        return AutoTokenizer.from_pretrained(tokenizer_name)
+        return AutoTokenizer.from_pretrained(tokenizer_name, padding_side=padding_side)
 
     return None
 

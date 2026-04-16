@@ -112,10 +112,11 @@ def run_generate(
             model.eval()
 
             tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(pretrained)
-            tokenizer = AutoTokenizer.from_pretrained(tok_name)
+            from mdp.serving.model_loader import _resolve_padding_side
+            tokenizer = AutoTokenizer.from_pretrained(tok_name, padding_side=_resolve_padding_side(model))
         else:
             # 기존 artifact 분기: reconstruct_model로 Recipe 기반 로드
-            from mdp.serving.model_loader import reconstruct_model
+            from mdp.serving.model_loader import reconstruct_model, _resolve_padding_side
 
             model, settings = reconstruct_model(
                 model_path, merge=True, device_map=device_map, overrides=overrides,
@@ -123,7 +124,7 @@ def run_generate(
             model.eval()
 
             tok_name = tokenizer_name or _resolve_tokenizer_name(settings)
-            tokenizer = AutoTokenizer.from_pretrained(tok_name)
+            tokenizer = AutoTokenizer.from_pretrained(tok_name, padding_side=_resolve_padding_side(model))
 
         # 콜백 로드
         loaded_callbacks: list = []

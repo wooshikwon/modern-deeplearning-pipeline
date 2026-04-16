@@ -285,7 +285,8 @@ def run_inference(
             model = PretrainedResolver.load(pretrained, **model_kwargs)
 
             tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(pretrained)
-            tokenizer = AutoTokenizer.from_pretrained(tok_name)
+            from mdp.serving.model_loader import _resolve_padding_side
+            tokenizer = AutoTokenizer.from_pretrained(tok_name, padding_side=_resolve_padding_side(model))
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 

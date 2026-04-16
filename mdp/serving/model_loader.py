@@ -58,6 +58,19 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
         logger.warning("체크포인트에 모델 가중치 파일이 없습니다: %s", checkpoint_dir)
 
 
+def _resolve_padding_side(model: Any) -> str:
+    """모델 아키텍처에 맞는 padding_side를 반환한다.
+
+    decoder-only (LLaMA, GPT, Mistral 등): 'left'
+      → generate()는 마지막 토큰에서 이어서 생성하므로 PAD가 왼쪽에 있어야 한다.
+    encoder-decoder (T5, BART 등): 'right'
+      → encoder가 전체 시퀀스를 처리하므로 오른쪽 패딩이 자연스럽다.
+    """
+    cfg = getattr(model, "config", None)
+    is_enc_dec = getattr(cfg, "is_encoder_decoder", False)
+    return "right" if is_enc_dec else "left"
+
+
 def _find_checkpoint_path(artifact_dir: Path) -> str | None:
     """device_map 로딩에 사용할 체크포인트 경로를 찾는다."""
     safetensors_path = artifact_dir / "model.safetensors"
