@@ -21,8 +21,17 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
 
     if adapter_path.exists():
         if hasattr(target, "load_adapter"):
-            target.load_adapter(str(checkpoint_dir))
-            logger.info("LoRA adapter loaded from %s", checkpoint_dir)
+            # adapter_name을 adapter_config.json에서 읽는다.
+            # PEFT load_adapter()는 adapter_name이 필수 위치 인자이므로 명시 필요.
+            import json as _json
+            adapter_cfg_path = checkpoint_dir / "adapter_config.json"
+            if adapter_cfg_path.exists():
+                with open(adapter_cfg_path) as _f:
+                    _adapter_name = _json.load(_f).get("adapter_name", "default")
+            else:
+                _adapter_name = "default"
+            target.load_adapter(str(checkpoint_dir), adapter_name=_adapter_name)
+            logger.info("LoRA adapter loaded from %s (adapter_name=%s)", checkpoint_dir, _adapter_name)
         else:
             logger.warning("adapter_model.safetensors가 있지만 load_adapter 메서드 없음")
     elif safetensors_path.exists():
