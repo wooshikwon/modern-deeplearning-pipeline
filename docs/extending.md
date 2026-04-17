@@ -437,12 +437,45 @@ compute:
       custom_param: value
 ```
 
-`BaseStrategy` 인터페이스의 5개 메서드를 구현해야 한다:
-- `setup(model, device)` — 모델 래핑
-- `setup_models(models, trainable_names, device)` — RL 멀티 모델
+`BaseStrategy` 인터페이스는 **필수 3** + **선언적 브리지 2** + **선택 2** 로 구성된다.
+
+### 필수 메서드 (abstract)
+
+- `setup(model, device, optimizer=None)` — 모델을 분산 래퍼로 감싸 반환
 - `save_checkpoint(model, path)` — 체크포인트 저장
 - `load_checkpoint(model, path)` — 체크포인트 로드
-- `cleanup()` — 분산 프로세스 정리
+
+### 선언적 계약 브리지 (default 제공, 필요 시 override)
+
+trainer는 모델의 `training_step` / `validation_step` / 기타 custom 메서드를 분산 래퍼 위에서 호출할 때 아래 두 메서드를 통해 dispatch한다. 모델 구현자는 분산 래퍼를 의식하지 않고 plain 메서드를 선언하면 되고, 커스텀 전략은 필요에 따라 이 메서드들만 override하면 된다.
+
+- `unwrap(wrapped_model) -> nn.Module` — 분산 래퍼를 벗긴 실제 model 반환. `hasattr` / `getattr` 같은 **read-only** 접근용. 기본 구현은 no-op(단일 GPU/래핑 없음). DDP/FSDP는 `.module`을 반환하도록 override.
+
+- `invoke_custom(wrapped_model, method_name, *args, **kwargs)` — custom 메서드를 분산 의미(gradient sync, FSDP all-gather)를 보존한 채 호출한다. 기본 구현은 `unwrap` 후 `getattr(...)(...)`로 **DDP에는 충분하다** (backward autograd hook이 parameter 단위로 sync를 보장). FSDP는 이 경로로 호출하면 `embed_tokens.weight`가 1-D shard로 남아 `RuntimeError: 'weight' must be 2-D`가 발생하므로, wrapper의 `forward`를 custom 메서드로 일시 swap한 뒤 wrapper를 호출하는 패턴으로 override해야 한다 (`mdp/training/strategies/fsdp.py` 참조).
+
+```python
+# 예: 새 전략을 만들 때 두 브리지 중 필요한 것만 override
+from mdp.training.strategies.base import BaseStrategy
+
+class MyParallel(BaseStrategy):
+    def setup(self, model, device, optimizer=None):
+        return MyParallelWrapper(model.to(device))
+
+    def unwrap(self, wrapped_model):
+        # 래퍼가 .inner 속성으로 원본을 노출한다면
+        return getattr(wrapped_model, "inner", wrapped_model)
+
+    # invoke_custom은 기본 구현(unwrap + getattr)로 충분하면 생략
+    # 래퍼 forward 경로를 타야 올바르면 override
+
+    def save_checkpoint(self, model, path): ...
+    def load_checkpoint(self, model, path): ...
+```
+
+### 선택 메서드
+
+- `setup_models(models, trainable_names, device, optimizers=None)` — RL 멀티 모델용. 기본은 각 모델을 `setup`으로 감싸되, frozen 모델(`trainable_names`에 없음)은 device 이동만 수행
+- `cleanup()` — `dist.destroy_process_group()` 등 정리 작업
 
 ---
 
