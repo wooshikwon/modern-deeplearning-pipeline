@@ -46,8 +46,16 @@ include = ["mdp*"]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
-[tool.uv.extra-build-dependencies]
-flash-attn = ["torch", "setuptools", "packaging"]
+# [tool.uv.extra-build-dependencies] —  uv가 현재 "unknown field"로 무시 (경고 출력).
+# 이론상 이 블록은 flash-attn 빌드의 PEP 517 build isolation env에 torch 등을
+# 주입해야 하지만 uv 쪽 스키마 미지원으로 실효 없음.
+# 실제 해결책은 setup 스크립트(scripts/vast_setup.sh)에서 flash-attn을 별도로
+# `uv pip install flash-attn==X.Y.Z --no-build-isolation`으로 설치하는 것.
+# 상세: weighted_ntp 저장소의 scripts/vast_setup.sh 및 vault
+# infra/vast-ai/access.md "의존성 설치 시 flash-attn 주의" 섹션.
+# 향후 uv가 이 필드를 지원하면 주석 해제:
+#   [tool.uv.extra-build-dependencies]
+#   flash-attn = ["torch", "setuptools", "packaging"]
 
 [tool.pytest.ini_options]
 markers = [
