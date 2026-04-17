@@ -244,11 +244,16 @@ storage:
   checkpoint_every_n_steps: 500             # (선택) N 스텝마다 체크포인트 저장
   output_dir: ./outputs
 
-serving:                                    # mdp serve 전용
-  max_batch_size: 1
-  batch_window_ms: 50.0
-  device_map: auto                          # auto | balanced | sequential
-  max_memory: '{"0": "24GiB", "1": "40GiB"}'
+serving:                                    # mdp serve 전용 (선택 — 생략 시 기본값)
+  # --- 실제 동작하는 필드 ---
+  max_batch_size: 1                         # PredictHandler 동적 배칭 상한
+  batch_window_ms: 50.0                     # 동적 배칭 시간 창 (ms)
+  device_map: auto                          # auto | balanced | sequential — from_pretrained(device_map=)로 전달
+  max_memory: '{"0": "24GiB", "1": "40GiB"}'  # GPU별 상한 (JSON 문자열 또는 dict)
+  # --- Reserved (schema·validator 존재, serve.py 미사용) ---
+  backend: torchserve                       # 현재 mdp serve는 uvicorn+FastAPI 고정. validator가 vllm+비호환 task만 차단.
+  model_repository: null                    # 향후 TorchServe 통합용 예약 필드
+  instance_count: 1                         # 향후 multi-worker 대비 예약 필드
 
 job:
   resume: auto                              # disabled | auto | 체크포인트 경로

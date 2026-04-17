@@ -55,10 +55,10 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 --prompts <jsonl>          프롬프트 JSONL 파일 (필수)
 --prompt-field <name>      JSONL에서 프롬프트 텍스트 필드명 (기본 "prompt")
 -o, --output <path>        출력 JSONL 경로 (기본 ./generated.jsonl)
---max-new-tokens N         생성 최대 토큰 수 (기본 256)
---temperature F            샘플링 temperature (기본 1.0)
---top-p F                  nucleus sampling p (기본 1.0)
---top-k N                  top-k sampling (기본 50)
+--max-new-tokens N         생성 최대 토큰 수
+--temperature F            샘플링 temperature
+--top-p F                  nucleus sampling p
+--top-k N                  top-k sampling
 --do-sample                샘플링 사용 여부
 --num-samples N            프롬프트당 생성 횟수 (기본 1)
 --batch-size N             배치 크기 (기본 1)
@@ -66,6 +66,8 @@ YAML 설정으로 딥러닝 모델의 학습, 추론, 서빙을 수행하는 CLI
 --device-map <strategy>    multi-GPU 분산 배치
 --dtype / --trust-remote-code / --attn-impl   모델 로딩 옵션 (inference와 동일)
 ```
+
+> **생성 파라미터 폴백 순서**: `--max-new-tokens`, `--temperature`, `--top-p`, `--top-k`, `--do-sample`은 CLI 미지정 시 `None`으로 전달되고, Recipe의 `generation:` 섹션 값 → `GenerationSpec` 기본값(`max_new_tokens=256`, `temperature=1.0`, `top_p=1.0`, `top_k=50`, `do_sample=True`) 순으로 폴백한다. `--num-samples`, `--batch-size`는 CLI 레벨에서 각각 1로 기본 적용.
 
 ## Agent Discovery Flow
 
@@ -322,13 +324,20 @@ storage:
   output_dir: str               # 기본 ./outputs
 
 serving:                        # mdp serve 전용
-  backend: str                  # torchserve | vllm
-  model_repository: str
-  max_batch_size: int           # 기본 1
-  instance_count: int           # 기본 1
-  batch_window_ms: float        # 기본 50.0ms
-  device_map: str               # auto | balanced | sequential
-  max_memory: {gpu_id: size}    # GPU별 메모리 한도
+  # --- 실제 동작하는 필드 ---
+  max_batch_size: int           # 기본 1. PredictHandler의 동적 배칭 상한
+  batch_window_ms: float        # 기본 50.0ms. 동적 배칭 시간 창
+  device_map: str               # auto | balanced | sequential (from_pretrained(device_map=))
+  max_memory: {gpu_id: size}    # GPU별 메모리 한도 (예: {"0": "24GiB"})
+  # --- Reserved (schema·validator는 존재하나 serve.py가 미사용) ---
+  backend: str                  # 기본 "torchserve". 현재 mdp serve는 uvicorn+FastAPI 고정.
+                                # compat_validator는 backend == "vllm" + 비호환 task를 에러로 잡지만,
+                                # 실제 vLLM/TorchServe 백엔드 라우팅은 미구현.
+  model_repository: str         # 미사용 (향후 TorchServe 통합 대비 예약)
+  instance_count: int           # 기본 1. 미사용 (향후 multi-worker 대비 예약)
+
+> `mdp serve`는 항상 uvicorn + FastAPI로 실행된다. vLLM/TorchServe로 대체 서빙이 필요하면
+> `mdp export`로 모델을 패키징한 뒤 해당 런타임에 직접 전달한다.
 
 job:
   name: str
@@ -407,22 +416,7 @@ adapter:
 | `embed.` | `token`, `pos` | Embedding layers |
 | `conv.` | `dw` | Convolution layers |
 
-**Family별 번역 예시**:
-
-| Semantic | Llama | BERT | GPT-2 | ViT(HF) | ViT-timm | ConvNeXt |
-|----------|-------|------|-------|---------|----------|----------|
-| `attn.q` | q_proj | query | - | query | - | - |
-| `attn.qkv` | - | - | c_attn | - | qkv | - |
-| `attn.o` | o_proj | attention.output.dense | attn.c_proj | attention.output.dense | proj | - |
-| `mlp.fc1` | - | intermediate.dense | c_fc | intermediate.dense | fc1 | fc1 |
-| `mlp.fc2` | - | *미지원* | mlp.c_proj | *미지원* | fc2 | fc2 |
-| `head.cls` | - | classifier | - | classifier | head | head |
-| `head.lm` | lm_head | - | lm_head | - | - | - |
-| `conv.dw` | - | - | - | - | - | conv_dw |
-
-> **ViT(HF) vs ViT-timm**: HF ViT(`config.model_type="vit"`, family=`vit`)는 BERT-style 모듈명을 사용한다. timm ViT(family=`vit_timm`)는 timm 고유 모듈명을 사용한다. HF Swin(family=`swin`)도 BERT-style이며, timm Swin은 `swin_timm` family로 분리되어 있다.
-
-> **BERT-style `mlp.fc2` 미지원**: BERT/ViT(HF)/Swin(HF) 및 이들의 alias(roberta, dinov2, segformer)에서 `mlp.fc2`는 semantic target으로 사용할 수 없다. PEFT의 suffix 매칭에서 `"output.dense"`가 `"attention.output.dense"`까지 매칭하여 의도하지 않은 attention 모듈에도 LoRA가 적용되기 때문이다. MLP output에 LoRA를 적용하려면 `target_modules: [output.dense]`로 raw name을 직접 지정하되, attention output도 함께 매칭됨을 인지해야 한다.
+> **Family별 raw name 매핑 표, ViT(HF)↔ViT-timm 구분, BERT-style `mlp.fc2` 미지원 제약** 등의 상세 참조는 `docs/extending.md`의 "Semantic Module Routing 매핑" 섹션을 본다. AGENT.md에는 일상적으로 필요한 네임스페이스까지만 싣는다.
 
 dot(`.`)이 없는 이름은 raw name으로 취급되어 번역 없이 PEFT에 직접 전달된다. `target`과 `target_modules`를 동시에 지정하면 ValueError로 차단된다.
 

@@ -389,6 +389,42 @@ loss:
 
 ---
 
+## Semantic Module Routing 매핑
+
+`target`, `slot`, `save` 필드의 semantic 이름은 모델 family별로 실제 모듈명으로 번역된다. Factory는 모델 로딩 후 `family_routing` 모듈로 번역을 수행하므로 동일한 Recipe를 서로 다른 family에 재사용할 수 있다. 개념·YAML 예시는 `AGENT.md`의 "Semantic Module Routing" 섹션에 있고, 여기는 **raw name 매핑과 family별 제약의 참조 자료**다.
+
+### Semantic 네임스페이스
+
+| Prefix | 이름 | 설명 |
+|--------|------|------|
+| `attn.` | `q`, `k`, `v`, `o`, `qkv` | Attention projections |
+| `mlp.` | `gate`, `up`, `down`, `fc1`, `fc2`, `gate_up` | MLP/FFN layers |
+| `head.` | `cls`, `lm`, `det`, `seg` | 출력 head |
+| `embed.` | `token`, `pos` | Embedding layers |
+| `conv.` | `dw` | Convolution layers |
+
+### Family별 raw name 매핑
+
+| Semantic | Llama | BERT | GPT-2 | ViT(HF) | ViT-timm | ConvNeXt |
+|----------|-------|------|-------|---------|----------|----------|
+| `attn.q` | q_proj | query | - | query | - | - |
+| `attn.qkv` | - | - | c_attn | - | qkv | - |
+| `attn.o` | o_proj | attention.output.dense | attn.c_proj | attention.output.dense | proj | - |
+| `mlp.fc1` | - | intermediate.dense | c_fc | intermediate.dense | fc1 | fc1 |
+| `mlp.fc2` | - | *미지원* | mlp.c_proj | *미지원* | fc2 | fc2 |
+| `head.cls` | - | classifier | - | classifier | head | head |
+| `head.lm` | lm_head | - | lm_head | - | - | - |
+| `conv.dw` | - | - | - | - | - | conv_dw |
+
+### Family 식별 제약
+
+- **ViT(HF) vs ViT-timm**: HF ViT(`config.model_type="vit"`, family=`vit`)는 BERT-style 모듈명을 사용한다. timm ViT(family=`vit_timm`)는 timm 고유 모듈명을 사용한다. HF Swin(family=`swin`)도 BERT-style이며, timm Swin은 `swin_timm` family로 분리되어 있다.
+- **BERT-style `mlp.fc2` 미지원**: BERT/ViT(HF)/Swin(HF) 및 이들의 alias(roberta, dinov2, segformer)에서 `mlp.fc2`는 semantic target으로 사용할 수 없다. PEFT의 suffix 매칭에서 `"output.dense"`가 `"attention.output.dense"`까지 매칭하여 의도하지 않은 attention 모듈에도 LoRA가 적용되기 때문이다. MLP output에 LoRA를 적용하려면 `target_modules: [output.dense]`로 raw name을 직접 지정하되, attention output도 함께 매칭됨을 인지해야 한다.
+
+dot(`.`)이 없는 이름은 raw name으로 취급되어 번역 없이 PEFT에 직접 전달된다. `target`과 `target_modules`(또는 `save`와 `modules_to_save`)를 동시에 지정하면 ValueError로 차단된다.
+
+---
+
 ## 커스텀 분산 전략
 
 Config에서 `_component_` dict로 지정한다:

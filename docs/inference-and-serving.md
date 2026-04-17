@@ -190,6 +190,8 @@ mdp serve --run-id <id> \
 | `balanced` | GPU 간 균등 분배 |
 | `sequential` | GPU 0부터 순서대로 채움 |
 
+> **device_map은 추론/서빙 전용.** `device_map`으로 분산 배치된 모델(`hf_device_map` 속성 존재)은 `mdp train`·`mdp rl-train`에서 명시적 guard(`mdp/training/trainer.py`, `mdp/training/rl_trainer.py`)에 의해 거부된다. 멀티 GPU 학습에는 `compute.distributed.strategy`의 DDP/FSDP/DeepSpeed를 사용한다.
+
 ### 서빙 아키텍처
 
 - **LLM**: `GenerateHandler` — HuggingFace `TextIteratorStreamer` + SSE 스트리밍. 동시 요청은 lock으로 제한 (1 stream/process)
