@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 import torch
 from torch import nn
@@ -15,6 +16,15 @@ class BaseStrategy(ABC):
     :meth:`save_checkpoint`, and :meth:`load_checkpoint`.  The optional
     :meth:`cleanup` hook is called when the training loop finishes and
     should release any distributed-process-group resources.
+
+    ``unwrap`` and ``invoke_custom`` bridge the gap between MDP's
+    declarative contract ("a model may define ``training_step`` /
+    ``validation_step`` to own its own loss logic") and the runtime
+    reality that those methods are hidden behind distributed wrappers
+    (DDP's ``__getattr__`` does not forward custom methods; FSDP's
+    all-gather hooks only fire through the wrapper's ``forward``).
+    Trainers call these two helpers so model authors can keep writing
+    plain methods without special-casing DDP/FSDP themselves.
     """
 
     @abstractmethod
@@ -39,6 +49,58 @@ class BaseStrategy(ABC):
     @abstractmethod
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
         """Restore a checkpoint from *path* into *model* and return it."""
+
+    # ------------------------------------------------------------------
+    # Declarative-contract bridges
+    # ------------------------------------------------------------------
+
+    def unwrap(self, wrapped_model: nn.Module) -> nn.Module:
+        """Return the underlying model, stripping any distributed wrapper.
+
+        Use this for **read-only** attribute access — ``hasattr``, ``getattr``,
+        reading ``.config``, listing parameters, and the like.  For **calling**
+        a custom method whose semantics depend on wrapper hooks (gradient
+        synchronization, parameter all-gather), use :meth:`invoke_custom`
+        instead.
+
+        Default: no-op.  Subclasses that wrap the model (DDP, FSDP) override
+        to return ``wrapped_model.module``.
+        """
+        return wrapped_model
+
+    def invoke_custom(
+        self,
+        wrapped_model: nn.Module,
+        method_name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """Invoke a model's custom method while preserving distributed semantics.
+
+        Models may define ``training_step``, ``validation_step``, and similar
+        methods to encapsulate non-standard loss / evaluation logic (e.g.
+        Bradley-Terry pairwise ranking in a value model).  Those methods are
+        not forwarded through DDP's ``__getattr__`` and must not short-circuit
+        FSDP's all-gather hooks — hence this strategy-specific dispatch.
+
+        Default implementation: resolve the method on the unwrapped model and
+        call it directly.  This is correct for:
+
+        - Unwrapped models (``strategy is None`` path where the trainer
+          performs plain calls).
+        - DDP: its gradient synchronization is driven by autograd hooks on
+          parameters, so calling through ``.module`` leaves that machinery
+          intact.  ``DDPStrategy`` therefore relies on this default and only
+          overrides :meth:`unwrap`.
+
+        FSDP and any other strategy whose forward path carries essential
+        hooks must override this method.
+        """
+        return getattr(self.unwrap(wrapped_model), method_name)(*args, **kwargs)
+
+    # ------------------------------------------------------------------
+    # Multi-model (RL) setup
+    # ------------------------------------------------------------------
 
     def setup_models(
         self,

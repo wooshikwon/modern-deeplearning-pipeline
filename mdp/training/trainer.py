@@ -538,28 +538,31 @@ class Trainer:
             if labels is None:
                 raise ValueError("배치에 'labels' 키가 없습니다")
             return self.loss_fn(logits, labels)
-        else:
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-            if isinstance(self.model, FSDP):
-                # self.model.training_step bypasses FSDP.__call__ via __getattr__ delegation:
-                # Python resolves .training_step to a bound method on the inner model,
-                # so FSDP's root all-gather hooks never fire and embed_tokens.weight
-                # remains a 1-D shard → RuntimeError: 'weight' must be 2-D.
-                # Fix: swap inner module's forward ← training_step, then call through FSDP.
-                inner = self.model.module
-                _saved_fwd = inner.forward
-                inner.forward = inner.training_step
-                try:
-                    return self.model(batch)
-                finally:
-                    inner.forward = _saved_fwd
-            return self.model.training_step(batch)
+        # Recipe가 loss를 지정하지 않은 경우 (예: loss: null), model이 자체
+        # training_step을 갖고 있다는 선언이다. DDP/FSDP 래핑 이후에도 이 호출이
+        # 분산 의미(gradient all-reduce, FSDP all-gather)를 보존하도록 strategy에
+        # 위임한다. strategy가 없으면(=단일 GPU) 그대로 직접 호출한다.
+        return self._invoke_model_method("training_step", batch)
+
+    def _invoke_model_method(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
+        """Strategy가 있으면 분산 의미를 보존해 호출, 없으면 직접 호출한다."""
+        if self.strategy is not None:
+            return self.strategy.invoke_custom(self.model, method_name, *args, **kwargs)
+        return getattr(self.model, method_name)(*args, **kwargs)
+
+    def _unwrapped_model(self) -> nn.Module:
+        """hasattr/getattr 같은 read-only 접근용. 분산 래퍼를 벗긴 model 반환."""
+        if self.strategy is not None:
+            return self.strategy.unwrap(self.model)
+        return self.model
 
     @torch.no_grad()
     def _validate(self, epoch: int) -> dict[str, float]:
         self.model.eval()
         all_metrics: dict[str, list[float]] = {}
-        use_fallback = not hasattr(self.model, "validation_step")
+        # DDP/FSDP 래핑 상태에선 ``hasattr(self.model, "validation_step")``가 False를
+        # 반환해 silent fallback으로 빠질 수 있다. unwrap된 실제 model에서 검사한다.
+        use_fallback = not hasattr(self._unwrapped_model(), "validation_step")
 
         for batch in self.val_loader:
             batch = self._move_to_device(batch)
@@ -567,7 +570,7 @@ class Trainer:
                 metrics = self._validate_fallback(batch)
             else:
                 try:
-                    metrics = self.model.validation_step(batch)
+                    metrics = self._invoke_model_method("validation_step", batch)
                 except NotImplementedError:
                     use_fallback = True
                     metrics = self._validate_fallback(batch)

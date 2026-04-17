@@ -133,6 +133,52 @@ class FSDPStrategy(BaseStrategy):
 
         return wrapped
 
+    def unwrap(self, wrapped_model: nn.Module) -> nn.Module:
+        """FSDP도 ``.module``로 실제 model에 도달한다.
+
+        주의: 이 메서드는 hasattr/getattr 같은 **read-only** 접근에만 사용한다.
+        custom 메서드 **호출**은 ``invoke_custom``을 거쳐야 한다 — unwrap한
+        module에 직접 호출하면 FSDP root의 all-gather 훅이 발동하지 않아
+        파라미터가 shard 상태로 남고 RuntimeError가 발생한다.
+        """
+        return getattr(wrapped_model, "module", wrapped_model)
+
+    def invoke_custom(
+        self,
+        wrapped_model: nn.Module,
+        method_name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        """FSDP에서 model의 custom 메서드를 호출한다 (forward swap trick).
+
+        문제: ``wrapped_model.training_step(batch)``를 쓰면 Python이
+        ``FSDP.__getattr__``을 타고 내부 module의 bound method를 반환해 버린다.
+        그 결과 FSDP의 root all-gather 훅이 발동하지 않아, ``embed_tokens.weight``
+        같은 파라미터가 1-D shard 그대로 forward에 들어가 ``RuntimeError:
+        'weight' must be 2-D``로 터진다.
+
+        해결: wrapper의 ``forward`` 슬롯에 custom 메서드를 일시적으로 swap하고
+        ``wrapped_model(batch)``를 호출한다. 이 경로는 FSDP의 forward pre-hook
+        을 정상적으로 트리거해 all-gather가 발생한 뒤 custom 메서드 본문이
+        실행되고, 끝난 뒤 reduce-scatter도 정상 수행된다.
+
+        FSDPStrategy 객체를 쓰지만 인스턴스가 실제로 FSDP가 아닌 경우(예: frozen
+        model이 NO_SHARD로 래핑되지 않았을 때) base 구현으로 fallback 한다.
+        """
+        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+
+        if not isinstance(wrapped_model, FSDP):
+            return super().invoke_custom(wrapped_model, method_name, *args, **kwargs)
+
+        inner = wrapped_model.module
+        saved_forward = inner.forward
+        inner.forward = getattr(inner, method_name)
+        try:
+            return wrapped_model(*args, **kwargs)
+        finally:
+            inner.forward = saved_forward
+
     def save_checkpoint(self, model: nn.Module, path: str) -> None:
         import torch.distributed as dist
         from torch.distributed.fsdp import (
