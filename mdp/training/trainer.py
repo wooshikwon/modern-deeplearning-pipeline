@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import signal
 import sys
 import time
 from contextlib import nullcontext
@@ -24,6 +25,7 @@ from torch.utils.data import DataLoader
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
+    aggregate_checkpoint_stats,
     backward_and_step,
     create_callbacks,
     create_expert_parallel,
@@ -90,6 +92,13 @@ class Trainer:
         self.start_epoch = 0
         self._resume_step_in_epoch = 0
         self.last_metrics: dict[str, float] = {}
+
+        # Signal handling — SIGTERM/SIGINT로 graceful stop 요청을 받는 플래그.
+        # train() 진입 시 SIGTERM/SIGINT handler가 self._stop_requested = True를 세우고,
+        # 현재 step 경계에서 break하여 finally 블록(cleanup + on_train_end + summary)이
+        # 정상적으로 실행되도록 한다.
+        self._stop_requested: bool = False
+        self._stop_signal_name: str | None = None
 
     # ── Component creation ──
 
@@ -216,6 +225,8 @@ class Trainer:
             self.expert_parallel.scatter_experts(self.model, self.device)
 
     def _should_stop(self) -> bool:
+        if self._stop_requested:
+            return True
         return any(
             getattr(cb, "should_stop", False) for cb in self.callbacks
         )
@@ -224,6 +235,51 @@ class Trainer:
 
     def train(self) -> dict[str, Any]:
         """학습을 실행하고 최종 메트릭을 반환한다."""
+        # Signal handlers — SIGTERM/SIGINT 수신 시 graceful stop 요청.
+        # 핵심: C 레벨 exit() 경로(SIGTERM 기본 동작)를 피하고, Python handler에서
+        # flag만 세워 현재 step 경계에서 break → finally로 빠지게 한다.
+        # 이로써 cleanup / on_train_end / _log_mlflow_summary가 실행되어
+        # MLflow run이 zombie 상태로 남는 것을 방지한다.
+        # torchrun 분산 환경: 각 rank 프로세스의 main thread가 독립적으로 handler를
+        # 설치하며, torchrun이 SIGTERM을 모든 rank에 전파하면 동일 step에서
+        # break하므로 NCCL collective 데드락도 피한다.
+        self._stop_requested = False
+        self._stop_signal_name = None
+        original_sigterm = signal.getsignal(signal.SIGTERM)
+        original_sigint = signal.getsignal(signal.SIGINT)
+
+        def _signal_handler(signum: int, frame: Any) -> None:
+            sig_name = signal.Signals(signum).name
+            # 첫 시그널만 기록한다. SIGTERM 수신 후 사용자가 Ctrl+C를 누르거나
+            # 외부가 이중 신호를 보내도 `_stop_signal_name`이 덮어쓰이지 않게 하여
+            # stopped_reason tag가 실제 종료 원인을 정확히 반영하도록 보장한다.
+            # (spec-trainer-robustness-fixes cycle 1 — 1-3 race 방어)
+            if not self._stop_requested:
+                logger.warning(
+                    "Signal %s received, requesting graceful stop at next step boundary.",
+                    sig_name,
+                )
+                self._stop_signal_name = sig_name
+                self._stop_requested = True
+            else:
+                logger.warning(
+                    "Signal %s received (already stopping due to %s).",
+                    sig_name, self._stop_signal_name,
+                )
+
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+
+        # Duration semantics (C-3): epochs와 max_steps가 둘 다 지정되었을 때
+        # "먼저 도달한 조건에서 종료"라는 암묵적 규칙을 학습 시작 시 1회 기록한다.
+        # 하나만 지정된 경우 의도가 명확하므로 로그를 찍지 않는다(노이즈 방지).
+        if self.epochs is not None and self.max_steps is not None:
+            logger.info(
+                "epochs=%.2f, max_steps=%d 모두 지정됨. 먼저 도달한 조건에서 종료됩니다.",
+                self.epochs,
+                self.max_steps,
+            )
+
         # Expert Parallelism (전략 setup 전에 적용 — hook 설치 + expert 분배)
         if self.expert_parallel is not None:
             if self.strategy is not None and not torch.distributed.is_initialized():
@@ -319,6 +375,13 @@ class Trainer:
 
             try:
                 for epoch in range(self.start_epoch, max_epochs):
+                    if self._stop_requested:
+                        stopped_reason = (
+                            "signal_term"
+                            if self._stop_signal_name == "SIGTERM"
+                            else "signal_int"
+                        )
+                        break
                     if self._should_stop():
                         stopped_reason = "early_stopped"
                         break
@@ -363,21 +426,47 @@ class Trainer:
                 baseline_info = self._maybe_compute_baseline()
 
             finally:
-                # Strategy cleanup
-                if self.strategy is not None:
+                # Nested try/finally 구조: cleanup → on_train_end → summary 중 어디에서
+                # 예외가 재전파되어도 **signal handler 복원은 반드시 실행**되어야 한다.
+                # 또한 `_fire("on_train_end")`가 critical=True 콜백(ModelCheckpoint 등)의
+                # 예외를 재전파하더라도 `_log_mlflow_summary`가 독립적으로 실행되어
+                # MLflow run이 zombie 상태(stopped_reason tag 누락)로 남지 않도록,
+                # on_train_end 호출을 별도 try/except로 감싼다.
+                # (spec-trainer-robustness-fixes cycle 1 — 1-1, 1-2 방어)
+                try:
+                    # Strategy cleanup
+                    if self.strategy is not None:
+                        try:
+                            self.strategy.cleanup()
+                        except Exception as e:
+                            logger.warning(f"Strategy cleanup 실패: {e}")
+
+                    # on_train_end를 MLflow 컨텍스트 안에서 먼저 발화한다.
+                    # EMACallback이 여기서 가중치를 복원하므로,
+                    # 이후 _log_mlflow_summary의 모델 export가 EMA 가중치를 포함한다.
                     try:
-                        self.strategy.cleanup()
+                        self._fire("on_train_end", metrics=self.last_metrics)
                     except Exception as e:
-                        logger.warning(f"Strategy cleanup 실패: {e}")
+                        logger.warning("on_train_end 콜백 실패: %s", e)
 
-                # on_train_end를 MLflow 컨텍스트 안에서 먼저 발화한다.
-                # EMACallback이 여기서 가중치를 복원하므로,
-                # 이후 _log_mlflow_summary의 모델 export가 EMA 가중치를 포함한다.
-                self._fire("on_train_end", metrics=self.last_metrics)
+                    training_duration = time.time() - start_time
+                    if self._is_main_process:
+                        self._log_mlflow_summary(training_duration, stopped_reason)
+                finally:
+                    # Signal handler 복원 — cleanup/on_train_end/_log_mlflow_summary가
+                    # 예외를 던지더라도 handler는 반드시 원복되어야 한다. 라이브러리
+                    # 사용자(Python API로 Trainer 직접 호출) 환경에서 원래 핸들러를
+                    # 그대로 돌려주어 handler 오염 누적을 방지한다.
+                    signal.signal(signal.SIGTERM, original_sigterm)
+                    signal.signal(signal.SIGINT, original_sigint)
 
-                training_duration = time.time() - start_time
-                if self._is_main_process:
-                    self._log_mlflow_summary(training_duration, stopped_reason)
+        # Checkpoint 집계는 rank 0의 _log_mlflow_summary가 계산해 self._checkpoints_saved에
+        # 저장한다. 그 외 rank나 MLflow 경로 미사용 환경에서는 이 속성이 없으므로
+        # 여기서 `aggregate_checkpoint_stats`로 한 번 더 집계해 결과 dict를 보완한다
+        # (동일 duck typing 규칙).
+        checkpoints_saved = getattr(self, "_checkpoints_saved", None)
+        if checkpoints_saved is None:
+            checkpoints_saved, _, _ = aggregate_checkpoint_stats(self.callbacks)
 
         result: dict[str, Any] = {
             "metrics": self.last_metrics,
@@ -385,6 +474,7 @@ class Trainer:
             "total_epochs": last_epoch - self.start_epoch + 1,
             "total_steps": self.global_step,
             "stopped_reason": stopped_reason,
+            "checkpoints_saved": checkpoints_saved,
         }
         if baseline_info is not None:
             result["monitoring"] = baseline_info
@@ -429,6 +519,8 @@ class Trainer:
         for step, batch in enumerate(self.train_loader):
             if step < start_step:
                 continue
+            if self._stop_requested:
+                break
             if self.max_steps and self.global_step >= self.max_steps:
                 break
             if self._total_batch_budget is not None and self._batches_consumed >= self._total_batch_budget:
@@ -883,6 +975,14 @@ class Trainer:
         self, training_duration: float, stopped_reason: str,
     ) -> None:
         """Run 종료 시 최종 메트릭과 config snapshot을 기록한다."""
+        # Checkpoint 집계 — `_common.aggregate_checkpoint_stats`가 duck typing 규칙을
+        # 단일 구현으로 담는다(Trainer/RLTrainer 대칭). `monitor_hint`는 아래 zero-
+        # warning 블록에서 사용하므로 여기서 함께 받아 둔다.
+        total_checkpoints, best_path, monitor_hint = aggregate_checkpoint_stats(
+            self.callbacks,
+        )
+        self._checkpoints_saved = total_checkpoints
+
         try:
             import mlflow
             from mdp.utils.sanitize import sanitize_config
@@ -895,6 +995,12 @@ class Trainer:
                 }
             )
             mlflow.set_tag("stopped_reason", stopped_reason)
+            # Checkpoint 집계 태그 — 상위 오케스트레이터(auto-research 등)가 run 종료 후
+            # artifact 개수를 별도 조회하지 않고도 "산출물이 있는 run인가"를 판정할 수
+            # 있도록 MLflow tag에 고정한다.
+            mlflow.set_tag("checkpoints_saved", str(total_checkpoints))
+            if best_path is not None:
+                mlflow.set_tag("best_checkpoint", str(best_path))
 
             config_dict = sanitize_config(self.settings.model_dump())
             mlflow.log_dict(config_dict, "config/settings.json")
@@ -909,3 +1015,13 @@ class Trainer:
 
         except Exception as e:
             logger.warning(f"MLflow summary 로깅 실패 (학습 결과는 유효합니다): {e}")
+
+        # zero-checkpoint warning — MLflow 기록 성공/실패와 무관하게 항상 발화한다.
+        # 학습은 돌았는데 산출물이 0개인 상황(monitor 오타 등)을 사용자가 놓치지
+        # 않도록 로그 경로에서 한 번 더 알린다. `monitor_hint`는 위의
+        # `aggregate_checkpoint_stats` 호출에서 이미 준비되어 있다.
+        if total_checkpoints == 0:
+            logger.warning(
+                "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
+                monitor_hint,
+            )

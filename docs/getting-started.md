@@ -105,6 +105,11 @@ mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml
 mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml \
   --override training.epochs=5 \
   --override data.dataloader.batch_size=8
+
+# wall-clock 상한 + graceful shutdown
+timeout 2h mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml
+# 2시간 후 SIGTERM → Trainer가 현재 step 완료 후 finally 실행 →
+# MLflow run이 FINISHED로 마감되고 stopped_reason=signal_term tag가 남는다
 ```
 
 학습 결과는 MLflow에 자동 기록된다. 체크포인트는 Config의 `storage.checkpoint_dir`에 저장된다.

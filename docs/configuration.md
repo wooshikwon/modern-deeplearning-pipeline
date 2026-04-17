@@ -94,6 +94,7 @@ data:                                   # 데이터 파이프라인
 
 training:                               # 학습 루프 설정 (순수 설정값)
   epochs: 3                             # epochs 또는 max_steps 중 하나 필수 (float 허용)
+  max_steps: 10000                      # epochs와 동시 지정 가능 — early-hit 규칙 적용
   precision: bf16                       # fp32 | fp16 | bf16
   gradient_accumulation_steps: 4
   gradient_clip_max_norm: 1.0
@@ -130,6 +131,42 @@ monitoring:                             # 드리프트 모니터링 (선택)
   baseline: {max_batches: 100}
   drift: {method: jensen_shannon, threshold: 0.1}
 ```
+
+### Training Duration (epochs × max_steps)
+
+`training.epochs`와 `training.max_steps`는 상호 배타가 아니라 **공존 가능**하다. Pydantic validator `check_training_duration`는 "최소 하나 필수"만 강제한다.
+
+| 설정 | 동작 |
+|---|---|
+| `epochs`만 지정 | 지정한 epoch 수까지 학습 |
+| `max_steps`만 지정 | 지정한 전역 step 수까지 학습 |
+| 둘 다 지정 | **먼저 도달한 조건에서 종료** (early-hit). 학습 시작 시 INFO 로그 1회 ("epochs=..., max_steps=... 모두 지정됨. 먼저 도달한 조건에서 종료됩니다") |
+
+둘 다 지정하는 사용 패턴은 의도된 설계다. 예를 들어 `epochs: 3`을 안전판으로 두고 `max_steps: 200`으로 실제 중단 기준을 지정하거나, recipe에 `epochs`만 두고 CLI `--override training.max_steps=200`으로 주입해도 된다.
+
+### ModelCheckpoint 콜백 옵션
+
+```yaml
+callbacks:
+  - _component_: ModelCheckpoint
+    dirpath: ./checkpoints        # 생략 시 config.storage.checkpoint_dir 사용
+    monitor: val_loss             # metric 이름
+    mode: min                     # min (loss) | max (accuracy)
+    save_top_k: 3                 # 상위 k개만 유지 (나머지 삭제)
+    every_n_steps: 500            # 설정 시 매 N step마다 저장 (검증과 무관)
+    strict: false                 # 기본. true이면 첫 validation에서 monitor 미매칭 시 ValueError
+```
+
+| 옵션 | 기본값 | 설명 |
+|---|---|---|
+| `dirpath` | `config.storage.checkpoint_dir` | 체크포인트 루트 디렉토리. 명시 시 storage override를 무시 |
+| `monitor` | `"val_loss"` | validation metric 이름. `save_top_k`·`best` symlink 갱신 기준 |
+| `mode` | `"min"` | `"min"` 또는 `"max"`. loss 계열은 min, accuracy/f1/auc는 max |
+| `save_top_k` | `3` | 상위 k개 체크포인트만 유지 |
+| `every_n_steps` | `None` | 정수 지정 시 step 기반 저장 활성화 (validation과 독립) |
+| `strict` | `False` | `True`이면 monitor 미매칭 시 즉시 `ValueError` — silent skip 차단 |
+
+`strict`는 자동 스윕 환경에서 "학습은 성공, 산출물은 0개"인 silent failure를 즉시 감지하는 방어선이다. 자세한 동작과 `critical`과의 차이는 [Training Guide](training.md)의 ModelCheckpoint 섹션 참조.
 
 ### Task별 필수 fields
 

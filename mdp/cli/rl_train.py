@@ -140,6 +140,7 @@ def run_rl_train(
                 monitoring=train_result.get("monitoring"),
                 algorithm=train_result.get("algorithm"),
                 run_id=train_result.get("run_id"),
+                checkpoints_saved=train_result.get("checkpoints_saved"),
             )
             emit_result(build_result(
                 command="rl-train", **result.model_dump(exclude_none=True),

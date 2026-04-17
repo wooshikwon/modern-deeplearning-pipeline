@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import time
 from contextlib import nullcontext
 from pathlib import Path
@@ -24,6 +25,7 @@ from torch.utils.data import DataLoader
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
+    aggregate_checkpoint_stats,
     backward_and_step,
     create_callbacks,
     create_expert_parallel,
@@ -136,6 +138,12 @@ class RLTrainer:
         self._recipe_dict = settings.recipe.model_dump()
         self._generation_kwargs: dict[str, Any] = {}
 
+        # Signal handling — Trainer와 동일한 패턴.
+        # SIGTERM/SIGINT 수신 시 while 루프의 조건에서 break하여 finally 블록이
+        # 정상 실행되도록 한다.
+        self._stop_requested: bool = False
+        self._stop_signal_name: str | None = None
+
     def _estimate_total_steps(self) -> int:
         if self.max_steps:
             return self.max_steps
@@ -178,6 +186,8 @@ class RLTrainer:
         }
 
     def _should_stop(self) -> bool:
+        if self._stop_requested:
+            return True
         return any(getattr(cb, "should_stop", False) for cb in self.callbacks)
 
     def _run_rl_validation(self) -> dict[str, float]:
@@ -341,6 +351,15 @@ class RLTrainer:
             logger.warning(f"MLflow params 로깅 실패: {e}")
 
     def _log_mlflow_summary(self, training_duration: float, stopped_reason: str = "completed", policy_state_dict: "dict | None" = None) -> None:
+        # Checkpoint 집계 — `_common.aggregate_checkpoint_stats`가 Trainer와 동일한
+        # duck typing 규칙을 단일 구현으로 제공한다. RL 구성은 Critic + Policy 각각에
+        # ModelCheckpoint를 붙일 수 있어 여러 콜백이 공존해도 `saved_checkpoints`
+        # 속성을 가진 콜백만 누적된다. `monitor_hint`는 아래 zero-warning에서 사용.
+        total_checkpoints, best_path, monitor_hint = aggregate_checkpoint_stats(
+            self.callbacks,
+        )
+        self._checkpoints_saved = total_checkpoints
+
         try:
             import mlflow
             from mdp.utils.sanitize import sanitize_config
@@ -350,6 +369,9 @@ class RLTrainer:
                 "total_steps": self.global_step,
             })
             mlflow.set_tag("stopped_reason", stopped_reason)
+            mlflow.set_tag("checkpoints_saved", str(total_checkpoints))
+            if best_path is not None:
+                mlflow.set_tag("best_checkpoint", str(best_path))
             config_dict = sanitize_config(self.settings.model_dump())
             mlflow.log_dict(config_dict, "config/settings.json")
 
@@ -357,6 +379,14 @@ class RLTrainer:
             self._export_policy_artifact(policy_state_dict=policy_state_dict)
         except Exception as e:
             logger.warning(f"MLflow summary 로깅 실패: {e}")
+
+        # zero-checkpoint warning — 산출물 0인 run을 사용자가 놓치지 않도록.
+        # `monitor_hint`는 위의 `aggregate_checkpoint_stats` 호출에서 이미 준비됨.
+        if total_checkpoints == 0:
+            logger.warning(
+                "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
+                monitor_hint,
+            )
 
     def _gather_fsdp_policy_state_dict(self) -> "dict | None":
         """FSDP 모델의 full state dict를 all-rank 협력으로 수집한다.
@@ -641,6 +671,48 @@ class RLTrainer:
 
     def train(self) -> dict[str, Any]:
         """RL 학습을 실행하고 결과를 반환한다."""
+        # Signal handlers — SIGTERM/SIGINT 수신 시 graceful stop 요청.
+        # Trainer와 대칭. while 루프 조건(`not self._stop_requested`)으로 현재 step
+        # 경계에서 break하여 finally 블록(cleanup + on_train_end + summary)이
+        # 정상적으로 실행되게 한다. MLflow zombie run 방지의 핵심.
+        self._stop_requested = False
+        self._stop_signal_name = None
+        original_sigterm = signal.getsignal(signal.SIGTERM)
+        original_sigint = signal.getsignal(signal.SIGINT)
+
+        def _signal_handler(signum: int, frame: Any) -> None:
+            sig_name = signal.Signals(signum).name
+            # 첫 시그널만 기록한다. SIGTERM 수신 후 사용자가 Ctrl+C를 누르거나
+            # 외부가 이중 신호를 보내도 `_stop_signal_name`이 덮어쓰이지 않게 하여
+            # stopped_reason tag가 실제 종료 원인을 정확히 반영하도록 보장한다.
+            # Trainer._signal_handler와 대칭.
+            # (spec-trainer-robustness-fixes cycle 1 — 1-3 race 방어)
+            if not self._stop_requested:
+                logger.warning(
+                    "Signal %s received, requesting graceful stop at next step boundary.",
+                    sig_name,
+                )
+                self._stop_signal_name = sig_name
+                self._stop_requested = True
+            else:
+                logger.warning(
+                    "Signal %s received (already stopping due to %s).",
+                    sig_name, self._stop_signal_name,
+                )
+
+        signal.signal(signal.SIGTERM, _signal_handler)
+        signal.signal(signal.SIGINT, _signal_handler)
+
+        # Duration semantics (C-3): epochs와 max_steps가 둘 다 지정되었을 때
+        # "먼저 도달한 조건에서 종료"라는 암묵적 규칙을 학습 시작 시 1회 기록한다.
+        # 하나만 지정된 경우 의도가 명확하므로 로그를 찍지 않는다(노이즈 방지).
+        if self.epochs is not None and self.max_steps is not None:
+            logger.info(
+                "epochs=%.2f, max_steps=%d 모두 지정됨. 먼저 도달한 조건에서 종료됩니다.",
+                self.epochs,
+                self.max_steps,
+            )
+
         # Expert Parallelism (전략 setup 전에 적용)
         if self.expert_parallel is not None:
             if self.strategy is not None:
@@ -834,7 +906,7 @@ class RLTrainer:
             try:
                 self._fire("on_epoch_start", epoch=self.epoch_counter)
 
-                while self.global_step < max_steps:
+                while self.global_step < max_steps and not self._stop_requested:
                     if self._should_stop():
                         break
 
@@ -957,48 +1029,80 @@ class RLTrainer:
                         self.last_metrics.update(val_metrics)
 
             finally:
-                avg_loss = total_loss / max(num_steps, 1)
-                self._fire("on_train_end", metrics={"loss": avg_loss})
-
-                # stopped_reason 결정
-                if self._should_stop():
-                    stopped_reason = "early_stopping"
-                elif self.global_step >= max_steps:
-                    stopped_reason = "max_steps"
-                else:
-                    stopped_reason = "completed"
-
-                training_duration = time.time() - start_time
-                # FSDP artifact export needs all ranks for parameter all-gather.
-                # Must happen BEFORE strategy.cleanup() which destroys the process group.
-                # Skip if an exception is in flight (e.g. OOM during forward): FSDP
-                # training state would be FORWARD, not IDLE, causing AssertionError
-                # inside state_dict() pre-hook before any NCCL call can start.
-                import sys as _sys
-                _training_exc = _sys.exc_info()[0]
-                if _training_exc is not None:
-                    logger.warning(
-                        "Training aborted (%s) — skipping FSDP state dict gather",
-                        _training_exc.__name__,
-                    )
-                    fsdp_policy_sd = None
-                else:
-                    fsdp_policy_sd = self._gather_fsdp_policy_state_dict()
-
-                if self.strategy is not None:
+                # Nested try/finally 구조: on_train_end / FSDP gather / cleanup /
+                # _log_mlflow_summary 중 어디에서 예외가 재전파되어도 **signal handler
+                # 복원은 반드시 실행**되어야 한다. 또한 `_fire("on_train_end")`가
+                # critical=True 콜백의 예외를 재전파해도 `_log_mlflow_summary`가
+                # 독립적으로 실행되어 MLflow run이 zombie 상태로 남지 않도록,
+                # on_train_end 호출을 별도 try/except로 감싼다.
+                # Trainer.train()과 동일 패턴.
+                # (spec-trainer-robustness-fixes cycle 1 — 1-1, 1-2 방어)
+                try:
+                    avg_loss = total_loss / max(num_steps, 1)
                     try:
-                        self.strategy.cleanup()
+                        self._fire("on_train_end", metrics={"loss": avg_loss})
                     except Exception as e:
-                        logger.warning(f"Strategy cleanup 실패: {e}")
+                        logger.warning("on_train_end 콜백 실패: %s", e)
 
-                if self._is_main_process:
-                    self._log_mlflow_summary(training_duration, stopped_reason, policy_state_dict=fsdp_policy_sd)
+                    # stopped_reason 결정. signal 수신이 callback early-stop보다 우선.
+                    if self._stop_requested:
+                        stopped_reason = (
+                            "signal_term"
+                            if self._stop_signal_name == "SIGTERM"
+                            else "signal_int"
+                        )
+                    elif self._should_stop():
+                        stopped_reason = "early_stopping"
+                    elif self.global_step >= max_steps:
+                        stopped_reason = "max_steps"
+                    else:
+                        stopped_reason = "completed"
+
+                    training_duration = time.time() - start_time
+                    # FSDP artifact export needs all ranks for parameter all-gather.
+                    # Must happen BEFORE strategy.cleanup() which destroys the process group.
+                    # Skip if an exception is in flight (e.g. OOM during forward): FSDP
+                    # training state would be FORWARD, not IDLE, causing AssertionError
+                    # inside state_dict() pre-hook before any NCCL call can start.
+                    import sys as _sys
+                    _training_exc = _sys.exc_info()[0]
+                    if _training_exc is not None:
+                        logger.warning(
+                            "Training aborted (%s) — skipping FSDP state dict gather",
+                            _training_exc.__name__,
+                        )
+                        fsdp_policy_sd = None
+                    else:
+                        fsdp_policy_sd = self._gather_fsdp_policy_state_dict()
+
+                    if self.strategy is not None:
+                        try:
+                            self.strategy.cleanup()
+                        except Exception as e:
+                            logger.warning(f"Strategy cleanup 실패: {e}")
+
+                    if self._is_main_process:
+                        self._log_mlflow_summary(training_duration, stopped_reason, policy_state_dict=fsdp_policy_sd)
+                finally:
+                    # Signal handler 복원 — cleanup/on_train_end/_log_mlflow_summary가
+                    # 예외를 던지더라도 handler는 반드시 원복되어야 한다.
+                    # Trainer.train()과 동일 패턴.
+                    signal.signal(signal.SIGTERM, original_sigterm)
+                    signal.signal(signal.SIGINT, original_sigint)
 
         # Monitoring baseline (policy 모델 사용)
         monitoring = self._maybe_compute_baseline()
 
         metrics = {"loss": avg_loss}
         metrics.update(self.last_metrics)
+
+        # Checkpoint 집계 — Trainer.train()과 대칭.
+        # rank 0에서는 _log_mlflow_summary가 self._checkpoints_saved에 값을 채워두었고,
+        # 그 외 rank나 MLflow 미사용 환경에서는 `aggregate_checkpoint_stats`로 한 번 더
+        # 집계해 결과 dict를 보완한다(동일 duck typing 규칙).
+        checkpoints_saved = getattr(self, "_checkpoints_saved", None)
+        if checkpoints_saved is None:
+            checkpoints_saved, _, _ = aggregate_checkpoint_stats(self.callbacks)
 
         result = {
             "metrics": metrics,
@@ -1007,6 +1111,7 @@ class RLTrainer:
             "total_epochs": self.epoch_counter,
             "stopped_reason": stopped_reason,
             "algorithm": type(self.algorithm).__name__,
+            "checkpoints_saved": checkpoints_saved,
         }
         if monitoring is not None:
             result["monitoring"] = monitoring

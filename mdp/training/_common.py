@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -18,6 +19,57 @@ from torch.nn.utils import clip_grad_norm_
 from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
+
+
+def aggregate_checkpoint_stats(
+    callbacks: list,
+) -> tuple[int, Path | None, str]:
+    """duck-typed saved_checkpoints 집계. Trainer/RLTrainer 공용.
+
+    Trainer._log_mlflow_summary / RLTrainer._log_mlflow_summary 양쪽이 동일한
+    방식으로 self.callbacks를 순회하며 "저장 개수 합산 + 첫 best 경로 선정 +
+    zero-warning용 monitor hint"를 뽑아내는 블록을 6개 사이트(메인 집계 2 +
+    결과 dict fallback 재집계 2 + monitor hint 2)에 걸쳐 복제해 왔다. 한 쪽을
+    고치면 다른 쪽도 반드시 고쳐야 하는 강결합이므로, spec §3.2의 duck typing
+    규칙을 단일 헬퍼로 확립한다.
+
+    동작 규칙:
+    - ``hasattr(cb, "saved_checkpoints")``만을 기준으로 사용한다 — isinstance 검사
+      대신 duck typing을 써서 ModelCheckpoint 서브클래스, 다중 인스턴스
+      (예: Critic + Policy RL 구성), frozen 모델용 callback(빈 리스트 → 0 기여)을
+      자연스럽게 포함한다.
+    - ``best_path``는 **규칙 A** (첫 non-empty best)를 따른다. ``best_models``는
+      ``[(metric_value, path_str), ...]`` worst-first 정렬이므로 마지막 요소가
+      best이며, 여러 콜백이 있으면 첫 매칭 콜백의 best를 채택한다.
+    - ``monitor_hint``는 ``saved_checkpoints`` 속성을 가진 콜백 중 ``monitor``를
+      가진 것만 CSV로 합쳐 반환한다. 빈 경우 안내 문자열로 대체하여 호출자가
+      그대로 로그에 넣을 수 있게 한다.
+
+    Args:
+        callbacks: Trainer/RLTrainer의 ``self.callbacks`` 리스트.
+
+    Returns:
+        ``(total, best_path, monitor_hint)``:
+        - ``total``: 모든 콜백의 ``saved_checkpoints`` 길이 합산
+        - ``best_path``: 규칙 A로 선정된 best 경로 (없으면 ``None``)
+        - ``monitor_hint``: count=0 warning에 그대로 쓸 수 있는 monitor 이름 CSV
+          (없으면 ``"(no ModelCheckpoint configured)"``)
+    """
+    total = 0
+    best_path: Path | None = None
+    monitor_names: list[str] = []
+    for cb in callbacks:
+        if not hasattr(cb, "saved_checkpoints"):
+            continue
+        total += len(cb.saved_checkpoints)
+        if hasattr(cb, "monitor"):
+            monitor_names.append(cb.monitor)
+        if best_path is None:
+            best_models = getattr(cb, "best_models", None)
+            if best_models:
+                best_path = Path(best_models[-1][1])
+    monitor_hint = ", ".join(monitor_names) or "(no ModelCheckpoint configured)"
+    return total, best_path, monitor_hint
 
 
 def setup_amp(

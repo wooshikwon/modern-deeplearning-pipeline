@@ -61,10 +61,25 @@ class DataSpec(BaseModel):
 
 
 class TrainingSpec(BaseModel):
-    """학습 루프 설정."""
+    """학습 루프 설정.
 
-    epochs: float | None = None
-    max_steps: int | None = None
+    Training duration semantics:
+    - epochs (float | None): 학습할 에폭 수. None이면 max_steps만으로 종료 조건 결정.
+    - max_steps (int | None): 학습할 전역 스텝 수. None이면 epochs만으로 종료 조건 결정.
+    - 두 값 모두 지정되면 먼저 도달한 조건에서 종료된다 (early-hit).
+      예: epochs=3, max_steps=200이면 200 step 도달이 3 epoch 도달보다 빠르면
+      200 step에서 종료.
+    - 최소 하나는 필수(Recipe.check_training_duration validator). 둘 다 None이면 ValueError.
+    """
+
+    epochs: float | None = Field(
+        default=None,
+        description="학습할 에폭 수. max_steps와 함께 지정되면 먼저 도달한 조건에서 종료됨.",
+    )
+    max_steps: int | None = Field(
+        default=None,
+        description="학습할 전역 스텝 수. epochs와 함께 지정되면 먼저 도달한 조건에서 종료됨.",
+    )
     precision: str = "fp32"
     gradient_accumulation_steps: int = 1
     gradient_clip_max_norm: float | None = None

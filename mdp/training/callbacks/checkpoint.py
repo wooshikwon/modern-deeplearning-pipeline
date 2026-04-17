@@ -43,6 +43,13 @@ class ModelCheckpoint(BaseCallback):
     every_n_steps:
         If set, save a checkpoint every *n* training steps regardless
         of validation results (step-level checkpointing).
+    strict:
+        When ``True``, the callback raises ``ValueError`` on the first
+        ``on_validation_end`` call where ``monitor`` is not present in
+        the returned metrics.  When ``False`` (default), a warning is
+        emitted and the save is skipped — preserving legacy behaviour.
+        Note: this is independent from ``self.critical`` (which controls
+        whether the trainer re-raises exceptions thrown by the callback).
     """
 
     def __init__(
@@ -52,6 +59,7 @@ class ModelCheckpoint(BaseCallback):
         mode: str = "min",
         save_top_k: int = 3,
         every_n_steps: int | None = None,
+        strict: bool = False,
     ) -> None:
         if mode not in ("min", "max"):
             msg = f"mode must be 'min' or 'max', got '{mode}'"
@@ -67,9 +75,18 @@ class ModelCheckpoint(BaseCallback):
         self.save_top_k = save_top_k
         self.every_n_steps = every_n_steps
         self.critical: bool = True
+        # strict: monitor 미매칭 시 즉시 실패할지 여부. self.critical과 이름은 비슷하지만
+        # 의미가 다르다 — critical은 콜백 내 예외를 trainer가 재전파할지 결정하는 스위치고,
+        # strict는 ModelCheckpoint가 monitor 미매칭을 silent skip 대신 ValueError로
+        # 전환할지 결정한다. 이름 충돌 방지를 위해 의도적으로 다른 필드로 분리.
+        self.strict: bool = strict
 
         # (metric_value, checkpoint_path) — worst first for easy eviction
         self.best_models: list[tuple[float, str]] = []
+        # 저장에 성공한 체크포인트 디렉토리 목록. _save_checkpoint / save_checkpoint가
+        # 예외 없이 반환한 직후에만 append한다 (타이밍 규칙). Trainer/RLTrainer의
+        # _log_mlflow_summary가 duck typing으로 집계하여 MLflow tag·WARNING에 활용.
+        self.saved_checkpoints: list[Path] = []
 
     def set_dirpath(self, dirpath: str | Path) -> None:
         """Trainer calls this to inject storage.checkpoint_dir when dirpath was not explicit."""
@@ -275,8 +292,12 @@ class ModelCheckpoint(BaseCallback):
             if trainer is not None and hasattr(trainer, "_save_checkpoint"):
                 ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
+                # _save_checkpoint가 예외 없이 완료되어야만 saved_checkpoints에 기록.
+                # 저장 실패 경로에서 리스트에 추가하면 zero-checkpoint 경고의 신뢰성이
+                # 깨진다 ("어설픈 성공 신고" 방지).
                 trainer._save_checkpoint(ckpt_dir)
                 self._update_symlink("latest", ckpt_dir)
+                self.saved_checkpoints.append(ckpt_dir)
                 logger.info("Saved RL checkpoint: %s", ckpt_dir)
             else:
                 model = kwargs.get("model")
@@ -288,11 +309,12 @@ class ModelCheckpoint(BaseCallback):
                     recipe_dict = kwargs.get("recipe_dict")
                     scaler = kwargs.get("scaler")
                     step_in_epoch = kwargs.get("step_in_epoch", 0)
-                    self.save_checkpoint(
+                    ckpt_path = self.save_checkpoint(
                         model, optimizer, scheduler, epoch, global_step, metrics,
                         strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
                         step_in_epoch=step_in_epoch,
                     )
+                    self.saved_checkpoints.append(ckpt_path)
 
     def on_validation_end(
         self,
@@ -301,9 +323,19 @@ class ModelCheckpoint(BaseCallback):
         **kwargs,
     ) -> None:
         if metrics is None or self.monitor not in metrics:
+            available = sorted(metrics.keys()) if metrics else []
+            if self.strict:
+                # strict=True: 사용자가 명시적으로 "monitor 미매칭은 즉시 실패"를 요청.
+                # 학습을 계속하면 silent failure로 산출물이 0개가 되는 상황을 방지.
+                raise ValueError(
+                    f"ModelCheckpoint: monitor metric '{self.monitor}' not found in "
+                    f"validation results. Available: {available}. "
+                    f"Set strict=False to allow silent skip."
+                )
             logger.warning(
-                "ModelCheckpoint: metric '%s' not found, skipping.",
+                "ModelCheckpoint: metric '%s' not found, skipping. Available: %s",
                 self.monitor,
+                available,
             )
             return
 
@@ -321,10 +353,14 @@ class ModelCheckpoint(BaseCallback):
         recipe_dict = kwargs.get("recipe_dict")
         scaler = kwargs.get("scaler")
 
+        # save_checkpoint가 예외 없이 반환해야만 saved_checkpoints에 append.
+        # 실패 경로(저장 중 예외)에서는 아래 append 라인까지 도달하지 않으므로
+        # zero-checkpoint 경고의 신뢰성이 유지된다.
         ckpt_path = self.save_checkpoint(
             model, optimizer, scheduler, epoch, global_step, metrics,
             strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
         )
+        self.saved_checkpoints.append(ckpt_path)
 
         metric_value = metrics[self.monitor]
         self._manage_top_k(metric_value, ckpt_path)

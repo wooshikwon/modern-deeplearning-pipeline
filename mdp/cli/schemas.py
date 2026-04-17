@@ -19,11 +19,14 @@ class TrainResult(BaseModel):
     """mdp train / rl-train --format json 출력 스키마.
 
     데이터 출처:
-    - metrics, total_epochs, total_steps, stopped_reason, duration_seconds
-      → Trainer.train() / RLTrainer.train() 반환 dict
+    - metrics, total_epochs, total_steps, stopped_reason, duration_seconds,
+      checkpoints_saved → Trainer.train() / RLTrainer.train() 반환 dict
     - checkpoint_dir, output_dir → Settings.config.storage
     - monitoring → Trainer._maybe_compute_baseline() 반환값
     - algorithm → RLTrainer.train() 반환 dict (SFT에서는 None)
+    - checkpoints_saved: None은 legacy/unknown(상위 오케스트레이터가 판정 보류),
+      0 이상 정수는 실제 저장 개수. 상위 오케스트레이터(예: auto-research)가
+      artifact 조회 없이 "이 run이 산출물을 남겼는가"를 판정할 때 사용한다.
     """
 
     checkpoint_dir: str | None = None
@@ -36,6 +39,7 @@ class TrainResult(BaseModel):
     monitoring: dict[str, Any] | None = None
     algorithm: str | None = None
     run_id: str | None = None
+    checkpoints_saved: int | None = None
 
 
 # ── mdp inference ──

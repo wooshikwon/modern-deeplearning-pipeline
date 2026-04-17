@@ -115,9 +115,18 @@ mdp list models --task text_generation --format json
   "total_steps": 12600,
   "stopped_reason": "early_stopped",
   "duration_seconds": 3600.5,
+  "checkpoints_saved": 3,
   "monitoring": {"baseline_saved": true}
 }
 ```
+
+**stopped_reason 리터럴**:
+- `mdp train` (SFT): `completed`, `early_stopped`, `max_steps_reached`, `signal_term`, `signal_int`
+- `mdp rl-train` (RL): `completed`, `early_stopping`, `max_steps`, `signal_term`, `signal_int`
+
+`signal_term`/`signal_int`는 외부 시그널로 graceful shutdown된 경우에 기록된다. 상위 에이전트가 `timeout $T mdp train ...`으로 wall-clock 상한을 걸었을 때 이 값으로 판정 가능.
+
+**checkpoints_saved 필드**: 실제 디스크에 저장된 체크포인트 개수. `None`은 legacy/unknown, `0` 이상 정수는 실제 개수. `0`이면 "학습은 성공 반환했으나 산출물이 없다"는 silent failure를 artifact 조회 없이 즉시 감지 가능.
 
 **Inference**:
 ```json
@@ -184,8 +193,21 @@ estimate = run("mdp estimate -r recipe.yaml --format json")
 # 2. Config 조정
 config = adjust_config(estimate)
 
-# 3. 학습
-train_result = run(f"mdp train -r recipe.yaml -c config.yaml --format json")
+# 3. wall-clock 상한을 걸고 학습 (graceful shutdown 보장)
+train_result = run(f"timeout 2h mdp train -r recipe.yaml -c config.yaml --format json")
+
+# 3-1. 산출물 유무 판정 (artifact 조회 없이)
+if train_result["checkpoints_saved"] == 0:
+    # silent failure — monitor 이름 오타 등. recipe 재생성 또는 strict=true 설정
+    continue
+
+# 3-2. 종료 사유 분기
+if train_result["stopped_reason"] == "signal_term":
+    # timeout으로 잘린 경우 → max_steps를 줄이거나 batch_size 조정 후 재시도
+    ...
+elif train_result["stopped_reason"] == "max_steps_reached":
+    # 정상 수렴 전 스텝 한계 도달 → max_steps 증가 검토
+    ...
 
 # 4. 평가
 eval_result = run(f"mdp inference --run-id {train_result['run_id']} "

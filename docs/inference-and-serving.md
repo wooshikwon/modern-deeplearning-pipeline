@@ -274,6 +274,14 @@ mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
 
 ---
 
+## Graceful Shutdown (학습 전용)
+
+`Trainer.train()` / `RLTrainer.train()`은 SIGTERM/SIGINT를 내부에서 처리하여 `timeout` 기반 wall-clock 상한 중단 시에도 MLflow run이 정상 마감되도록 보장한다 (상세: [Training Guide](training.md)의 Graceful Shutdown 섹션).
+
+> **주의**: `mdp inference` / `mdp generate` 추론 경로에는 **현재 signal handler가 없다**. 장시간 배치 추론 중 timeout/Ctrl+C가 들어오면 출력 파일이 부분 저장 상태로 남을 수 있다. 큰 배치 추론은 `--batch-size`와 데이터셋 분할로 wall-clock을 예측 가능하게 관리한다. (후속 spec 후보)
+
+---
+
 ## JSON 출력
 
 모든 명령은 `--format json`을 지원한다. stdout에 JSON, stderr에 로그가 분리 출력된다.

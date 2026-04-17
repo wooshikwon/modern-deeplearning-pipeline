@@ -247,6 +247,8 @@ on_train_end
 - `critical = False` (기본): 예외 발생 시 경고만 출력
 - `critical = True`: 예외가 전파되어 학습 중단 (`ModelCheckpoint`, `EarlyStopping`에 사용)
 
+> **`critical` vs `ModelCheckpoint.strict` 혼동 주의**: 이름은 유사하지만 의미가 다르다. `critical`은 BaseCallback 공통 속성으로 **콜백에서 발생한 예외를 trainer가 재전파할지 결정**한다. `ModelCheckpoint.strict`는 ModelCheckpoint 전용 파라미터로 **monitor 이름이 metric dict에 없을 때 silent skip 대신 즉시 ValueError**로 전환한다. 커스텀 콜백을 작성할 때는 `critical`만 쓰고, monitor 검증이 필요하면 ModelCheckpoint의 `strict: true`를 사용한다. 두 속성은 독립적으로 조합 가능하다.
+
 ---
 
 ## 커스텀 추론 콜백

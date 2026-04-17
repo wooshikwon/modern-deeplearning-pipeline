@@ -584,11 +584,55 @@ compute:
   "metrics": {"val_loss": 0.12, "val_accuracy": 0.95},
   "total_epochs": 27,
   "total_steps": 12600,
-  "stopped_reason": "early_stopped | completed | max_steps_reached",
+  "stopped_reason": "early_stopped | completed | max_steps_reached | signal_term | signal_int",
   "duration_seconds": 3600.5,
+  "checkpoints_saved": 3,
   "monitoring": {"baseline_saved": true, "baseline_path": "mlruns/.../baseline.json"}
 }
 ```
+
+**`stopped_reason` 리터럴**:
+
+| `mdp train` (SFT) | `mdp rl-train` (RL) | 의미 |
+|---|---|---|
+| `completed` | `completed` | 루프 정상 종료 (epochs/steps 소진 전) |
+| `early_stopped` | `early_stopping` | 콜백(EarlyStopping 등) `should_stop=True` |
+| `max_steps_reached` | `max_steps` | `max_steps` 도달 |
+| `signal_term` | `signal_term` | SIGTERM 수신 (외부 `timeout`, K8s eviction 등) |
+| `signal_int` | `signal_int` | SIGINT 수신 (Ctrl+C) |
+
+Trainer/RLTrainer 표기 불일치(`early_stopped` vs `early_stopping`, `max_steps_reached` vs `max_steps`)는 의도된 호환성 유지다. 기존 오케스트레이터 가정을 깨지 않으려 새 리터럴(`signal_term`/`signal_int`)만 대칭으로 추가했다.
+
+**`checkpoints_saved` 필드**: `int | None`. 실제 디스크에 저장된 체크포인트 개수. `None`은 legacy/unknown, `0` 이상 정수는 실제 개수. 상위 오케스트레이터(auto-research 등)가 MLflow artifact 조회 없이 "이 run이 산출물을 남겼는가"를 판정할 때 사용한다. `0`이면 `ModelCheckpoint.monitor` 미매칭 등으로 인한 silent failure를 즉시 감지 가능.
+
+### Graceful Shutdown
+
+`mdp train` / `mdp rl-train`은 SIGTERM·SIGINT를 `Trainer.train()` / `RLTrainer.train()` 내부에서 처리한다. 외부 `timeout` 명령이나 Ctrl+C로 중단되어도:
+
+- 현재 step 경계에서 break → finally(cleanup + on_train_end + MLflow summary) 실행
+- MLflow run이 `FINISHED` 상태로 마감 (zombie RUNNING 아님)
+- `stopped_reason` tag에 `signal_term` 또는 `signal_int`, `checkpoints_saved` tag에 저장 개수 기록
+
+```bash
+# 2시간 wall-clock 상한 + graceful shutdown
+timeout 2h mdp train -r recipe.yaml -c config.yaml --format json
+# → MLflow run FINISHED + stopped_reason=signal_term + final_* metric 정상 기록
+```
+
+첫 시그널만 `stopped_reason`에 반영된다 (SIGTERM 후 Ctrl+C 연타는 race 없이 SIGTERM 유지). 분산 학습에서는 torchrun이 모든 rank에 SIGTERM을 전파하여 동시에 step 경계 break → NCCL deadlock 없음. 추론 경로(`mdp inference`, `mdp generate`)에는 현재 handler가 **없으므로** 장시간 추론에 timeout을 걸면 출력이 부분 저장될 수 있다.
+
+### ModelCheckpoint `strict` 옵션
+
+`ModelCheckpoint`는 `strict: bool = False` 파라미터를 지원한다. `true`로 설정하면 첫 validation에서 `monitor` 이름이 metric dict에 없을 때 즉시 `ValueError`로 학습을 중단시킨다. 기본 `false`는 WARNING(사용 가능한 metric key 목록 포함) 후 저장 skip — 기존 동작.
+
+```yaml
+callbacks:
+  - _component_: ModelCheckpoint
+    monitor: val_loss
+    strict: true    # 자동 스윕에서 monitor 오타를 즉시 감지
+```
+
+자동 스윕에서 "학습은 성공 반환, 산출물은 0개"인 silent failure를 막는 방어선. `critical`(콜백 예외 재전파 스위치)과는 이름만 유사하고 의미가 다르다 — 두 속성은 독립적으로 조합 가능.
 
 ### Inference Result (추가 필드)
 

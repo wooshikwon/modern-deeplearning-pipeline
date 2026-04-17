@@ -43,7 +43,9 @@ training:
   max_steps: 10000
 ```
 
-둘 다 지정하면 먼저 도달하는 조건에서 종료된다.
+둘 다 지정하면 먼저 도달하는 조건에서 종료된다(early-hit). 두 값이 공존하는 것은 의도된 사용 패턴이다 — `epochs`를 안전판으로, `max_steps`를 실제 중단 기준으로 함께 지정하거나, recipe에 `epochs`만 두고 CLI override로 `max_steps`를 주입해도 된다. `Trainer`/`RLTrainer`는 두 값이 모두 set된 채로 진입하면 학습 시작 시점에 INFO 로그를 1회 남겨 정직성을 확보한다("epochs=..., max_steps=... 모두 지정됨. 먼저 도달한 조건에서 종료됩니다"). 하나만 지정된 경우는 무음.
+
+> 구현 근거: `mdp/training/trainer.py` outer break(L388-390), RLTrainer `while` 조건(`mdp/training/rl_trainer.py`의 `while self.global_step < max_steps and not self._stop_requested`). TrainingSpec Field description과 docstring(`mdp/settings/schema.py`)에도 early-hit 규칙이 명시되어 있다.
 
 ### Gradient Accumulation
 
@@ -271,12 +273,19 @@ on_train_start → on_epoch_start → (on_batch_start → on_batch_end)* → on_
   monitor: val_loss
   mode: min                   # min (loss) 또는 max (accuracy)
   save_top_k: 3               # 상위 3개만 유지
-  every_n_steps: 500           # 스텝 기반 저장 (검증과 무관)
+  every_n_steps: 500          # 스텝 기반 저장 (검증과 무관)
+  strict: false               # 기본값. true이면 monitor 미매칭 시 즉시 ValueError
 ```
 
 저장 구조:
 - `latest` → 가장 최근 체크포인트 symlink
 - `best` → 모니터링 메트릭 기준 최고 체크포인트 symlink
+
+**`strict` 옵션의 의미**: validation이 반환한 metric dict에 `monitor` 키가 없을 때의 동작을 선택한다. `strict: false`(기본)는 WARNING 로그(사용 가능한 metric key 목록 포함)를 남기고 저장을 skip — 기존 동작 유지. `strict: true`는 첫 validation에서 즉시 `ValueError`로 학습을 중단시킨다. 사용 시점은 recipe의 monitor 이름 오타나 head/model이 기대한 metric을 반환하지 않는 상황을 즉시 감지하고 싶을 때다. 대규모 자동 스윕(auto-research 등)에서 "학습은 성공, 산출물은 0개"인 silent failure를 막는 방어선으로 유용하다.
+
+`strict`는 콜백의 `critical` 속성과 **이름만 유사하고 의미가 다르다**. `critical`은 콜백에서 발생한 예외를 trainer가 재전파할지 결정하는 공용 스위치이고, `strict`는 ModelCheckpoint 내부의 monitor 미매칭 처리 방식을 결정한다. 둘은 독립적으로 조합 가능하다.
+
+**`TrainResult.checkpoints_saved`**: 학습 종료 후 결과 JSON에 실제 저장된 체크포인트 개수가 `checkpoints_saved: int | None`으로 포함된다. 상위 오케스트레이터가 MLflow artifact 조회 없이도 "이 run이 산출물을 남겼는가"를 1차 판정할 수 있다. `0`이면 monitor 미매칭 등으로 인한 silent failure를 즉시 탐지 가능.
 
 ### EarlyStopping
 
@@ -320,6 +329,53 @@ monitoring:
 
 ---
 
+## Graceful Shutdown
+
+학습 루프가 외부 시그널(사용자 Ctrl+C, 상위 `timeout` 명령, K8s eviction 등)로 중단될 때, MLflow run이 zombie(RUNNING) 상태로 남지 않도록 `Trainer.train()`·`RLTrainer.train()`이 SIGTERM·SIGINT를 내부에서 처리한다.
+
+### 동작 원칙
+
+- 학습 시작 시점에 `train()`이 SIGTERM·SIGINT handler를 설치한다. handler는 `_stop_requested = True` flag만 세우고, step 경계에서 `_should_stop()`이 이 flag를 감지하여 loop break로 이어진다. 배치 중간에 gradient 훼손 없이 "다음 step 이후 graceful shutdown"으로 전환된다
+- finally 블록이 실행되어 `strategy.cleanup()` → `on_train_end` 콜백 → `_log_mlflow_summary`가 순차 실행되므로, MLflow run에 `final_*` metric과 `stopped_reason` tag가 정상 기록된다
+- finally는 nested try/finally로 구조화되어 있어, `on_train_end` 콜백(ModelCheckpoint, EMA 등)이 예외를 던져도 `_log_mlflow_summary`는 독립적으로 실행되고, 어떤 예외가 발생해도 handler 복원은 최종적으로 보장된다
+- 첫 시그널만 `_stop_signal_name`에 기록된다. SIGTERM 수신 후 사용자가 Ctrl+C를 연타해도 `stopped_reason` tag가 SIGTERM 기준으로 유지된다
+
+### timeout과 조합 시 보장사항
+
+```bash
+# 2시간 wall-clock 상한으로 학습 실행
+timeout 2h mdp train -r recipe.yaml -c config.yaml --format json
+```
+
+- 2시간 후 timeout이 SIGTERM을 보내면 `Trainer.train()`이 현재 step 완료 후 break
+- MLflow run은 `FINISHED` 상태로 마감 (zombie RUNNING 아님)
+- `stopped_reason` MLflow tag에 `signal_term`이 기록됨
+- 결과 JSON의 `stopped_reason`·`checkpoints_saved` 필드로 상위 오케스트레이터가 run을 판정 가능
+
+### stopped_reason 리터럴
+
+MLflow tag와 `TrainResult.stopped_reason` JSON 필드에 기록되는 값들:
+
+| `mdp train` (Trainer) | `mdp rl-train` (RLTrainer) |
+|---|---|
+| `completed` | `completed` |
+| `early_stopped` | `early_stopping` |
+| `max_steps_reached` | `max_steps` |
+| `signal_term` | `signal_term` |
+| `signal_int` | `signal_int` |
+
+> Trainer와 RLTrainer의 early/max 리터럴 표기 불일치는 의도된 호환성 유지다. 외부 오케스트레이터가 이미 기존 리터럴을 가정한 경우 깨지지 않도록 새 리터럴(`signal_term`/`signal_int`)만 대칭으로 추가했다. 향후 spec에서 통일 검토.
+
+### 분산 학습에서의 안전성
+
+torchrun은 SIGTERM을 자식 프로세스 전체에 전파한다. 각 rank의 main thread가 독립적으로 handler를 설치하므로 같은 step 경계에서 동시에 break하고 collective 직전에 loop를 탈출한다 — NCCL deadlock이 발생하지 않는다. 일부 rank만 종료되는 경로는 torchrun 전파 가정이 깨질 때만 발생하며, 이 경우는 `NCCL_TIMEOUT`과 함께 고려한다.
+
+### 주의: inference 경로는 handler 없음
+
+본 문서의 graceful shutdown 설명은 **train 경로 전용**이다. `mdp inference` / `mdp generate` 경로에는 현재 signal handler가 설치되어 있지 않다. 추론 중 timeout이 걸리면 출력 파일이 부분 저장 상태로 남을 수 있으므로, 장시간 배치 추론은 `--batch-size`·데이터셋 분할을 조정하여 wall-clock을 예측 가능하게 관리한다. (후속 spec 후보)
+
+---
+
 ## 에러 복구 전략
 
 MDP는 프로세스 내 복구를 시도하지 않는다. 대신:
@@ -328,6 +384,7 @@ MDP는 프로세스 내 복구를 시도하지 않는다. 대신:
 2. `job.resume: auto`로 최신 체크포인트에서 재시작
 3. `torchrun --max_restarts`로 분산 환경에서 자동 재시작
 4. MLflow/모니터링 실패는 경고만 출력하고 학습은 계속
+5. SIGTERM/SIGINT는 위 Graceful Shutdown 경로로 처리되어 `stopped_reason=signal_term|signal_int` tag와 함께 정상 마감
 
 ---
 

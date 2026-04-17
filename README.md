@@ -73,7 +73,8 @@ mdp serve --run-id <id> --port 8000
 - **분산 학습**: DDP, FSDP, DeepSpeed ZeRO-2/3 자동 감지 및 설정
 - **RL Alignment**: DPO, GRPO, PPO를 멀티 모델(policy, reference, value, reward)로 지원
 - **어댑터**: LoRA, QLoRA, Prefix Tuning 내장
-- **MLflow 통합**: 학습 메트릭, 아티팩트 자동 추적
+- **MLflow 통합**: 학습 메트릭, 아티팩트 자동 추적. `TrainResult.checkpoints_saved`로 산출물 유무를 JSON에서 즉시 판정
+- **Graceful shutdown**: `timeout` 명령이나 Ctrl+C로 중단되어도 MLflow run이 zombie로 남지 않고 `stopped_reason=signal_term|signal_int` tag와 함께 정상 마감
 - **추론 콜백**: `BaseInferenceCallback`으로 hidden state, attention 등 내부 분석
 - **드리프트 모니터링**: 학습 시 baseline 생성, 추론 시 분포 변화 감지
 
