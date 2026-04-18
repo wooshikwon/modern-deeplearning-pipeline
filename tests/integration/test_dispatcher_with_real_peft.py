@@ -15,7 +15,7 @@
 **이 integration test의 역할**:
 
 - 실 peft + tiny HF 모델 조합에서 dispatcher가 반환하는 ``(hidden, head_weight)``
-  의 device 계약을 **B층(defensive) 정책**("둘 다 compute device로 정렬") 기준
+  의 device 계약
   으로 고정 검증. 로컬에서는 CPU만 돌지만, 계약 불변 조건("모델 parameter device
   == hidden.device == head_weight.device")은 device-agnostic으로 검증 가능.
 - Liger FLCE 자체는 Triton 필수이므로 GPU only → CPU 로컬에서는 skip. 단 "CPU
@@ -87,7 +87,6 @@ def test_dispatcher_returns_tensors_on_model_device_with_real_peft(tiny_peft_hf_
     from types import SimpleNamespace
 
     trainer_stub = SimpleNamespace()
-    trainer_stub._resolve_compute_device = RLTrainer._resolve_compute_device
     trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
         trainer_stub
     )
@@ -143,7 +142,6 @@ def test_dispatcher_hidden_gradients_flow_through_peft(tiny_peft_hf_model):
     }
 
     trainer_stub = SimpleNamespace()
-    trainer_stub._resolve_compute_device = RLTrainer._resolve_compute_device
     trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
         trainer_stub
     )
@@ -184,7 +182,7 @@ def test_dispatcher_output_survives_matmul_on_gpu(tiny_peft_hf_model):
 
     CUDA runner에서만 활성화. sanity v6가 실패한 정확한 경로("dispatcher 반환
     hidden·head_weight로 matmul → 결과로 fused cross entropy")를 매우 작은
-    규모로 재현해, B층 계약이 실효성 있는지 확인한다. FLCE 직접 호출은 mdp의
+    규모로 축소 재현해 dispatcher→FLCE 경로의 device 호환성을 확인한다. FLCE 직접 호출은 mdp의
     liger-kernel import 제약(H200 recipe 전용)이라 matmul까지만 검증.
     """
     from mdp.training.rl_trainer import RLTrainer
@@ -198,7 +196,6 @@ def test_dispatcher_output_survives_matmul_on_gpu(tiny_peft_hf_model):
     }
 
     trainer_stub = SimpleNamespace()
-    trainer_stub._resolve_compute_device = RLTrainer._resolve_compute_device
     trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
         trainer_stub
     )

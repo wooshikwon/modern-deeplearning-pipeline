@@ -1450,14 +1450,6 @@ class RLTrainer:
             (hidden, head_weight):
               - hidden: framework-dependent shape. NLP causal LM은 ``(B, S, H)``.
               - head_weight: output projection weight. ``(V, H)`` 또는 ``(C, H)``.
-
-        **Device 계약 (B층 defensive placement)**: Priority 2~4 기본 구현은 반환 직전에
-        두 텐서를 **compute device**(``next(model.parameters()).device``, 모델에 param이
-        없으면 hidden device)로 정렬한다. Priority 1(모델 override)은 override 작성자가
-        동일 계약을 준수해야 한다. 이는 2026-04-18 H200 sanity v6에서 관찰된 "forward
-        결과 hidden이 CPU로 떨어지는 특정 조합"(FA2+PEFT+DDP+bf16+GC)에 대한 최후
-        방어선이며, 원인 가설 H1~H5의 어느 것이 해당되더라도 downstream Triton
-        kernel(Liger FLCE)이 요구하는 CUDA pointer 조건을 보장한다.
         """
         # DDP/FSDP wrapper 언래핑 — 래핑된 모델은 .module으로 실제 모델에 접근
         unwrapped = getattr(model, "module", model)
@@ -1522,34 +1514,6 @@ class RLTrainer:
             "감싸세요."
         )
 
-    @staticmethod
-    def _resolve_compute_device(
-        model: nn.Module, fallback: torch.Tensor
-    ) -> torch.device:
-        """Dispatcher 반환 텐서가 놓여야 할 compute device를 결정한다.
-
-        정책(review-2026-04-18-U6-c2 §관찰 1 대응):
-          - 모델이 parameter를 가진다면 **첫 parameter의 device**가 compute device.
-            DDP/FSDP 래퍼는 dispatcher 진입 전에 이미 언래핑되어 있고, PEFT 래핑도
-            투과 완료된 상태의 inner 모델이 전달되므로, ``next(model.parameters())``의
-            device는 실제 compute가 이루어지는 device(학습 중에는 GPU, 테스트에서는
-            CPU)와 일치한다.
-          - parameter가 없는 희귀 경우(stub 모듈 등)에는 ``fallback`` tensor의
-            device를 사용한다.
-
-        이 함수는 "hidden이 CPU로 나오고 head_weight도 CPU였으면 Liger FLCE가 실패"
-        하는 2026-04-18 H200 sanity v6 증상의 **B층(defensive) 방어선**이다.
-        H1~H5 중 실제 원인이 어느 것이든(FA2 output_hidden_states 경로, rotary
-        buffer device 누락, PEFT 래퍼 우회로 인한 device context 손실, GC+autocast
-        activation offload, SDPA fallback), dispatcher가 반환하기 전에 ``hidden``과
-        ``head_weight``을 모두 compute device로 정렬하면 downstream Triton kernel의
-        pointer 접근 제약(CUDA tensor 필수)을 만족한다.
-        """
-        try:
-            return next(model.parameters()).device
-        except StopIteration:
-            return fallback.device
-
     def _extract_hf_pretrained(
         self,
         model: nn.Module,
@@ -1558,20 +1522,11 @@ class RLTrainer:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """HF ``PreTrainedModel`` 기본 구현.
 
-        ``output_hidden_states=True``로 forward 호출하여
         ``hidden_states[layer_idx]``와 ``get_output_embeddings().weight``을 반환한다.
-
-        Returns:
-            ``(hidden, head_weight)`` — 둘 다 **compute device**(``next(model.parameters()).device``)
-            로 정렬되어 반환된다.
-
-        2026-04-18 H200 sanity v6에서 "dispatcher가 반환한 hidden이 CPU"인 조합이
-        관찰됐다(Flash Attention 2 + output_hidden_states + PEFT + DDP + bf16 +
-        gradient checkpointing의 상호작용 — 원인 가설 H1~H5는 dev-cycle
-        review-2026-04-18-U6-c2 §관찰 2 참조). 이때 caller(Liger FLCE)가 Triton
-        kernel에 CPU pointer를 넘기며 ``ValueError: Pointer argument (at 0) cannot
-        be accessed from Triton (cpu tensor?)``로 실패한다. dispatcher 계약을 "둘이
-        같은 device"에서 "둘 다 *올바른* compute device"로 승격하여 재발을 차단한다.
+        기본(``layer_idx=-1``)에서는 ``output_hidden_states=True``로 32 layer tuple을
+        받는 대신 ``base_model`` property로 inner encoder를 직접 호출해
+        ``last_hidden_state``만 꺼내는 효율 경로를 사용한다 (메모리 절감, 본 함수
+        docstring 아래 주석 참조).
         """
         # 효율 경로 vs full-tuple 경로 분기.
         #
@@ -1628,13 +1583,6 @@ class RLTrainer:
                 "(encoder-only 모델 등). extract_features_and_head를 override하세요."
             )
         head_weight = output_embeddings.weight
-        # B층 defensive placement: compute device를 모델 parameter 기준으로 결정하고
-        # hidden·head_weight 모두 그 device로 이동. 이미 같은 device면 .to()는 no-op.
-        compute_device = self._resolve_compute_device(model, hidden)
-        if hidden.device != compute_device:
-            hidden = hidden.to(compute_device)
-        if head_weight.device != compute_device:
-            head_weight = head_weight.to(compute_device)
         return hidden, head_weight
 
     def _extract_timm(
@@ -1646,10 +1594,6 @@ class RLTrainer:
 
         ``forward_features`` + ``get_classifier``의 weight을 반환한다.
         ``Identity`` classifier(num_classes=0)는 지원 불가.
-
-        Returns ``(features, weight)`` — dispatcher 계약상 **compute device**로
-        정렬되어 반환된다(``_extract_hf_pretrained`` docstring의 B층 defensive
-        placement 설명 참조).
         """
         pixel_values = batch.get("pixel_values")
         if pixel_values is None:
@@ -1670,12 +1614,6 @@ class RLTrainer:
                 f"timm 모델 {type(model).__name__}의 classifier에 weight 속성이 "
                 "없습니다. extract_features_and_head를 override하세요."
             )
-        # B층 defensive placement: features·weight 모두 모델 parameter device로 정렬.
-        compute_device = self._resolve_compute_device(model, features)
-        if features.device != compute_device:
-            features = features.to(compute_device)
-        if weight.device != compute_device:
-            weight = weight.to(compute_device)
         return features, weight
 
     def _extract_torchvision_resnet(
@@ -1688,9 +1626,6 @@ class RLTrainer:
         ``conv1``~``avgpool``까지 수동 forward 후 ``flatten`` 결과를 hidden으로,
         ``model.fc.weight``을 head로 반환한다. Custom ResNet variant는
         ``extract_features_and_head`` override 필요.
-
-        Returns ``(hidden, head_weight)`` — dispatcher 계약상 **compute device**로
-        정렬되어 반환된다(B층 defensive placement, ``_extract_hf_pretrained`` 참조).
         """
         x = batch.get("pixel_values")
         if x is None:
@@ -1716,12 +1651,6 @@ class RLTrainer:
                 "extract_features_and_head를 override하세요."
             )
         head_weight = fc.weight
-        # B층 defensive placement: hidden·head_weight 모두 모델 parameter device로 정렬.
-        compute_device = self._resolve_compute_device(model, hidden)
-        if hidden.device != compute_device:
-            hidden = hidden.to(compute_device)
-        if head_weight.device != compute_device:
-            head_weight = head_weight.to(compute_device)
         return hidden, head_weight
 
     def _forward_model(self, model: nn.Module, batch: dict, role: str = "policy") -> dict:
