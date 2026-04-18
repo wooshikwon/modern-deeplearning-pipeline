@@ -7,6 +7,10 @@ spec-algorithm-hidden-states-support U1 의 핵심 검증:
       (4) torchvision ResNet → (5) NotImplementedError.
   3. 실제 프레임워크 기본 구현의 shape 계약.
 
+**이 파일은 dispatcher 분기 로직과 격리된 device 계약만 검증한다.** 실제 PEFT
+래퍼 + HF 모델 + output_hidden_states 조합의 end-to-end device 동작은
+``tests/integration/test_dispatcher_with_real_peft.py``에서 검증한다 (fix-c2 §2-1).
+
 여기서는 RLTrainer 전체를 띄우지 않고, 메서드를 언바운드로 호출하여
 dispatcher 로직만 격리 검증한다. Trainer 생성은 무거운 의존성
 (Settings/Recipe/dataloader)이 필요하므로 단위 테스트에 부적합.
@@ -88,13 +92,20 @@ class _CustomModelWithOverride(BaseModel):
 
 
 def _call_dispatcher(model: nn.Module, batch: dict, layer_idx: int = -1) -> tuple[Tensor, Tensor]:
-    """RLTrainer.__init__을 우회해 dispatcher만 호출."""
-    trainer_stub = SimpleNamespace(
-        _extract_hf_pretrained=RLTrainer._extract_hf_pretrained.__get__(SimpleNamespace()),
-        _extract_timm=RLTrainer._extract_timm.__get__(SimpleNamespace()),
-        _extract_torchvision_resnet=RLTrainer._extract_torchvision_resnet.__get__(
-            SimpleNamespace()
-        ),
+    """RLTrainer.__init__을 우회해 dispatcher만 호출.
+
+    dispatcher와 하위 헬퍼들은 모두 `self._extract_*` / `self._resolve_compute_device`
+    를 호출한다. 공통 `trainer_stub`을 하나 만들어 4개 헬퍼를 모두 bind하여,
+    inner 헬퍼가 다시 `self._resolve_compute_device`를 lookup할 수 있게 한다.
+    """
+    trainer_stub = SimpleNamespace()
+    trainer_stub._resolve_compute_device = RLTrainer._resolve_compute_device
+    trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
+        trainer_stub
+    )
+    trainer_stub._extract_timm = RLTrainer._extract_timm.__get__(trainer_stub)
+    trainer_stub._extract_torchvision_resnet = (
+        RLTrainer._extract_torchvision_resnet.__get__(trainer_stub)
     )
     return RLTrainer._extract_hidden_states_and_head(
         trainer_stub, model, batch, layer_idx=layer_idx
@@ -384,76 +395,95 @@ def test_dispatcher_peft_chain_requires_hf_inner() -> None:
 
 
 # ────────────────────────────────────────────────────────────── #
-#  Dispatcher 반환 계약 — (hidden, head_weight) 동일 device        #
-#  (review 1-2)                                                   #
+#  Dispatcher 반환 계약 — (hidden, head_weight) 둘 다 compute device #
+#  (review-2026-04-18-U6-c2 §1-1·1-2, fix-c2 B층 defensive placement) #
 # ────────────────────────────────────────────────────────────── #
 #
-#  Liger-Kernel FLCE는 Triton 커널이라 모든 인자가 동일 GPU device에 있어야
-#  하는데, PEFT 래핑이나 tied-weights 경로에서 `lm_head.weight`이 CPU에 남는
-#  케이스가 실서버에서 관찰됐다(review-2026-04-18-U6-c1 §1-2 v4·v5 실패).
-#  dispatcher가 반환 직전에 `head_weight.to(hidden.device)`를 강제하므로,
-#  hidden이 어느 device에 있든 head_weight 역시 같은 device로 따라가야 한다.
+#  **Contract evolution (fix-c1 → fix-c2)**:
+#    - fix-c1 (elided): "두 텐서가 동일 device"까지만 보장 (head_weight.to(hidden.device)).
+#    - fix-c2 (현재): "두 텐서 모두 compute device(next(model.parameters()).device)"로
+#      승격. hidden이 CPU로 잘못 반환돼도 GPU로 끌어올리는 **방향성 있는 정렬**.
+#
+#  근거: 2026-04-18 H200 sanity v6에서 dispatcher 반환 hidden이 CPU였던 조합
+#  (FA2 + output_hidden_states + PEFT + DDP + bf16 + GC)이 관찰됐다. fix-c1은
+#  "양쪽을 같은 device로 맞추자"만 구현해 head_weight까지 CPU로 끌어내리는
+#  역효과로 귀결됐고, matmul은 성공했지만 Triton kernel이 CPU pointer를 받아
+#  실패했다. fix-c2는 compute device를 **모델 parameter 기준**으로 선정하여
+#  hidden의 device가 잘못됐을 때도 올바른 device로 끌어올린다.
 
 
 class _HeadOnCpuHFModel(nn.Module):
     """PreTrainedModel-like 껍데기 — ``get_output_embeddings().weight``이 CPU에
-    남아 있는 상황을 모사한다.
+    남아 있고, 실제 forward는 caller가 지정한 device로 hidden을 반환하는 스텁.
 
-    실제 HF 모델 forward를 흉내 내되 ``lm_head.weight``은 CPU에 고정하고
-    forward hidden_states 튜플은 caller가 지정한 device로 반환한다.
+    fix-c2 B층 계약 검증: 모델에 실제 ``nn.Parameter``를 등록해 compute device가
+    명확히 결정되도록 한다. ``_head_weight``은 일부러 CPU에 두어 dispatcher가
+    compute device로 끌어올리는 동작을 고정 확인한다.
     """
 
-    def __init__(self, vocab: int = 17, hidden: int = 8, hidden_device: str = "cpu") -> None:
+    def __init__(
+        self,
+        vocab: int = 17,
+        hidden: int = 8,
+        hidden_device: str = "cpu",
+        param_device: str = "cpu",
+    ) -> None:
         super().__init__()
         self._vocab = vocab
         self._hidden = hidden
         self._hidden_device = torch.device(hidden_device)
-        # head_weight은 항상 CPU에 두어 device mismatch를 유발.
+        # 모델 parameter: ``next(model.parameters()).device`` 기준 compute device 제공.
+        self._canary = nn.Parameter(
+            torch.zeros(1, device=torch.device(param_device)), requires_grad=False
+        )
+        # head_weight은 일부러 CPU에 두어 device mismatch를 유발.
         self._head_weight = torch.randn(vocab, hidden, device="cpu")
 
-    # transformers.PreTrainedModel isinstance가 되도록 실제 클래스에 동적 등록 —
-    # 아래 fixture에서 monkeypatch.
     def get_output_embeddings(self):
         return SimpleNamespace(weight=self._head_weight)
 
     def forward(self, *, input_ids, attention_mask=None, output_hidden_states=False):
         B, S = input_ids.shape
         hidden = torch.randn(B, S, self._hidden, device=self._hidden_device)
-        # HF ModelOutput-like 튜플: hidden_states는 layer+1 tuple. 마지막만 필요.
         return SimpleNamespace(hidden_states=(hidden,), logits=None)
 
 
-def test_extract_hf_pretrained_returns_same_device_tensors() -> None:
-    """``_extract_hf_pretrained``가 ``(hidden, head_weight)``을 같은 device로
-    정렬해 반환한다(review 1-2 계약).
+def test_extract_hf_pretrained_aligns_both_to_compute_device() -> None:
+    """fix-c2 B층 계약: ``(hidden, head_weight)`` 둘 다 모델 parameter device로 정렬.
 
-    hidden은 ``meta`` device에, ``get_output_embeddings().weight``은 CPU에
-    두고 dispatcher 하위 헬퍼를 직접 호출한다. PeftModel 래핑이나 tied-weights
-    경로에서 관찰된 device mismatch(Liger FLCE Triton kernel 실패 원인)가
-    dispatcher 반환 직전에 `.to(hidden.device)`로 흡수되는지를 고정 검증.
+    ``param_device='meta'`` + ``hidden_device='cpu'`` + head_weight=CPU 조합에서
+    dispatcher가 두 텐서를 **meta로 끌어올려** 반환해야 한다. fix-c1의 "hidden
+    device로 head_weight을 끌어당기는" 단방향 계약은 이 케이스에서 hidden=CPU로
+    수렴해 downstream Triton kernel이 CPU pointer를 받는 v6 재현 상황을 만들었다.
+    fix-c2는 **모델 parameter(= compute device) 기준**으로 정렬하여 hidden이
+    잘못 CPU로 떨어진 경우에도 올바른 device로 복구한다.
     """
-    # `_extract_hf_pretrained`만 격리 호출하므로 isinstance 통과용 상속은 필요 없다.
-    model = _HeadOnCpuHFModel(vocab=17, hidden=8, hidden_device="meta")
+    # meta device를 compute device로 설정 (GPU를 시뮬레이트). hidden은 일부러 CPU.
+    model = _HeadOnCpuHFModel(
+        vocab=17, hidden=8, hidden_device="cpu", param_device="meta"
+    )
     batch = {"input_ids": torch.zeros(1, 3, dtype=torch.long)}
 
     trainer_stub = SimpleNamespace()
+    trainer_stub._resolve_compute_device = RLTrainer._resolve_compute_device
     hidden, head_weight = RLTrainer._extract_hf_pretrained(
         trainer_stub, model, batch, layer_idx=-1
     )
-    # 핵심 계약: 동일 device.
-    assert hidden.device == head_weight.device, (
-        f"dispatcher가 device 일관성 계약을 어겼다: hidden={hidden.device}, "
-        f"head_weight={head_weight.device}"
+
+    # 핵심 계약: 둘 다 compute device(meta)로 이동.
+    assert hidden.device == head_weight.device
+    assert hidden.device.type == "meta", (
+        f"dispatcher가 hidden을 compute device(meta)로 끌어올리지 못했다: "
+        f"hidden.device={hidden.device}. fix-c1의 단방향 계약으로 회귀한 것일 수 있다."
     )
-    assert hidden.device.type == "meta"
+    assert head_weight.device.type == "meta"
 
 
-def test_extract_hf_pretrained_noop_when_already_same_device() -> None:
-    """이미 같은 device면 .to() 호출이 identity여야 한다 (ptr 유지).
+def test_extract_hf_pretrained_noop_when_all_same_device() -> None:
+    """이미 compute device에 있으면 .to() 호출이 identity여야 한다 (ptr 유지).
 
-    GPT-2 path는 tied embedding이라 head_weight.data_ptr()이 wte.weight과
-    동일하다. 기본 CPU 환경에서 수행되므로 추가 복사 없이 같은 tensor가
-    반환되어야 한다(기존 성공 경로 보존).
+    GPT-2 path는 모든 parameter + hidden + head_weight이 기본 CPU. 이 공통
+    device 경로는 추가 복사 없이 같은 tensor ptr을 반환해야 한다(성공 경로 보존).
     """
     model, cfg = _build_tiny_hf_model()
     batch = {"input_ids": torch.randint(0, cfg.vocab_size, (1, 3))}
@@ -463,8 +493,47 @@ def test_extract_hf_pretrained_noop_when_already_same_device() -> None:
     assert head_weight.data_ptr() == model.get_output_embeddings().weight.data_ptr()
 
 
-def test_extract_torchvision_resnet_returns_same_device_tensors() -> None:
-    """torchvision ResNet 경로도 dispatcher 반환 계약을 준수한다 (대칭 확인)."""
+def test_extract_hf_pretrained_no_params_fallback_to_hidden_device() -> None:
+    """모델이 ``nn.Parameter``를 갖지 않으면 hidden의 device를 compute device로 쓴다.
+
+    stub 모듈(테스트 전용) 등 희귀 케이스 방어. ``next(model.parameters())`` 가
+    ``StopIteration``이면 fallback으로 hidden.device를 사용해 dispatcher가 never
+    크래시하지 않도록 한다. 이 경로에서는 fix-c1의 단방향 계약과 동일 결과.
+    """
+
+    class _NoParamHFLike(nn.Module):
+        """Parameter가 하나도 없는 HF-like 스텁."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            # nn.Parameter 아님 — buffer도 등록하지 않음.
+            self._head_weight = torch.randn(5, 4, device="cpu")
+
+        def get_output_embeddings(self):
+            return SimpleNamespace(weight=self._head_weight)
+
+        def forward(self, *, input_ids, attention_mask=None, output_hidden_states=False):
+            return SimpleNamespace(
+                hidden_states=(torch.randn(1, 3, 4, device="cpu"),),
+                logits=None,
+            )
+
+    model = _NoParamHFLike()
+    batch = {"input_ids": torch.zeros(1, 3, dtype=torch.long)}
+
+    trainer_stub = SimpleNamespace()
+    trainer_stub._resolve_compute_device = RLTrainer._resolve_compute_device
+    hidden, head_weight = RLTrainer._extract_hf_pretrained(
+        trainer_stub, model, batch, layer_idx=-1
+    )
+
+    # Parameter 없음 → fallback = hidden.device (CPU). 둘 다 CPU.
+    assert hidden.device.type == "cpu"
+    assert head_weight.device.type == "cpu"
+
+
+def test_extract_torchvision_resnet_aligns_both_to_compute_device() -> None:
+    """torchvision ResNet 경로도 B층 계약을 준수한다 (대칭 확인)."""
     pytest.importorskip("torchvision")
     from torchvision.models import resnet18
 
@@ -472,14 +541,18 @@ def test_extract_torchvision_resnet_returns_same_device_tensors() -> None:
     model.eval()
     batch = {"pixel_values": torch.randn(1, 3, 224, 224)}
     hidden, head_weight = _call_dispatcher(model, batch)
-    assert hidden.device == head_weight.device
+    expected = next(model.parameters()).device
+    assert hidden.device == expected
+    assert head_weight.device == expected
 
 
-def test_extract_timm_returns_same_device_tensors() -> None:
-    """timm 경로도 dispatcher 반환 계약을 준수한다 (대칭 확인)."""
+def test_extract_timm_aligns_both_to_compute_device() -> None:
+    """timm 경로도 B층 계약을 준수한다 (대칭 확인)."""
     timm = pytest.importorskip("timm")
     model = timm.create_model("resnet18", pretrained=False, num_classes=5)
     model.eval()
     batch = {"pixel_values": torch.randn(1, 3, 224, 224)}
     hidden, head_weight = _call_dispatcher(model, batch)
-    assert hidden.device == head_weight.device
+    expected = next(model.parameters()).device
+    assert hidden.device == expected
+    assert head_weight.device == expected
