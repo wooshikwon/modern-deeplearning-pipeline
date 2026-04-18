@@ -1573,18 +1573,53 @@ class RLTrainer:
         be accessed from Triton (cpu tensor?)``로 실패한다. dispatcher 계약을 "둘이
         같은 device"에서 "둘 다 *올바른* compute device"로 승격하여 재발을 차단한다.
         """
-        out = model(
-            input_ids=batch["input_ids"],
-            attention_mask=batch.get("attention_mask"),
-            output_hidden_states=True,
+        # 효율 경로 vs full-tuple 경로 분기.
+        #
+        # ``output_hidden_states=True``는 HF가 **모든 layer의 hidden state**를
+        # tuple로 저장하여 forward 중 activation graph에 상주시킨다. Llama-3-8B
+        # (32 layer) + bs=32 + seq=1879 + bf16 기준 약 14.5 GiB 오버헤드
+        # (2026-04-19 U6 sanity snapshot 실측: rl_trainer.py:1579 at 14.56 GiB).
+        # 현재 첫 consumer(weighted_ntp)는 항상 layer_idx=-1만 사용하므로 이
+        # 전부를 저장할 이유가 없다.
+        #
+        # PreTrainedModel의 ``base_model`` property는 ``base_model_prefix``에
+        # 해당하는 inner encoder(LlamaForCausalLM.model → LlamaModel,
+        # GPT2LMHeadModel.transformer → GPT2Model 등)를 반환. 이 base encoder를
+        # 직접 호출하면 ``last_hidden_state``만 받고 중간 layer tuple은 생성되지
+        # 않는다. LoRA 는 linear module in-place swap이므로 base encoder forward
+        # 에도 LoRA delta가 정상 반영된다.
+        #
+        # layer_idx != -1 (드문 케이스)이거나 base_model이 self를 가리키는 희귀
+        # 모델에서는 full-tuple fallback.
+        base_encoder = getattr(model, "base_model", None)
+        use_efficient_path = (
+            layer_idx == -1
+            and base_encoder is not None
+            and base_encoder is not model
         )
-        hidden_states = getattr(out, "hidden_states", None)
-        if hidden_states is None:
-            raise NotImplementedError(
-                f"HF 모델 {type(model).__name__}이 hidden_states를 반환하지 않습니다. "
-                "extract_features_and_head를 override하세요."
+        hidden: torch.Tensor | None = None
+        if use_efficient_path:
+            base_out = base_encoder(
+                input_ids=batch["input_ids"],
+                attention_mask=batch.get("attention_mask"),
             )
-        hidden = hidden_states[layer_idx]
+            hidden = getattr(base_out, "last_hidden_state", None)
+            if hidden is None:
+                # base encoder가 last_hidden_state를 안 내는 edge case → fallback
+                use_efficient_path = False
+        if not use_efficient_path:
+            out = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch.get("attention_mask"),
+                output_hidden_states=True,
+            )
+            hidden_states = getattr(out, "hidden_states", None)
+            if hidden_states is None:
+                raise NotImplementedError(
+                    f"HF 모델 {type(model).__name__}이 hidden_states를 반환하지 않습니다. "
+                    "extract_features_and_head를 override하세요."
+                )
+            hidden = hidden_states[layer_idx]
 
         output_embeddings = model.get_output_embeddings()
         if output_embeddings is None or getattr(output_embeddings, "weight", None) is None:
