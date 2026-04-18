@@ -63,53 +63,100 @@ class TestLoadCallbacksFromFile:
         assert result[0]["_component_"] == "ProgressBar"
 
 
-class TestCallbacksOverrideTraining:
-    """--callbacks가 Settings.recipe.callbacks를 override하는지 검증."""
+class TestCallbacksInjectToTrainer:
+    """--callbacks CLI 경로가 Trainer에 직접 주입되는지 검증 (U3 패턴)."""
 
-    def test_override_recipe_callbacks(self, tmp_path):
-        """callbacks 파일이 recipe의 기존 callbacks를 교체한다."""
+    def test_cli_train_passes_cb_configs_to_run_training(self, tmp_path, monkeypatch):
+        """run_train()이 load한 cb_configs를 _run_single에 전달한다."""
+        import mdp.cli.train as train_mod
+
+        cb_file = tmp_path / "cbs.yaml"
+        cb_file.write_text(yaml.dump([
+            {"_component_": "ModelCheckpoint", "monitor": "val_loss", "save_top_k": 1},
+        ]))
+
+        captured = {}
+
+        def fake_run_single(settings, cb_configs=None):
+            captured["cb_configs"] = cb_configs
+            return {}
+
+        monkeypatch.setattr(train_mod, "_run_single", fake_run_single)
+        monkeypatch.setattr(train_mod, "_detect_gpu_count", lambda: 0)
+
         from tests.e2e.conftest import make_test_settings
+        import unittest.mock as mock
 
-        # 기존 recipe callbacks
-        settings = make_test_settings()
-        settings.recipe.callbacks = [
-            {"_component_": "EarlyStopping", "patience": 5},
-        ]
-        assert len(settings.recipe.callbacks) == 1
+        with mock.patch("mdp.settings.factory.SettingsFactory") as MockFactory:
+            MockFactory.return_value.for_training.return_value = make_test_settings()
+            train_mod.run_train(
+                recipe_path="dummy.yaml",
+                config_path="dummy_cfg.yaml",
+                callbacks_file=str(cb_file),
+            )
 
-        # --callbacks 파일
-        cb_file = tmp_path / "override.yaml"
-        new_cbs = [
-            {"_component_": "ModelCheckpoint", "save_top_k": 3},
-            {"_component_": "ProgressBar"},
-        ]
-        cb_file.write_text(yaml.dump(new_cbs))
+        assert captured["cb_configs"] is not None
+        assert len(captured["cb_configs"]) == 1
+        assert captured["cb_configs"][0]["_component_"] == "ModelCheckpoint"
 
-        # override 적용 (run_train 내부 로직 재현)
-        from mdp.training._common import load_callbacks_from_file
-        settings.recipe.callbacks = load_callbacks_from_file(str(cb_file))
+    def test_no_callbacks_file_passes_none_to_run_training(self, monkeypatch):
+        """callbacks_file=None이면 cb_configs가 falsy로 전달된다."""
+        import mdp.cli.train as train_mod
 
-        assert len(settings.recipe.callbacks) == 2
-        assert settings.recipe.callbacks[0]["_component_"] == "ModelCheckpoint"
-        assert settings.recipe.callbacks[1]["_component_"] == "ProgressBar"
+        captured = {}
 
-    def test_no_callbacks_file_preserves_recipe(self):
-        """--callbacks 없으면 recipe 콜백을 그대로 유지한다."""
+        def fake_run_single(settings, cb_configs=None):
+            captured["cb_configs"] = cb_configs
+            return {}
+
+        monkeypatch.setattr(train_mod, "_run_single", fake_run_single)
+        monkeypatch.setattr(train_mod, "_detect_gpu_count", lambda: 0)
+
         from tests.e2e.conftest import make_test_settings
+        import unittest.mock as mock
+
+        with mock.patch("mdp.settings.factory.SettingsFactory") as MockFactory:
+            MockFactory.return_value.for_training.return_value = make_test_settings()
+            train_mod.run_train(
+                recipe_path="dummy.yaml",
+                config_path="dummy_cfg.yaml",
+                callbacks_file=None,
+            )
+
+        # cb_configs=None이거나 [] (falsy) 이면 됨
+        assert not captured.get("cb_configs")
+
+    def test_run_training_resolves_and_injects_callbacks(self):
+        """run_training()이 cb_configs를 resolve하여 Trainer(callbacks=...)에 주입한다."""
+        from unittest import mock
+        from tests.e2e.conftest import make_test_settings
+        import mdp.cli._torchrun_entry as entry_mod
 
         settings = make_test_settings()
-        settings.recipe.callbacks = [
-            {"_component_": "EarlyStopping", "patience": 5},
-        ]
+        cb_configs = [{"_component_": "ModelCheckpoint", "monitor": "val_loss", "save_top_k": 1}]
 
-        # callbacks_file=None 시 변경 없음
-        callbacks_file = None
-        if callbacks_file:
-            from mdp.training._common import load_callbacks_from_file
-            settings.recipe.callbacks = load_callbacks_from_file(callbacks_file)
+        captured_trainer_kwargs = {}
 
-        assert len(settings.recipe.callbacks) == 1
-        assert settings.recipe.callbacks[0]["_component_"] == "EarlyStopping"
+        class FakeTrainer:
+            def __init__(self, **kwargs):
+                captured_trainer_kwargs.update(kwargs)
+            def train(self):
+                return {}
+
+        def fake_run_rl(settings, cb_configs=None):
+            return {}
+
+        with mock.patch.object(entry_mod, "_resolve_cb_configs", return_value=["resolved_cb"]), \
+             mock.patch.object(entry_mod, "_print_callbacks_log"), \
+             mock.patch("mdp.factory.factory.Factory") as MockFactory, \
+             mock.patch("mdp.training.trainer.Trainer", FakeTrainer):
+            MockFactory.return_value.create_model.return_value = mock.MagicMock()
+            MockFactory.return_value.create_dataloaders.return_value = {"train": mock.MagicMock()}
+
+            entry_mod.run_training(settings, cb_configs=cb_configs)
+
+        assert "callbacks" in captured_trainer_kwargs
+        assert captured_trainer_kwargs["callbacks"] == ["resolved_cb"]
 
 
 class TestCallbacksInference:
@@ -118,9 +165,9 @@ class TestCallbacksInference:
     def test_load_and_resolve_callbacks(self, tmp_path):
         """콜백 파일을 로드하고 ComponentResolver로 resolve한다."""
         cb_file = tmp_path / "analysis.yaml"
-        # aliases.yaml에 등록된 EarlyStopping 사용
+        # aliases.yaml에 등록된 ModelCheckpoint 사용 (EarlyStopping은 U2에서 alias 제거됨)
         cb_file.write_text(yaml.dump([
-            {"_component_": "EarlyStopping", "patience": 2, "monitor": "val_loss"},
+            {"_component_": "ModelCheckpoint", "monitor": "val_loss", "save_top_k": 1},
         ]))
 
         from mdp.settings.resolver import ComponentResolver
@@ -130,6 +177,6 @@ class TestCallbacksInference:
         callbacks = create_callbacks(configs, ComponentResolver())
 
         assert len(callbacks) == 1
-        from mdp.training.callbacks.early_stopping import EarlyStopping
-        assert isinstance(callbacks[0], EarlyStopping)
-        assert callbacks[0].patience == 2
+        from mdp.training.callbacks.checkpoint import ModelCheckpoint
+        assert isinstance(callbacks[0], ModelCheckpoint)
+        assert callbacks[0].monitor == "val_loss"

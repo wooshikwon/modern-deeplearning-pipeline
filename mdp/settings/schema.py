@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 # ── Recipe 스키마 ──
@@ -60,6 +60,23 @@ class DataSpec(BaseModel):
     dataloader: DataloaderSpec = Field(default_factory=DataloaderSpec)
 
 
+class EarlyStoppingSpec(BaseModel):
+    """학습 조기 종료 기준. monitor 메트릭이 patience 번 연속 개선되지 않으면 중단."""
+
+    monitor: str = "val_loss"
+    patience: int = Field(default=5, ge=1)
+    mode: Literal["min", "max"] = "min"
+    min_delta: float = Field(default=0.0, ge=0.0)
+
+
+class EMASpec(BaseModel):
+    """파라미터 지수이동평균. on_train_end에서 EMA 가중치를 모델에 복사하여 최종 평가/저장 대상으로 사용."""
+
+    decay: float = Field(default=0.9999, gt=0.0, lt=1.0)
+    update_after_step: int = Field(default=0, ge=0)
+    update_every: int = Field(default=1, ge=1)
+
+
 class TrainingSpec(BaseModel):
     """학습 루프 설정.
 
@@ -87,6 +104,8 @@ class TrainingSpec(BaseModel):
     val_check_interval: float = 1.0
     val_check_unit: Literal["epoch", "step"] = "epoch"
     compile: str | bool = False
+    early_stopping: EarlyStoppingSpec | None = None
+    ema: EMASpec | None = None
 
 
 class MonitoringSpec(BaseModel):
@@ -142,6 +161,8 @@ class MetadataSpec(BaseModel):
 class Recipe(BaseModel):
     """실험 정의서. '무엇을 학습할지'를 기술한다."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     task: str
     # SFT 필드
@@ -158,7 +179,6 @@ class Recipe(BaseModel):
     evaluation: EvaluationSpec = Field(default_factory=EvaluationSpec)
     generation: GenerationSpec | None = None  # 서빙/추론 전용 (rl.generation과 독립)
     monitoring: MonitoringSpec = Field(default_factory=MonitoringSpec)
-    callbacks: list[dict[str, Any]] = Field(default_factory=list)
     metadata: MetadataSpec
     # RL
     rl: RLSpec | None = None  # None이면 SFT

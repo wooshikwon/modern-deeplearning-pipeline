@@ -66,6 +66,10 @@ training:
   gradient_accumulation_steps: 1
   gradient_clip_max_norm: 1.0
   val_check_interval: 1.0
+  early_stopping:
+    monitor: val_loss
+    patience: 5
+    mode: min
 
 optimizer:
   _component_: AdamW
@@ -85,16 +89,6 @@ evaluation:
   metrics:
     - accuracy
     - f1
-
-callbacks:
-  - _component_: EarlyStopping
-    monitor: val_loss
-    patience: 5
-    mode: min
-  - _component_: ModelCheckpoint
-    monitor: val_accuracy
-    save_top_k: 3
-    mode: max
 
 metadata:
   author: wesley

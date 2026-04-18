@@ -20,12 +20,10 @@ head:
   DualEncoderHead: mdp.models.heads.dual_encoder.DualEncoderHead
   SequenceClassificationHead: mdp.models.heads.classification.ClassificationHead
 callback:
-  EarlyStopping: mdp.training.callbacks.early_stopping.EarlyStopping
   ModelCheckpoint: mdp.training.callbacks.checkpoint.ModelCheckpoint
-  LRMonitor: mdp.training.callbacks.lr_monitor.LearningRateMonitor
-  ProgressBar: mdp.training.callbacks.progress.ProgressBar
-  EMACallback: mdp.training.callbacks.ema.EMACallback
   DefaultOutputCallback: mdp.callbacks.inference.DefaultOutputCallback
+  ResidualAdd: mdp.callbacks.interventions.residual_add.ResidualAdd
+  LogitBias: mdp.callbacks.interventions.logit_bias.LogitBias
 evaluator:
   Accuracy: torchmetrics.Accuracy
   F1Score: torchmetrics.F1Score

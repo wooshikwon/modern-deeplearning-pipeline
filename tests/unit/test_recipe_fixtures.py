@@ -182,3 +182,161 @@ def test_fixture_recipe_pydantic_load(recipe_path: Path) -> None:
     assert isinstance(recipe.data.collator, dict)
     # ModelSpec 제거 확인 — model이 dict로 노출되어야 한다 (S2 변경의 회귀 방지)
     assert isinstance(recipe.model, dict)
+
+
+# ---------------------------------------------------------------------------
+# (7) U1 회귀 방지: Recipe에 callbacks: 블록이 있으면 ValidationError.
+#     extra="forbid" 정책으로 구버전 YAML이 사일런트하게 파싱되는 것을 막는다.
+# ---------------------------------------------------------------------------
+
+
+def test_settings_recipe_callbacks_rejected() -> None:
+    """구버전 Recipe YAML에 callbacks: 블록이 있으면 ValidationError가 발생한다."""
+    import pydantic
+
+    raw = {
+        "name": "legacy-recipe",
+        "task": "image_classification",
+        "model": {"_component_": "tests.e2e.models.TinyVisionModel"},
+        "data": {
+            "dataset": {"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            "collator": {"_component_": "mdp.data.collators.ClassificationCollator", "tokenizer": "gpt2"},
+        },
+        "training": {"epochs": 3},
+        "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+        "metadata": {"author": "test", "description": "legacy"},
+        # 구버전 callbacks 블록 — extra="forbid"로 거부되어야 한다.
+        "callbacks": [{"_component_": "EarlyStopping", "patience": 3}],
+    }
+
+    with pytest.raises(pydantic.ValidationError, match="callbacks"):
+        Recipe(**raw)
+
+
+# ---------------------------------------------------------------------------
+# (8) U2 회귀 방지: Trainer가 TrainingSpec.early_stopping / ema로부터
+#     EarlyStopping / EMACallback 인스턴스를 자동 구성한다.
+# ---------------------------------------------------------------------------
+
+
+def test_trainer_auto_early_stopping_from_spec() -> None:
+    """TrainingSpec.early_stopping이 있으면 Trainer가 EarlyStopping을 자동 구성한다."""
+    import torch
+    from mdp.settings.schema import EarlyStoppingSpec, TrainingSpec
+    from mdp.training.callbacks.early_stopping import EarlyStopping
+    from mdp.training.trainer import Trainer
+    from tests.e2e.conftest import make_test_settings
+    from tests.e2e.datasets import ListDataLoader, make_vision_batches
+    from tests.e2e.models import TinyVisionModel
+
+    settings = make_test_settings(epochs=1)
+    # TrainingSpec에 early_stopping 1급 필드 주입
+    settings.recipe.training = TrainingSpec(
+        epochs=1,
+        early_stopping=EarlyStoppingSpec(monitor="val_loss", patience=3, mode="min"),
+    )
+
+    batches = make_vision_batches(num_batches=2, batch_size=4, num_classes=2, image_size=8)
+    trainer = Trainer(
+        settings=settings,
+        model=TinyVisionModel(num_classes=2, hidden_dim=16),
+        train_loader=ListDataLoader(batches),
+    )
+
+    es_callbacks = [cb for cb in trainer.callbacks if isinstance(cb, EarlyStopping)]
+    assert len(es_callbacks) == 1, "Trainer는 EarlyStoppingSpec으로부터 EarlyStopping을 자동 구성해야 한다."
+    assert es_callbacks[0].monitor == "val_loss"
+    assert es_callbacks[0].patience == 3
+    assert es_callbacks[0].mode == "min"
+
+
+# ---------------------------------------------------------------------------
+# (9) U1 스키마 제약 단위 테스트: invalid value가 ValidationError를 발생시킨다.
+# ---------------------------------------------------------------------------
+
+
+def test_settings_early_stopping_invalid_patience() -> None:
+    """EarlyStoppingSpec(patience=0)은 ge=1 제약 위반으로 ValidationError가 발생한다."""
+    import pydantic
+
+    from mdp.settings.schema import EarlyStoppingSpec
+
+    with pytest.raises(pydantic.ValidationError):
+        EarlyStoppingSpec(patience=0)
+
+
+def test_settings_early_stopping_invalid_patience_negative() -> None:
+    """EarlyStoppingSpec(patience=-1)은 ge=1 제약 위반으로 ValidationError가 발생한다."""
+    import pydantic
+
+    from mdp.settings.schema import EarlyStoppingSpec
+
+    with pytest.raises(pydantic.ValidationError):
+        EarlyStoppingSpec(patience=-1)
+
+
+def test_settings_ema_invalid_decay_gt_1() -> None:
+    """EMASpec(decay=1.5)은 lt=1 제약 위반으로 ValidationError가 발생한다."""
+    import pydantic
+
+    from mdp.settings.schema import EMASpec
+
+    with pytest.raises(pydantic.ValidationError):
+        EMASpec(decay=1.5)
+
+
+def test_settings_ema_invalid_decay_eq_1() -> None:
+    """EMASpec(decay=1.0)은 lt=1 제약 위반으로 ValidationError가 발생한다."""
+    import pydantic
+
+    from mdp.settings.schema import EMASpec
+
+    with pytest.raises(pydantic.ValidationError):
+        EMASpec(decay=1.0)
+
+
+def test_settings_ema_invalid_decay_zero() -> None:
+    """EMASpec(decay=0.0)은 gt=0 제약 위반으로 ValidationError가 발생한다."""
+    import pydantic
+
+    from mdp.settings.schema import EMASpec
+
+    with pytest.raises(pydantic.ValidationError):
+        EMASpec(decay=0.0)
+
+
+def test_settings_ema_invalid_decay_negative() -> None:
+    """EMASpec(decay=-0.5)은 gt=0 제약 위반으로 ValidationError가 발생한다."""
+    import pydantic
+
+    from mdp.settings.schema import EMASpec
+
+    with pytest.raises(pydantic.ValidationError):
+        EMASpec(decay=-0.5)
+
+
+def test_trainer_auto_ema_from_spec() -> None:
+    """TrainingSpec.ema가 있으면 Trainer가 EMACallback을 자동 구성한다."""
+    from mdp.settings.schema import EMASpec, TrainingSpec
+    from mdp.training.callbacks.ema import EMACallback
+    from mdp.training.trainer import Trainer
+    from tests.e2e.conftest import make_test_settings
+    from tests.e2e.datasets import ListDataLoader, make_vision_batches
+    from tests.e2e.models import TinyVisionModel
+
+    settings = make_test_settings(epochs=1)
+    settings.recipe.training = TrainingSpec(
+        epochs=1,
+        ema=EMASpec(decay=0.999, update_after_step=0, update_every=1),
+    )
+
+    batches = make_vision_batches(num_batches=2, batch_size=4, num_classes=2, image_size=8)
+    trainer = Trainer(
+        settings=settings,
+        model=TinyVisionModel(num_classes=2, hidden_dim=16),
+        train_loader=ListDataLoader(batches),
+    )
+
+    ema_callbacks = [cb for cb in trainer.callbacks if isinstance(cb, EMACallback)]
+    assert len(ema_callbacks) == 1, "Trainer는 EMASpec으로부터 EMACallback을 자동 구성해야 한다."
+    assert abs(ema_callbacks[0].decay - 0.999) < 1e-6

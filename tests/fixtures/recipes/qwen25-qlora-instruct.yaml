@@ -74,12 +74,6 @@ evaluation:
   metrics:
     - perplexity
 
-callbacks:
-  - _component_: ModelCheckpoint
-    monitor: val_perplexity
-    save_top_k: 2
-    mode: min
-
 metadata:
   author: wesley
   description: "Qwen-2.5 7B QLoRA SFT on UltraChat 200K. 2-node DeepSpeed ZeRO-3, 4-bit NF4."

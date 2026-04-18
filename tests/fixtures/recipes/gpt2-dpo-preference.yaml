@@ -51,12 +51,6 @@ rl:
       _component_: AutoModelForCausalLM
       pretrained: hf://gpt2
 
-callbacks:
-  - _component_: ModelCheckpoint
-    monitor: val_loss
-    save_top_k: 1
-    mode: min
-
 metadata:
   author: wesley
   description: "GPT-2 DPO on Anthropic HH-RLHF (minimal preference fixture)."

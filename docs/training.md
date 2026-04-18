@@ -265,9 +265,43 @@ on_train_start → on_epoch_start → (on_batch_start → on_batch_end)* → on_
 → on_validation_start → on_validation_end → on_train_end
 ```
 
-### ModelCheckpoint
+콜백은 `--callbacks <yaml>` CLI 파일로만 주입한다. Recipe에는 `callbacks:` 필드가 없다.
+
+### EarlyStopping (training.early_stopping 1급 필드)
+
+EarlyStopping은 Recipe의 `training.early_stopping` 필드로 지정한다. `--callbacks`로 직접 지정하는 경로는 aliases에서 제거되어 막혀 있다.
 
 ```yaml
+training:
+  early_stopping:
+    monitor: val_loss
+    patience: 5
+    mode: min
+    min_delta: 0.001             # 최소 개선량
+```
+
+`patience` 동안 메트릭이 개선되지 않으면 학습을 조기 종료한다. Pydantic 타입 검증을 통해 YAML 로딩 시점에 잘못된 값(음수 patience 등)을 즉시 차단한다.
+
+### EMACallback (training.ema 1급 필드)
+
+동일하게 Recipe의 `training.ema` 필드로 지정한다.
+
+```yaml
+training:
+  ema:
+    decay: 0.9999
+    update_after_step: 0
+    update_every: 1
+```
+
+Exponential Moving Average — 매 스텝마다 모델 가중치의 이동 평균을 유지하고, `on_train_end`에서 EMA 가중치를 모델에 복사하여 최종 평가/저장 대상으로 사용한다.
+
+### ModelCheckpoint
+
+`--callbacks <yaml>`로 주입한다.
+
+```yaml
+# callbacks.yaml
 - _component_: ModelCheckpoint
   dirpath: ./checkpoints
   monitor: val_loss
@@ -286,27 +320,6 @@ on_train_start → on_epoch_start → (on_batch_start → on_batch_end)* → on_
 `strict`는 콜백의 `critical` 속성과 **이름만 유사하고 의미가 다르다**. `critical`은 콜백에서 발생한 예외를 trainer가 재전파할지 결정하는 공용 스위치이고, `strict`는 ModelCheckpoint 내부의 monitor 미매칭 처리 방식을 결정한다. 둘은 독립적으로 조합 가능하다.
 
 **`TrainResult.checkpoints_saved`**: 학습 종료 후 결과 JSON에 실제 저장된 체크포인트 개수가 `checkpoints_saved: int | None`으로 포함된다. 상위 오케스트레이터가 MLflow artifact 조회 없이도 "이 run이 산출물을 남겼는가"를 1차 판정할 수 있다. `0`이면 monitor 미매칭 등으로 인한 silent failure를 즉시 탐지 가능.
-
-### EarlyStopping
-
-```yaml
-- _component_: EarlyStopping
-  monitor: val_loss
-  patience: 5
-  mode: min
-  min_delta: 0.001             # 최소 개선량
-```
-
-`patience` 동안 메트릭이 개선되지 않으면 학습을 조기 종료한다.
-
-### EMACallback
-
-```yaml
-- _component_: EMACallback
-  decay: 0.999
-```
-
-Exponential Moving Average — 매 스텝마다 모델 가중치의 이동 평균을 유지한다.
 
 ---
 

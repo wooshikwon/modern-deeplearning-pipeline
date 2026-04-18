@@ -152,6 +152,10 @@ def run_generate(
                     raise
                 logger.warning("Inference callback %s.setup 실패: %s", type(cb).__name__, e)
 
+        # Intervention 메타데이터 태깅 (setup 완료 후)
+        from mdp.callbacks.interventions import apply_intervention_tags
+        apply_intervention_tags(inference_cbs)
+
         try:
             if not hasattr(model, "generate"):
                 raise ValueError(

@@ -22,15 +22,13 @@ data:
 training:
   epochs: 2
   precision: fp32
+  early_stopping:
+    monitor: val_loss
+    patience: 10
 
 optimizer:
   _component_: AdamW
   lr: 0.001
-
-callbacks:
-  - _component_: EarlyStopping
-    monitor: val_loss
-    patience: 10
 
 metadata:
   author: test

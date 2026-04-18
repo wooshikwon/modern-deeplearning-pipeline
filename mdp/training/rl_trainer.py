@@ -27,12 +27,14 @@ from mdp.settings.schema import Settings
 from mdp.training._common import (
     aggregate_checkpoint_stats,
     backward_and_step,
-    create_callbacks,
     create_expert_parallel,
     create_strategy,
     detect_device,
     setup_amp,
 )
+from mdp.training.callbacks.base import BaseCallback
+from mdp.training.callbacks.early_stopping import EarlyStopping
+from mdp.training.callbacks.ema import EMACallback
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +48,7 @@ class RLTrainer:
         models: dict[str, nn.Module],
         train_loader: DataLoader,
         val_loader: DataLoader | None = None,
+        callbacks: list[BaseCallback] | None = None,
     ) -> None:
         self.settings = settings
         self.train_loader = train_loader
@@ -125,7 +128,11 @@ class RLTrainer:
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Callbacks
-        self.callbacks = create_callbacks(recipe.callbacks, self.resolver)
+        self.callbacks = list(callbacks) if callbacks else []
+        if training.early_stopping is not None:
+            self.callbacks.append(EarlyStopping(**training.early_stopping.model_dump()))
+        if training.ema is not None:
+            self.callbacks.append(EMACallback(**training.ema.model_dump()))
 
         # Validation
         self.val_check_interval = getattr(training, "val_check_interval", 0)

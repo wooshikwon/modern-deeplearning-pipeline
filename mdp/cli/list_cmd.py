@@ -179,24 +179,65 @@ def _load_aliases_by_category() -> dict[str, dict[str, str]]:
     return yaml.safe_load(aliases_path.read_text()) or {}
 
 
+def _classify(class_path: str) -> str:
+    """class_path를 import해 콜백 타입을 분류한다.
+
+    Returns
+    -------
+    "[Int]"   : BaseInterventionCallback 서브클래스 (출력을 바꾸는 개입)
+    "[Obs]"   : BaseInferenceCallback 직계 서브클래스 (읽기 전용 관측)
+    "[Train]" : BaseCallback 서브클래스 (학습 콜백)
+    "[?]"     : import 실패 또는 분류 불가
+    """
+    try:
+        import importlib
+        mod_name, cls_name = class_path.rsplit(".", 1)
+        cls = getattr(importlib.import_module(mod_name), cls_name)
+        from mdp.callbacks.base import BaseInterventionCallback, BaseInferenceCallback
+        if issubclass(cls, BaseInterventionCallback):
+            return "[Int]"
+        if issubclass(cls, BaseInferenceCallback):
+            return "[Obs]"
+        return "[Train]"
+    except Exception:
+        return "[?]"
+
+
+def _classify_to_type_str(class_path: str) -> str:
+    """JSON 모드용 type 문자열을 반환한다."""
+    label = _classify(class_path)
+    return {
+        "[Int]": "intervention",
+        "[Obs]": "observational",
+        "[Train]": "training",
+    }.get(label, "unknown")
+
+
 def _list_callbacks() -> None:
     """Recipe에 `_component_:`로 쓸 수 있는 콜백 alias 목록을 보여준다.
 
     aliases.yaml의 callback 카테고리가 권위 있는 소스 — agent는 여기 표시된
     alias를 그대로 Recipe에 사용해야 한다 (클래스명을 직접 쓰면 ValueError).
+    Type 컬럼: [Int] = intervention (출력 수정), [Obs] = observational (읽기 전용),
+    [Train] = training callback.
     """
     aliases = _load_aliases_by_category().get("callback", {})
     items = sorted(aliases.items())  # [(alias, class_path), ...]
 
     if is_json_mode():
         from mdp.cli.schemas import ListCallbacksResult
-        # 풀 정보로 표시 — 단순 리스트가 아닌 alias→class_path 매핑
+        # 풀 정보로 표시 — 단순 리스트가 아닌 alias→class_path 매핑, type 포함
         result = ListCallbacksResult(callbacks=[a for a, _ in items])
         emit_result(build_result(
             command="list",
             **result.model_dump(),
             callback_aliases=[
-                {"alias": a, "class_path": p, "class_name": p.rsplit(".", 1)[-1]}
+                {
+                    "alias": a,
+                    "class_path": p,
+                    "class_name": p.rsplit(".", 1)[-1],
+                    "type": _classify_to_type_str(p),
+                }
                 for a, p in items
             ],
         ))
@@ -208,12 +249,14 @@ def _list_callbacks() -> None:
     console = Console()
     table = Table(title="Available Callbacks", show_header=True, header_style="bold cyan")
     table.add_column("Alias (use in _component_)", style="bold")
+    table.add_column("Type", no_wrap=True)
     table.add_column("Class")
     table.add_column("Module")
 
     for alias, class_path in items:
         module, _, cls_name = class_path.rpartition(".")
-        table.add_row(alias, cls_name, module)
+        type_label = _classify(class_path)
+        table.add_row(alias, type_label, cls_name, module)
 
     console.print(table)
 

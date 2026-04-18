@@ -148,9 +148,6 @@ def _build_recipe_from_catalog(
 
     recipe["training"] = {"epochs": 3, "precision": "bf16"}
     recipe["optimizer"] = {"_component_": "AdamW", "lr": 2e-5, "weight_decay": 0.01}
-    recipe["callbacks"] = [
-        {"_component_": "ModelCheckpoint", "save_top_k": 3, "monitor": "val_loss"},
-    ]
     recipe["metadata"] = {"author": "???", "description": "???"}
 
     return _yaml.dump(recipe, allow_unicode=True, default_flow_style=False, sort_keys=False)
@@ -245,11 +242,6 @@ def _default_recipe_yaml() -> str:
           metrics:
             - accuracy
             - f1
-
-        callbacks:
-          - _component_: ModelCheckpoint
-            save_top_k: 3
-            monitor: val_loss
 
         metadata:
           author: your-name

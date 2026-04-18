@@ -225,7 +225,12 @@ CLI는 모델 소스와 콜백 유무에 따라 DefaultOutputCallback을 자동 
 
 자동 주입은 CLI 레이어에서 수행되며, `run_batch_inference`는 전달받은 콜백을 그대로 실행하는 순수한 엔진이다.
 
-### BaseInferenceCallback 인터페이스
+### BaseInferenceCallback / BaseInterventionCallback 인터페이스
+
+추론 콜백은 두 타입으로 분류된다:
+
+- **`BaseInferenceCallback`** (`is_intervention=False`): 읽기 전용 관측. hidden state 추출, attention 분석 등
+- **`BaseInterventionCallback`** (`is_intervention=True`): 출력을 바꾸는 개입. `metadata -> dict` 프로퍼티 구현 필수
 
 ```python
 from mdp.callbacks.base import BaseInferenceCallback
@@ -243,12 +248,34 @@ class ActivationAnalyzer(BaseInferenceCallback):
 
     def on_batch(self, batch_idx, batch, outputs, **kwargs):
         """매 배치 forward 후. 캡처된 활성화 처리."""
-        # self._activations[-1] 접근
 
     def teardown(self, **kwargs):
         """추론 완료 후. hook 해제, 결과 저장."""
         self._handle.remove()
         torch.save(self._activations, "activations.pt")
+```
+
+### Intervention MLflow 태깅
+
+`BaseInterventionCallback` 서브클래스를 `--callbacks`로 주입하면, 추론 시작 시 `apply_intervention_tags`가 자동으로 각 callback의 `metadata` 프로퍼티를 MLflow에 기록한다:
+
+- 활성 MLflow run이 있으면 `mlflow.set_tag("intervention.{i}.{key}", value)` 형태로 tag 기록
+- MLflow run이 없으면 stdout/log에만 출력
+
+```yaml
+# intervention.yaml
+- _component_: ResidualAdd
+  target_layers: [20, 21]
+  vector_path: ./steer_vector.pt
+  strength: 1.5
+- _component_: LogitBias
+  token_biases: {1234: 2.0, 5678: -1.0}
+```
+
+```bash
+mdp generate --pretrained hf://meta-llama/Meta-Llama-3-8B \
+  --prompts prompts.jsonl --callbacks intervention.yaml
+# → MLflow에 intervention.0.type=ResidualAdd, intervention.0.strength=1.5 등 자동 기록
 ```
 
 ### 콜백 YAML 작성
@@ -262,15 +289,17 @@ class ActivationAnalyzer(BaseInferenceCallback):
 ### 사용
 
 ```bash
-# 학습된 모델 + 분석 콜백
+# 학습된 모델 + 관측 콜백
 mdp inference --run-id <id> --data test.jsonl --callbacks analysis.yaml
 
-# 오픈소스 모델 + 분석 콜백
+# 오픈소스 모델 + 관측 콜백
 mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
   --data prompts.jsonl --callbacks analysis.yaml
 ```
 
 추론 루프는 hidden state/attention을 직접 다루지 않으며, 모든 내부 접근은 콜백의 `register_forward_hook`을 통해 이루어진다.
+
+`mdp list callbacks`로 현재 등록된 콜백의 타입(`[Int]`/`[Obs]`/`[Train]`)을 확인할 수 있다.
 
 ---
 

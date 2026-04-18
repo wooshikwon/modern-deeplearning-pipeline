@@ -27,19 +27,23 @@ def _detect_gpu_count() -> int:
         return 0
 
 
-def _run_single(settings) -> dict:
+def _run_single(settings, cb_configs: list[dict] | None = None) -> dict:
     """단일 GPU/CPU RL 학습을 실행한다."""
     from mdp.cli._torchrun_entry import run_training
 
-    return run_training(settings)
+    return run_training(settings, cb_configs=cb_configs)
 
 
-def _run_distributed(settings, nproc: int) -> dict:
+def _run_distributed(settings, nproc: int, cb_configs: list[dict] | None = None) -> dict:
     """torchrun을 사용하여 분산 RL 학습을 실행한다."""
+    settings_dict = settings.model_dump()
+    if cb_configs:
+        settings_dict["__cb_configs"] = cb_configs
+
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False,
     ) as f:
-        json.dump(settings.model_dump(), f, ensure_ascii=False, default=str)
+        json.dump(settings_dict, f, ensure_ascii=False, default=str)
         settings_path = f.name
 
     result_path = str(Path(settings_path).with_suffix("")) + "_result.json"
@@ -88,9 +92,10 @@ def run_rl_train(
     try:
         settings = SettingsFactory().for_training(recipe_path, config_path, overrides=overrides)
 
+        cb_configs: list[dict] = []
         if callbacks_file:
             from mdp.training._common import load_callbacks_from_file
-            settings.recipe.callbacks = load_callbacks_from_file(callbacks_file)
+            cb_configs = load_callbacks_from_file(callbacks_file)
     except Exception as e:
         if is_json_mode():
             emit_result(build_error(command="rl-train", error_type="ValidationError", message=str(e)))
@@ -119,11 +124,11 @@ def run_rl_train(
         if nproc > 1:
             if not is_json_mode():
                 typer.echo(f"분산 RL 학습 시작 (nproc={nproc})...")
-            train_result = _run_distributed(settings, nproc)
+            train_result = _run_distributed(settings, nproc, cb_configs=cb_configs or None)
         else:
             if not is_json_mode():
                 typer.echo("RL 학습 시작...")
-            train_result = _run_single(settings)
+            train_result = _run_single(settings, cb_configs=cb_configs or None)
 
         if not is_json_mode():
             typer.echo(f"학습 완료. steps={train_result.get('total_steps', 0)}, loss={train_result.get('metrics', {}).get('loss', 0):.4f}")

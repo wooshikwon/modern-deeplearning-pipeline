@@ -159,6 +159,10 @@ def run_batch_inference(
                 raise
             logger.warning("Inference callback %s.setup 실패: %s", type(cb).__name__, e)
 
+    # Intervention 메타데이터 태깅 (setup 완료 후)
+    from mdp.callbacks.interventions import apply_intervention_tags
+    apply_intervention_tags(inference_cbs)
+
     forward_fn = _make_forward_fn(model)
     _sample_offset = 0  # metadata 슬라이싱용 누적 오프셋
     _total_samples = 0

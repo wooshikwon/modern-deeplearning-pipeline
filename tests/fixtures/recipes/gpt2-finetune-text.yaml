@@ -59,12 +59,6 @@ evaluation:
     - perplexity
     - bleu
 
-callbacks:
-  - _component_: ModelCheckpoint
-    monitor: val_perplexity
-    save_top_k: 2
-    mode: min
-
 metadata:
   author: wesley
   description: "GPT-2 base full fine-tuning on WikiText-103. 4GPU DDP, bf16."

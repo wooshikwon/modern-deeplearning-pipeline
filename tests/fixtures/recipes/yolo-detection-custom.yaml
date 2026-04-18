@@ -65,6 +65,10 @@ training:
   gradient_accumulation_steps: 1
   gradient_clip_max_norm: 10.0
   val_check_interval: 1.0
+  early_stopping:
+    monitor: val_mAP
+    patience: 20
+    mode: max
 
 optimizer:
   _component_: SGD
@@ -83,16 +87,6 @@ evaluation:
   metrics:
     - mAP
     - mAP@50
-
-callbacks:
-  - _component_: ModelCheckpoint
-    monitor: val_mAP
-    save_top_k: 3
-    mode: max
-  - _component_: EarlyStopping
-    monitor: val_mAP
-    patience: 20
-    mode: max
 
 metadata:
   author: wesley

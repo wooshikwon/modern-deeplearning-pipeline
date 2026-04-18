@@ -153,5 +153,33 @@ class BaseInferenceCallback(BaseCallback):
               (label, topic 등)를 담고 있다. artifact 분기이거나 메타데이터가 없으면 None.
         """
 
+    is_intervention: bool = False
+
     def teardown(self, **kwargs) -> None:  # noqa: ARG002
         """추론 완료 후 호출. 누적 결과 저장, hook 핸들 해제."""
+
+
+class BaseInterventionCallback(BaseInferenceCallback):
+    """출력을 수정하는 callback. 이것이 없으면 inference 결과가 달라진다는 계약.
+
+    - `is_intervention = True`가 서브클래스에서 자동 전파된다.
+    - `metadata` 프로퍼티는 MLflow tag 적재용 정보를 반환한다. 구현 필수.
+    - 관측 callback(BaseInferenceCallback 직계 서브클래스)은 `is_intervention = False`.
+    """
+
+    is_intervention: bool = True
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """MLflow tag로 적재될 개입 metadata. 최소 `type` 키 필수.
+
+        예:
+            {"type": "ResidualAdd", "target_layers": [20, 21],
+             "vector_sha256": "abc123...", "strength": 1.0}
+
+        MLflow tag 키는 호출자(U6)가 `intervention.{i}.{k}`로 프리픽스를 붙인다.
+        값은 str/int/float/list 중 하나여야 하며, list는 JSON 직렬화된다.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__}.metadata must be implemented for MLflow logging."
+        )

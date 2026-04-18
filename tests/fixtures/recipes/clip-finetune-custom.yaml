@@ -68,14 +68,6 @@ evaluation:
     - retrieval_accuracy
     - clip_score
 
-callbacks:
-  - _component_: ModelCheckpoint
-    monitor: val_retrieval_accuracy
-    save_top_k: 3
-    mode: max
-  - _component_: LRMonitor
-    logging_interval: step
-
 metadata:
   author: wesley
   description: "CLIP ViT-B/32 fine-tuning on custom image-text pairs. GCP A100x8, bf16."
