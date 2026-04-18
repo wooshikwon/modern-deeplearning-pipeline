@@ -1201,6 +1201,7 @@ class RLTrainer:
             preference 배치는 logits가 chosen/rejected로 분리되어 있으므로 None을 반환한다.
         """
         is_preference = "chosen_input_ids" in batch
+        needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
             if is_preference:
                 with torch.no_grad():
@@ -1210,6 +1211,12 @@ class RLTrainer:
                 with torch.no_grad():
                     frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
                 trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
+                if needs_hidden and "policy" in self.trainable:
+                    hidden, head_weight = self._extract_hidden_states_and_head(
+                        self.trainable["policy"], batch
+                    )
+                    trainable_out.setdefault("policy", {})["hidden_states"] = hidden
+                    trainable_out["policy"]["output_head_weight"] = head_weight
             losses = self.algorithm.compute_loss(trainable_out, frozen_out, batch)
 
         # policy 로짓 추출 — pointwise 배치에서만 available
@@ -1294,14 +1301,22 @@ class RLTrainer:
 
         # 4. Mini-epoch update
         mini_epochs = getattr(self.algorithm, "mini_epochs", 1)
+        needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
         last_loss = 0.0
         all_nan = True
         for _ in range(mini_epochs):
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
+                gen_forward_batch = {"input_ids": generated_ids, "attention_mask": gen_mask}
                 trainable_out = {
-                    name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask}, role=name)
+                    name: self._forward_model(m, gen_forward_batch, role=name)
                     for name, m in self.trainable.items()
                 }
+                if needs_hidden and "policy" in self.trainable:
+                    hidden, head_weight = self._extract_hidden_states_and_head(
+                        self.trainable["policy"], gen_forward_batch
+                    )
+                    trainable_out.setdefault("policy", {})["hidden_states"] = hidden
+                    trainable_out["policy"]["output_head_weight"] = head_weight
                 losses = self.algorithm.compute_loss(trainable_out, frozen_out, gen_batch)
 
             step_schedulers = {
@@ -1377,6 +1392,187 @@ class RLTrainer:
         if isinstance(out, dict):
             return out.get("logits", out.get("output"))
         return out
+
+    # ------------------------------------------------------------------ #
+    #  Framework-agnostic hidden-states + head-weight dispatcher         #
+    #  Algorithm이 ``needs_hidden_states=True``를 선언하면 train loop이    #
+    #  ``_extract_hidden_states_and_head(policy, batch)``를 호출하여       #
+    #  fused linear cross-entropy 같은 memory-efficient 경로를 활성화.    #
+    # ------------------------------------------------------------------ #
+
+    def _extract_hidden_states_and_head(
+        self,
+        model: nn.Module,
+        batch: dict,
+        layer_idx: int = -1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Framework-agnostic dispatcher for (hidden, head_weight) extraction.
+
+        Priority:
+            1. Model의 ``extract_features_and_head`` override (BaseModel subclass 등).
+            2. HF ``PreTrainedModel`` 기본 — ``output_hidden_states=True`` 경유.
+            3. timm 모델 기본 — ``forward_features`` + ``get_classifier``.
+            4. torchvision ``ResNet`` 계열 기본 — manual layer forward + ``model.fc``.
+            5. 그 외 — ``NotImplementedError`` with guidance.
+
+        Returns:
+            (hidden, head_weight):
+              - hidden: framework-dependent shape. NLP causal LM은 ``(B, S, H)``.
+              - head_weight: output projection weight. ``(V, H)`` 또는 ``(C, H)``.
+        """
+        # DDP/FSDP wrapper 언래핑 — 래핑된 모델은 .module으로 실제 모델에 접근
+        unwrapped = getattr(model, "module", model)
+
+        # Priority 1: 모델의 override (BaseModel subclass 또는 framework wrapper)
+        if hasattr(unwrapped, "extract_features_and_head"):
+            try:
+                return unwrapped.extract_features_and_head(batch, layer_idx=layer_idx)
+            except NotImplementedError:
+                # BaseModel의 기본 구현이 NotImplementedError이므로 dispatcher로 위임
+                pass
+
+        # Priority 2: HF PreTrainedModel
+        try:
+            from transformers import PreTrainedModel
+
+            if isinstance(unwrapped, PreTrainedModel):
+                return self._extract_hf_pretrained(unwrapped, batch, layer_idx)
+        except ImportError:
+            pass
+
+        # Priority 3: timm 모델
+        try:
+            import timm.models
+
+            # timm 모델은 일반적으로 `default_cfg` 속성을 가지며,
+            # `forward_features`/`get_classifier` 메서드를 보유한다.
+            is_timm = (
+                hasattr(unwrapped, "default_cfg")
+                and hasattr(unwrapped, "forward_features")
+                and hasattr(unwrapped, "get_classifier")
+            )
+            # timm.models 모듈 import가 성공한 경우에만 timm 경로 진입
+            _ = timm.models  # 린터 무시 + 명시적 import 의존
+            if is_timm:
+                return self._extract_timm(unwrapped, batch)
+        except ImportError:
+            pass
+
+        # Priority 4: torchvision ResNet 계열
+        try:
+            from torchvision.models.resnet import ResNet
+
+            if isinstance(unwrapped, ResNet):
+                return self._extract_torchvision_resnet(unwrapped, batch)
+        except ImportError:
+            pass
+
+        # Priority 5: 미지원 모델 — 명확한 안내 메시지
+        raise NotImplementedError(
+            f"Model {type(unwrapped).__name__}의 extract_features_and_head "
+            "기본 구현이 없습니다. BaseModel을 상속하고 override하거나, "
+            "지원되는 framework(HF PreTrainedModel / timm / torchvision ResNet)로 "
+            "감싸세요."
+        )
+
+    def _extract_hf_pretrained(
+        self,
+        model: nn.Module,
+        batch: dict,
+        layer_idx: int = -1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """HF ``PreTrainedModel`` 기본 구현.
+
+        ``output_hidden_states=True``로 forward 호출하여
+        ``hidden_states[layer_idx]``와 ``get_output_embeddings().weight``을 반환한다.
+        """
+        out = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch.get("attention_mask"),
+            output_hidden_states=True,
+        )
+        hidden_states = getattr(out, "hidden_states", None)
+        if hidden_states is None:
+            raise NotImplementedError(
+                f"HF 모델 {type(model).__name__}이 hidden_states를 반환하지 않습니다. "
+                "extract_features_and_head를 override하세요."
+            )
+        hidden = hidden_states[layer_idx]
+
+        output_embeddings = model.get_output_embeddings()
+        if output_embeddings is None or getattr(output_embeddings, "weight", None) is None:
+            raise NotImplementedError(
+                f"HF 모델 {type(model).__name__}에는 output embedding이 없습니다 "
+                "(encoder-only 모델 등). extract_features_and_head를 override하세요."
+            )
+        return hidden, output_embeddings.weight
+
+    def _extract_timm(
+        self,
+        model: nn.Module,
+        batch: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """timm 모델 기본 구현.
+
+        ``forward_features`` + ``get_classifier``의 weight을 반환한다.
+        ``Identity`` classifier(num_classes=0)는 지원 불가.
+        """
+        pixel_values = batch.get("pixel_values")
+        if pixel_values is None:
+            raise NotImplementedError(
+                "timm 모델은 batch['pixel_values']를 요구합니다. "
+                "현재 batch keys: " + ", ".join(sorted(batch.keys()))
+            )
+        features = model.forward_features(pixel_values)
+        classifier = model.get_classifier()
+        if isinstance(classifier, nn.Identity):
+            raise NotImplementedError(
+                f"timm 모델 {type(model).__name__}의 classifier가 Identity입니다 "
+                "(num_classes=0). extract_features_and_head를 override하세요."
+            )
+        weight = getattr(classifier, "weight", None)
+        if weight is None:
+            raise NotImplementedError(
+                f"timm 모델 {type(model).__name__}의 classifier에 weight 속성이 "
+                "없습니다. extract_features_and_head를 override하세요."
+            )
+        return features, weight
+
+    def _extract_torchvision_resnet(
+        self,
+        model: nn.Module,
+        batch: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """torchvision ``ResNet`` 기본 구현.
+
+        ``conv1``~``avgpool``까지 수동 forward 후 ``flatten`` 결과를 hidden으로,
+        ``model.fc.weight``을 head로 반환한다. Custom ResNet variant는
+        ``extract_features_and_head`` override 필요.
+        """
+        x = batch.get("pixel_values")
+        if x is None:
+            raise NotImplementedError(
+                "torchvision ResNet은 batch['pixel_values']를 요구합니다. "
+                "현재 batch keys: " + ", ".join(sorted(batch.keys()))
+            )
+        x = model.conv1(x)
+        x = model.bn1(x)
+        x = model.relu(x)
+        x = model.maxpool(x)
+        x = model.layer1(x)
+        x = model.layer2(x)
+        x = model.layer3(x)
+        x = model.layer4(x)
+        x = model.avgpool(x)
+        hidden = torch.flatten(x, 1)
+
+        fc = getattr(model, "fc", None)
+        if fc is None or getattr(fc, "weight", None) is None:
+            raise NotImplementedError(
+                f"torchvision 모델 {type(model).__name__}의 fc가 없습니다. "
+                "extract_features_and_head를 override하세요."
+            )
+        return hidden, fc.weight
 
     def _forward_model(self, model: nn.Module, batch: dict, role: str = "policy") -> dict:
         """Causal forward를 수행한다.

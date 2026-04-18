@@ -79,7 +79,14 @@ def run_rl_train(
     callbacks_file: str | None = None,
 ) -> None:
     """RL Recipe + Config YAML로 alignment 학습을 실행한다."""
+    from mdp._liger_patch import apply_liger_patches
     from mdp.settings.factory import SettingsFactory
+
+    # Liger monkey-patch는 HF 모델 로드 이전에 적용. 단일 GPU 경로에서는
+    # run_training() 내부에서도 한 번 더 호출되지만 idempotent하여 안전하다.
+    # 분산 경로에서는 torchrun subprocess의 run_training()이 각 rank에서 적용한다.
+    # 상세: mdp/_liger_patch.py, spec-algorithm-hidden-states-support §U2.
+    apply_liger_patches()
 
     if not is_json_mode():
         typer.echo(f"Recipe: {recipe_path}")

@@ -1601,6 +1601,19 @@ wheels = [
 ]
 
 [[package]]
+name = "liger-kernel"
+version = "0.7.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+    { name = "triton" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/73/f8/a25ab6549dd80c5055e84f0ee9be6ecf4a7c85ade448110607f4807ab2ef/liger_kernel-0.7.0.tar.gz", hash = "sha256:48c25648974c7d07d47591117b94188d1059999b7fb652e89e8ba50b21183cb3", size = 3780796, upload-time = "2026-02-12T22:01:00.101Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f7/c6/66c6a3c59b53f4cfbfa0c9e8c573c8843fb1d83cf3c2eb79e39109b76c17/liger_kernel-0.7.0-py3-none-any.whl", hash = "sha256:d2185d94362c069f508eb8aff5e7016c6669613265d5702733d674af4c616a56", size = 276512, upload-time = "2026-02-12T22:00:58.565Z" },
+]
+
+[[package]]
 name = "mako"
 version = "1.3.10"
 source = { registry = "https://pypi.org/simple" }
@@ -1806,6 +1819,7 @@ all = [
     { name = "datasets" },
     { name = "fastapi" },
     { name = "flash-attn" },
+    { name = "liger-kernel" },
     { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "peft" },
@@ -1824,6 +1838,9 @@ language = [
     { name = "peft" },
     { name = "tokenizers" },
     { name = "transformers" },
+]
+liger = [
+    { name = "liger-kernel" },
 ]
 serving = [
     { name = "accelerate" },
@@ -1848,7 +1865,8 @@ requires-dist = [
     { name = "datasets", marker = "extra == 'language'", specifier = ">=2.16" },
     { name = "fastapi", marker = "extra == 'serving'", specifier = ">=0.104" },
     { name = "flash-attn", marker = "extra == 'language'", specifier = ">=2.5" },
-    { name = "mdp", extras = ["vision", "language", "serving"], marker = "extra == 'all'" },
+    { name = "liger-kernel", marker = "extra == 'liger'", specifier = ">=0.4.0" },
+    { name = "mdp", extras = ["vision", "language", "serving", "liger"], marker = "extra == 'all'" },
     { name = "mlflow", specifier = ">=2.10" },
     { name = "onnxruntime", marker = "extra == 'serving'", specifier = ">=1.16" },
     { name = "peft", marker = "extra == 'language'", specifier = ">=0.10,<0.19.0" },
@@ -1866,7 +1884,7 @@ requires-dist = [
     { name = "ultralytics", marker = "extra == 'vision'", specifier = ">=8.0" },
     { name = "uvicorn", marker = "extra == 'serving'", specifier = ">=0.24" },
 ]
-provides-extras = ["vision", "language", "serving", "all"]
+provides-extras = ["vision", "language", "serving", "liger", "all"]
 
 [[package]]
 name = "mdurl"
