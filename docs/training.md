@@ -66,6 +66,38 @@ scheduler:
   warmup_ratio: 0.1          # 전체의 10% (상호 배타)
 ```
 
+#### Warmup Tuning — `warmup_start_factor` / `warmup_end_factor`
+
+위 두 필드(`warmup_steps`·`warmup_ratio`)가 **얼마나 길게** warmup할지를 결정한다면, `warmup_start_factor` / `warmup_end_factor`는 **어떤 곡선**으로 warmup할지를 결정한다. 내부적으로 MDP는 `torch.optim.lr_scheduler.LinearLR(start_factor, end_factor, total_iters=warmup_steps)`을 `SequentialLR`로 base scheduler 앞에 감싼다. 두 factor는 MDP 기본값 유지를 전제로 하는 **opt-in** 필드다.
+
+| 필드 | 타입 | 기본값 | 역할 |
+|------|------|--------|------|
+| `warmup_start_factor` | float (선택) | `1e-8` | warmup step 0의 `base_lr` 멀티플라이어 |
+| `warmup_end_factor` | float (선택) | `1.0` | warmup 마지막 step의 `base_lr` 멀티플라이어 |
+
+- **유효 범위**: `0 < warmup_start_factor <= warmup_end_factor <= 1.0`. 위반 시 Trainer / RLTrainer 초기화 단계에서 `ValueError`.
+- **`warmup_start_factor = 0` 금지**: PyTorch `LinearLR`이 `start_factor = 0`에서 `ZeroDivisionError`(issue #86454)를 낸다. "0에서 시작"하는 HF 관례를 원하면 `1e-8` 같은 양의 매우 작은 값을 쓴다 — MDP 기본값 `1e-8`이 바로 이 관례의 PyTorch-호환 구현이다.
+- **두 필드 생략 시**: `start_factor=1e-8`, `end_factor=1.0`. bf16 mantissa 아래 수치이므로 HF `get_linear_schedule_with_warmup`과 실효적으로 동일.
+
+사용 예시 (base_lr의 10%에서 시작하도록 조정):
+
+```yaml
+scheduler:
+  _component_: CosineAnnealingLR
+  T_max: 100
+  warmup_ratio: 0.03
+  warmup_start_factor: 0.1    # base_lr × 0.1에서 시작 (MDP 기본 1e-8 대신)
+  warmup_end_factor: 1.0
+```
+
+**언제 기본값(`1e-8`)을 바꿀까**:
+
+- **소규모 `warmup_steps` (< 10)**: step당 factor 증가폭이 너무 커져 초반 몇 step의 gradient 변화가 과격해질 수 있다. `start_factor=0.1~0.3`이 gradient 완충 효과를 준다.
+- **LoRA adapter zero-init**: LoRA는 `B=0`으로 초기화되어 첫 step에서 adapter 출력이 0이므로 "극단적으로 작은 lr에서 시작"할 필요가 거의 없다. 짧은 constant LR이나 완화된 warmup(`start_factor=0.1` 수준)이 문헌상 잘 동작한다.
+- **일반 LLM SFT**: MDP 기본값이 LLaMA-3 SFT 실전 스택(LLaMA-Factory, Axolotl, WaveCoder 등)과 수치적으로 동등하므로 **조정 불필요**.
+
+RLTrainer는 `recipe.rl.models.{policy|critic|value|...}.scheduler` 각각이 독립 dict이므로 모델별로 다른 factor를 지정할 수 있다. Trainer와 RLTrainer는 공용 헬퍼(`mdp/training/_schedulers.py`)를 경유하므로 같은 Recipe 필드로 양쪽에서 동일한 LinearLR이 조립된다.
+
 ### Loss 함수 선택
 
 **방법 1: 외부 loss 지정** — `model.forward()` → `loss_fn(logits, labels)`

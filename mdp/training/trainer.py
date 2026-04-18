@@ -32,6 +32,10 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
+from mdp.training._schedulers import (
+    create_scheduler_with_warmup,
+    parse_warmup_config,
+)
 from mdp.training.callbacks.base import BaseCallback
 from mdp.training.callbacks.early_stopping import EarlyStopping
 from mdp.training.callbacks.ema import EMACallback
@@ -143,44 +147,15 @@ class Trainer:
         if config is None:
             return None, "step"
 
-        config = dict(config)  # don't mutate original
-        interval = config.pop("interval", "step")
-        warmup_steps = config.pop("warmup_steps", 0)
-        warmup_ratio = config.pop("warmup_ratio", 0.0)
-
-        if warmup_steps > 0 and warmup_ratio > 0:
-            raise ValueError(
-                "warmup_steps와 warmup_ratio를 동시에 지정할 수 없습니다. "
-                f"warmup_steps={warmup_steps}, warmup_ratio={warmup_ratio}"
-            )
-
-        if warmup_steps == 0 and warmup_ratio > 0:
-            total_steps = self._estimate_total_steps()
-            warmup_steps = int(total_steps * warmup_ratio)
-
+        config = dict(config)  # copy — parse_warmup_config는 in-place pop 수행
+        total_steps = self._estimate_total_steps()
+        warmup = parse_warmup_config(config, total_steps)
         klass, kwargs = self.resolver.resolve_partial(config)
         base_scheduler = klass(self.optimizer, **kwargs)
-
-        if warmup_steps > 0:
-            base_scheduler = self._wrap_with_warmup(
-                base_scheduler, warmup_steps
-            )
-
-        return base_scheduler, interval
-
-    def _wrap_with_warmup(self, scheduler: Any, warmup_steps: int) -> Any:
-        """LinearLR warmup → base scheduler via SequentialLR."""
-        warmup = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer,
-            start_factor=1e-8,
-            end_factor=1.0,
-            total_iters=warmup_steps,
+        scheduler = create_scheduler_with_warmup(
+            self.optimizer, base_scheduler, warmup
         )
-        return torch.optim.lr_scheduler.SequentialLR(
-            self.optimizer,
-            schedulers=[warmup, scheduler],
-            milestones=[warmup_steps],
-        )
+        return scheduler, warmup.interval
 
     def _create_loss(self, config: dict[str, Any] | None) -> nn.Module | None:
         if config is None:

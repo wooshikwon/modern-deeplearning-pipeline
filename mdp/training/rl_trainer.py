@@ -32,6 +32,10 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
+from mdp.training._schedulers import (
+    create_scheduler_with_warmup,
+    parse_warmup_config,
+)
 from mdp.training.callbacks.base import BaseCallback
 from mdp.training.callbacks.early_stopping import EarlyStopping
 from mdp.training.callbacks.ema import EMACallback
@@ -89,31 +93,15 @@ class RLTrainer:
                 self.optimizers[name] = klass(model.parameters(), **kwargs)
                 if spec.get("scheduler") is not None:
                     sched_config = dict(spec["scheduler"])
-                    interval = sched_config.pop("interval", "step")
-                    warmup_steps = sched_config.pop("warmup_steps", 0)
-                    warmup_ratio = sched_config.pop("warmup_ratio", 0.0)
+                    warmup = parse_warmup_config(
+                        sched_config, self._estimate_total_steps()
+                    )
                     s_klass, s_kwargs = self.resolver.resolve_partial(sched_config)
-                    scheduler = s_klass(self.optimizers[name], **s_kwargs)
-                    if warmup_steps > 0 and warmup_ratio > 0:
-                        raise ValueError(
-                            "warmup_steps와 warmup_ratio를 동시에 지정할 수 없습니다. "
-                            f"warmup_steps={warmup_steps}, warmup_ratio={warmup_ratio}"
-                        )
-                    if warmup_ratio > 0:
-                        total_steps = self._estimate_total_steps()
-                        warmup_steps = int(total_steps * warmup_ratio)
-                    if warmup_steps > 0:
-                        warmup = torch.optim.lr_scheduler.LinearLR(
-                            self.optimizers[name], start_factor=1e-8, end_factor=1.0,
-                            total_iters=warmup_steps,
-                        )
-                        scheduler = torch.optim.lr_scheduler.SequentialLR(
-                            self.optimizers[name],
-                            schedulers=[warmup, scheduler],
-                            milestones=[warmup_steps],
-                        )
-                    self.schedulers[name] = scheduler
-                    self.scheduler_intervals[name] = interval
+                    base_scheduler = s_klass(self.optimizers[name], **s_kwargs)
+                    self.schedulers[name] = create_scheduler_with_warmup(
+                        self.optimizers[name], base_scheduler, warmup
+                    )
+                    self.scheduler_intervals[name] = warmup.interval
             else:
                 model.eval()
                 for p in model.parameters():
