@@ -79,8 +79,17 @@ def run_train(
 ) -> None:
     """Recipe + Config YAML을 조립하여 학습을 실행한다."""
     from mdp._liger_patch import apply_liger_patches
+    from mdp.cli._logging_bootstrap import bootstrap_logging
     from mdp.cli.schemas import TrainResult
     from mdp.settings.factory import SettingsFactory
+
+    # spec-system-logging-cleanup §U2: env-only 1 차 setup. Settings 로드 (HF
+    # config 파싱 경유 가능성 있음) · Factory · HF ``from_pretrained`` 첫 호출
+    # 이전에 외부 logger level downgrade 를 걸어두기 위함. setup_logging 은
+    # **args-aware idempotent** — 동일 인자는 no-op, 인자가 바뀌면 이전 상태를
+    # 해제한 뒤 재조립. settings 로드 후 2차 호출이 recipe `monitoring.verbose`
+    # 를 env 와 OR 합성하여 실제로 verbose 모드로 전환한다 (cycle 1 review 1-2).
+    bootstrap_logging()
 
     # Liger monkey-patch는 HF 모델 로드 이전에 적용. 단일 GPU 경로에서는
     # run_training() 내부에서도 한 번 더 호출되지만 idempotent하여 안전하다.
@@ -98,6 +107,13 @@ def run_train(
 
     try:
         settings = SettingsFactory().for_training(recipe_path, config_path, overrides=overrides)
+
+        # recipe monitoring.verbose 를 env 와 OR 합성해 반영. args-aware
+        # idempotency 덕에 1차 (env-only) → 2차 (env|recipe) 인자가 달라지면
+        # setup_logging 이 Rank0Filter 제거 + 외부 logger level 복원으로
+        # verbose 모드로 실제 전환한다. **이 호출 제거 금지** — 제거 시
+        # recipe.verbose=True 가 무력화된다.
+        bootstrap_logging(settings)
 
         cb_configs: list[dict] = []
         if callbacks_file:

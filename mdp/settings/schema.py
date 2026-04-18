@@ -109,8 +109,46 @@ class TrainingSpec(BaseModel):
 
 
 class MonitoringSpec(BaseModel):
-    """데이터 분포 모니터링."""
+    """학습 모니터링 설정.
 
+    본 모델은 두 갈래의 기능을 하나의 네임스페이스에 모은다:
+
+    1) **System logging** (spec-system-logging-cleanup §U4/§U5/§U6 공유 계약):
+       - ``log_every_n_steps``: rank-0 step-progress 로그 간격. 파일 리다이렉트
+         환경에서도 학습 진행이 stdout 에 남도록 하는 text-progress 의 주기.
+       - ``memory_history``: ``torch.cuda.memory._record_memory_history`` 기반
+         tensor-level snapshot on/off (U5 소비).
+       - ``verbose``: True 이면 ``Rank0Filter`` 와 외부 logger downgrade 를 모두
+         비활성화. 디버깅 전용.
+    2) **데이터 분포 monitoring** (기존 ``baseline`` / ``drift`` 기능):
+       - ``enabled``: baseline/drift 계산 활성 여부.
+       - ``baseline`` / ``drift``: 세부 파라미터 dict.
+
+    두 갈래는 서로 독립이며 extra=forbid 로 오타를 차단한다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # ── System logging (spec-system-logging-cleanup §U4/U5/U6) ──
+    log_every_n_steps: int = Field(
+        default=10,
+        ge=1,
+        description="step progress 로그 간격 (rank-0). file redirect 환경에서도 "
+        "학습 진행이 보이도록 하는 text-progress 주기.",
+    )
+    memory_history: bool = Field(
+        default=False,
+        description="torch.cuda.memory._record_memory_history snapshot on/off — "
+        "U5 에서 소비. 활성 시 run 시작에 context/stacks 수집, 종료·OOM 시 "
+        "_dump_snapshot 수행.",
+    )
+    verbose: bool = Field(
+        default=False,
+        description="True 이면 Rank0Filter · 외부 logger downgrade 모두 비활성. "
+        "디버깅 전용. 운영 기본값은 False(조용한 로그).",
+    )
+
+    # ── 데이터 분포 monitoring (기존 baseline/drift) ──
     enabled: bool = False
     baseline: dict[str, Any] = Field(default_factory=dict)
     drift: dict[str, Any] = Field(default_factory=dict)

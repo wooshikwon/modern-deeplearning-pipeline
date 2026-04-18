@@ -521,6 +521,146 @@ run 시작:                                         step/epoch 경계:
 
 ---
 
+## System Logging
+
+MDP는 실험 트래킹(MLflow)과 별개로 **운영·디버깅용 텍스트 로그 층위**(Python `logging` + stdout)를 시스템 차원에서 통일한다. MLflow는 "실험 DB에 지표를 적재"하는 경로, System Logging은 "사용자·agent가 run을 따라가며 상태를 파악"하는 경로 — 관심사가 다르므로 설정도 독립적이다.
+
+이 섹션이 다루는 네 가지 실제 문제(위 spec-system-logging-cleanup §카테고리 A~D):
+
+1. **rank 4 중복**: DDP 4 GPU 환경에서 동일한 `logger.info`가 4회 반복 출력되어 76줄짜리 로그의 절반이 중복으로 부풀려지던 문제.
+2. **무해한 HuggingFace warning을 warning처럼 노출**: `use_cache=True` 자동 조정, `additional_chat_templates` 404 같은 HF 내부 처리 메시지.
+3. **strategy-무관한 false-positive warning**: DDP run에서도 "FSDP shard 미적용 의심" 경고가 나와 혼란을 유발.
+4. **nohup/redirect 환경의 가시성 부재**: tqdm progress bar가 비활성화되어 step별 loss/LR이 stdout에 전혀 나오지 않음.
+
+### 기본 동작 — rank0_only 모드
+
+`mdp train` / `mdp rl-train` CLI 진입 직후 `setup_logging()`이 한 번 호출되어 아래 4가지가 **자동 적용**된다. 사용자가 recipe나 환경변수를 만지지 않아도 운영 기본값은 "조용한 로그"다.
+
+- **Rank-0 filter**: `Rank0Filter`가 **root logger의 각 handler에 부착**되어 rank 0만 로그를 출력한다. MDP 전 모듈이 `logging.getLogger(__name__)` 패턴이라 child logger의 레코드는 propagate 경로로 root handler에 도달하는데, Python logging 규약상 logger에 부착된 filter는 "그 logger로 직접 log된 레코드"에만 적용되고 propagate된 레코드에는 적용되지 않는다. 따라서 handler-level 부착이 rank-0 가드의 유일한 실효 경로다(cycle 1 fix). root handler가 비어 있는 희귀 경로(예: `basicConfig` 미호출 + `setup_logging` 단독)에서는 `StreamHandler`를 1개 자동 설치한 뒤 filter를 부착한다. 사용자가 별도 handler를 추가한 뒤에 `setup_logging()`을 재호출하면(동일 인자면 no-op이지만 인자 변경 시 재조립) 새 handler에도 filter가 부착된다. rank별 정보가 꼭 필요한 경로(FSDP shard baseline, OOM per-rank summary 등)는 `logger.info(msg, extra={"all_ranks": True})`로 escape hatch를 사용한다 — 이 키 네이밍은 `mdp/utils/logging.py::Rank0Filter`의 계약이므로 변경 금지.
+- **외부 라이브러리 logger INFO → WARNING**: `httpx`, `urllib3`, `transformers`, `datasets` 네 logger의 레벨이 WARNING으로 올라간다. HF Hub HTTP 요청(`HTTP Request: HEAD .../config.json "HTTP/1.1 200 OK"` 같은 INFO 노이즈)이 차단된다.
+- **HF 무해 warning suppression 화이트리스트**: `mdp/utils/logging.py::WARNING_SUPPRESS_PATTERNS` 리스트의 regex에 일치하는 warning은 `warnings.filterwarnings("ignore", message=...)`로 억제된다. 초기 항목은 2건:
+  1. `` `use_cache=True` is incompatible with gradient checkpointing `` — HF가 `gradient_checkpointing_enable()` 후 `config.use_cache=False`로 자동 조정하며 내는 안내.
+  2. `additional_chat_templates.*404` — LLaMA-3 Base처럼 chat template이 없는 모델에서 HF Hub가 내는 404 notice.
+- **Non-rank-0 tqdm progress bar 자동 비활성**: `transformers.utils.logging.disable_progress_bar()`가 non-rank-0 프로세스에서 호출되어 `AutoModelForCausalLM.from_pretrained`의 `Loading weights: 100%|████|` bar 중복 출력이 rank 0의 1회로 줄어든다.
+
+### Recipe `monitoring` 섹션 — System logging 3 필드
+
+Recipe의 기존 `monitoring:` 섹션에 System Logging 필드 3종이 추가되었다. 전체 스키마는 `mdp/settings/schema.py::MonitoringSpec`에 있고 기존 `enabled`/`baseline`/`drift` 필드와 공존한다(`extra="forbid"`로 오타 차단).
+
+```yaml
+monitoring:
+  log_every_n_steps: 10       # (default 10, ge=1) step progress 출력 간격. rank-0에서만 출력
+  memory_history: false       # (default false) true면 torch.cuda.memory._record_memory_history snapshot 기록
+  verbose: false              # (default false) true면 rank-0 filter·외부 logger downgrade·tqdm 비활성 모두 off (디버깅 전용)
+```
+
+- `log_every_n_steps`: 값이 10이면 step 10, 20, 30, ...에 한 줄씩 + 마지막 step에서 1회. 값을 5로 낮추면 출력 빈도가 2배.
+- `memory_history`: tensor-level memory snapshot. 활성 시 run 시작에 `_record_memory_history(max_entries=1_000_000, stacks="python")` 호출, 종료·OOM 시 `storage/memory_profiles/{run_id}.pickle`로 dump. `run_id`는 MLflow active run이 있으면 그 값, 없으면 `run_{int(time.time())}` fallback. rank-0 + CUDA 가용 조건에서만 활성화된다(multi-rank에서 동일 파일을 덮어쓰는 경합 방지).
+- `verbose`: 디버깅·운영자 복원 용도. true이면 위 4가지 자동 설정이 전부 비활성화된다. 환경변수 `MDP_LOG_VERBOSE=1`과 OR 결합 — 어느 쪽이든 켜지면 verbose. `setup_logging`의 args-aware idempotency 덕에 env-verbose 없이 시작한 run에서도 recipe.verbose=true가 settings 로드 시점에 실제로 발효된다(상세는 아래 "Verbose escape hatch" 서브섹션).
+
+### Start / End banner
+
+`rl_trainer.py` / `trainer.py`의 `_log_run_banner("start" | "end", ...)` helper가 run 시작·종료 시점에 rank-0에서 한 번씩 구조화된 요약을 로그로 출력한다. `is_json_mode()`이면 배너 출력이 생략되어 `--format json` 출력을 깨지 않는다.
+
+```
+==============================================================
+MDP Run Started | algorithm=DPOLoss strategy=DDPStrategy precision=bf16
+max_steps=986 epochs=1.00 world_size=4 bs_per_rank=32
+experiment=weighted_ntp run_id=7e886365ab134afbb89cedb03cd2667e
+==============================================================
+```
+
+```
+==============================================================
+MDP Run Ended   | stopped_reason=completed duration=22968.0s peak_memory=67.40 GiB
+checkpoints_saved=4 final_loss=0.4821 total_steps=986
+==============================================================
+```
+
+포맷 규약:
+
+- **구분자는 파이프(`|`)**. 첫 줄이 "Started/Ended | 대표 3필드"로 시작하고, 2~3번째 줄은 세부 필드를 공백 구분으로 나열한다. 모든 key=value 형태라 awk/grep 파싱이 단순하다.
+- **타임스탬프 없음**. Python logging 경로를 쓰므로 운영자는 `logging.Formatter`가 붙이는 timestamp를 로그 앞단에서 이미 얻는다 — 배너에서 중복하지 않는다.
+- **algorithm 필드**: RL에서는 `type(self.algorithm).__name__`(DPOLoss, GRPOLoss 등), SFT에서는 `recipe.task`.
+- **peak_memory**: rank-0의 `torch.cuda.max_memory_allocated()`(GiB). 없으면 `n/a`.
+- **stopped_reason 우선순위**: `oom` > `signal_term`/`signal_int` > `early_stopping`/`early_stopped` > `max_steps`/`max_steps_reached` > `completed`.
+
+두 배너는 `grep`으로 run 경계를 단번에 찾을 수 있게 설계됐다: `grep -E "MDP Run (Started|Ended)" run.log`.
+
+### Step progress 포맷
+
+nohup + stdout redirect 환경에서 tqdm이 비활성화되어도 학습 진행이 stdout에 남는다. `_log_step_progress` helper가 rank-0에서 `log_every_n_steps` 주기마다 한 줄을 흘린다:
+
+```
+[step 50/986 | 5.1%] loss=0.5432 lr=1.00e-04 grad_norm=1.23 throughput=0.32 step/s ETA=00:52:30
+```
+
+필드는 각각:
+
+- `[step N/Total | P%]`: 현재 step, 전체, 완료율
+- `loss=...`: 해당 step의 loss (grad_accum 경계에서의 `actual_loss`)
+- `lr=...`: policy optimizer 첫 param_group의 LR 스냅샷. multi-group(LoRA + head) 환경이라도 대표값 1개만 — 세부 group LR은 `log_step_metrics`가 MLflow의 slash 네이밍(`learning_rate/lora` 등)으로 기록 중이므로 중복 표기 불필요
+- `grad_norm=...`: gradient clipping 전 L2 norm (RLTrainer는 `--`로 대체될 수 있음)
+- `throughput=...`: `steps_done / elapsed` (step/s)
+- `ETA=HH:MM:SS` 또는 `MM:SS`: 현재 throughput 기준 예상 잔여 시간. 음수·inf·NaN이면 `--:--`
+
+마지막 step(`global_step >= max_steps`)은 modulo와 맞지 않아도 무조건 출력된다.
+
+### OOM summary — 종료 시점 rank별 memory 표
+
+`torch.cuda.OutOfMemoryError`가 train loop에서 발생하면 `_dump_oom_summary()`가 호출되어 rank별 memory 상태를 정리된 표로 출력 후 예외를 re-raise한다. `torch.distributed.all_gather_object`로 rank별 info를 모으고, 실패 시(NCCL timeout 등) local info만으로 fallback:
+
+```
+FATAL: torch.OutOfMemoryError — rank-level memory summary:
+  rank 0: allocated=123.28 GiB | reserved=139.20 GiB | free= 0.15 GiB
+  rank 1: allocated= 67.40 GiB | reserved= 73.00 GiB | free=68.00 GiB
+  rank 2: allocated= 92.10 GiB | reserved=105.30 GiB | free=36.00 GiB
+  rank 3: allocated= 78.20 GiB | reserved= 85.50 GiB | free=55.00 GiB
+  → OOM suspected on rank(s): [0]
+```
+
+`free < 1 GiB`인 rank는 "OOM suspected on rank(s)" 라인에 하이라이트된다. OOM 발생 시 end banner의 `stopped_reason` tag는 `"oom"`으로 설정된다(`signal_term` / `signal_int` / `early_stopping` / `max_steps` / `completed`보다 우선).
+
+### Strategy 조건부 로깅
+
+FSDP shard baseline 경고 같은 strategy-의존 메시지는 `type(self.strategy).__name__` 분기로 false-positive를 차단한다.
+
+- `DDPStrategy` → `logger.debug("DDP strategy — no model sharding (expected)...", extra={"all_ranks": True})` — 운영 기본은 조용, verbose에서만 보임
+- `FSDP*` + `ratio > 3` → 기존 WARNING (`FSDP shard 미적용 의심`) 유지
+- `FSDP*` + `ratio <= 3` → INFO (`FSDP shard baseline`) — warning 노이즈 대신 중립 기록
+- 알 수 없는 strategy → FSDP 분기로 fail-soft 흡수(INFO만)
+
+DDP run에서는 "shard 미적용 의심" 문구가 원천적으로 나오지 않는다. LoRA freeze 의심 경고도 동일하게 `_is_fsdp` 가드로 이동.
+
+### Trainer ↔ RLTrainer 대칭 — `_logging_helpers.py` 공용 헬퍼
+
+Start/End banner, step progress, OOM summary, memory_history on/off 6개 함수는 `mdp/training/_logging_helpers.py`의 free function으로 추출되어 있고, Trainer와 RLTrainer는 각자의 `_dump_oom_summary`·`_log_run_banner`·`_log_step_progress`·`_fmt_eta`·`_maybe_start_memory_history`·`_maybe_dump_memory_snapshot` bound method를 얇은 shim으로 유지해 기존 테스트 호환성을 지킨다. 두 trainer의 실질 차이는 (a) step-progress에서 LR 조회 경로(SFT는 `self.optimizer`, RL은 `self.optimizers["policy"]`)와 (b) start-banner의 algorithm 필드(SFT는 `recipe.task`, RL은 `type(self.algorithm).__name__`)뿐이며, shim이 trainer-specific 값을 해석해 helper로 위임한다. 이 배치는 `_common.aggregate_checkpoint_stats`(spec-trainer-robustness-fixes)·`_schedulers.py`(spec-lr-warmup-configurable)·`_mlflow_logging.py`(spec-logging-consistency)에 이어 **Trainer 간 중복 제거 → 대칭 강제** 패턴의 네 번째 인스턴스다. 새 trainer 추가 시 동일 shim 패턴으로 확장 가능.
+
+OOM summary의 `dist.all_gather_object`는 `concurrent.futures.ThreadPoolExecutor`(max_workers=1, daemon) + `future.result(timeout=5.0)` + `shutdown(wait=False)`로 bound되어 다른 rank가 이미 OOM으로 사망한 상황에서도 최대 5초만에 local fallback으로 반환한다. NCCL/gloo 무관 backend-agnostic.
+
+### Warning 화이트리스트 추가 방법
+
+새로운 HF/PyTorch 무해 warning이 발견되면 `mdp/utils/logging.py::WARNING_SUPPRESS_PATTERNS` 리스트에 regex 문자열로 append한다(code review 필수). 기준:
+
+1. 대상 warning이 HF/PyTorch가 **자동으로 내부 처리**하거나 사용자 조치가 불가능한 noise일 것.
+2. 여전히 실제 오동작을 시사할 수 있는 warning은 suppress 금지 — 새로운 warning이 섞여 나와야 발견 가능.
+3. blanket ignore(`warnings.filterwarnings("ignore")`)는 절대 금지.
+
+### Verbose escape hatch
+
+디버깅이나 외부 라이브러리 INFO 로그가 필요한 상황에서 verbose 모드로 복원한다. 두 경로가 OR 결합:
+
+- 환경변수 `MDP_LOG_VERBOSE=1` — CLI 재기동 없이 전체 run 단위 토글.
+- Recipe `monitoring.verbose: true` — 특정 recipe 단위 고정.
+
+둘 중 하나라도 true면 `setup_logging()`이 early-return되어 rank-0 filter·외부 logger downgrade·tqdm 비활성·warning suppression 전부 건너뛴다. 기본 Python logging 상태가 그대로 유지된다.
+
+#### args-aware idempotency — env 1차 → settings 2차의 실제 발효 보장
+
+CLI 진입 경로는 실질적으로 2단계다: (1) argparse 직전에 env-only로 1차 `bootstrap_logging()` 호출(settings가 아직 없으므로 `MDP_LOG_VERBOSE` 환경변수만 반영), (2) settings 로드 후 `bootstrap_logging(settings)` 2차 호출(recipe `monitoring.verbose`가 env와 OR로 합성). `setup_logging`은 **args-aware idempotent**라 (`effective_verbose`, `rank0_only`, `suppress_external`) 튜플이 동일하면 no-op이고, 인자가 바뀌면 기존 Rank0Filter를 root handler에서 제거하고 외부 logger level을 `NOTSET`으로 복원한 뒤 새 인자로 재조립한다. 이 덕에 env-verbose 없이 시작한 run에서도 recipe.verbose=true가 2차 호출 시점에 실제로 발효된다. 이전 (non args-aware) 구현은 1차 호출에서 확정된 상태가 고정되어 recipe 지정이 무력화되는 문제가 있었다(cycle 1 review 1-2). **CLI 레이어의 2차 호출은 제거 금지** — 제거 시 recipe.verbose=true가 다시 무력화된다.
+
+---
+
 ## 드리프트 모니터링
 
 학습 종료 시 baseline을 저장하고, 추론 시 데이터 분포 변화를 감지한다.

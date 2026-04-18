@@ -32,6 +32,14 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
+from mdp.training._logging_helpers import (
+    dump_oom_summary,
+    fmt_eta,
+    log_run_banner,
+    log_step_progress,
+    maybe_dump_memory_snapshot,
+    maybe_start_memory_history,
+)
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
     log_static_params,
@@ -347,6 +355,10 @@ class Trainer:
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
         start_time = time.time()
+        # spec-system-logging-cleanup §U4 — `_train_one_epoch` 의 step-progress 로그가
+        # 참조한다. train loop 전체에서 단조 증가하는 단일 기준 시각이다.
+        self._progress_start_time = start_time
+        self._progress_max_steps = total_steps
 
         stopped_reason = "completed"
         last_epoch = self.start_epoch
@@ -365,11 +377,26 @@ class Trainer:
             self.start_epoch * len(self.train_loader) + self._resume_step_in_epoch
         )
 
+        # OOM 관측 플래그 (spec-system-logging-cleanup §U5). 학습 loop 안에서
+        # torch.cuda.OutOfMemoryError 가 raise 되면 except 블록이 True 로 세팅하고
+        # 원래 예외를 재전파한다. finally 블록의 stopped_reason 계산이 이를 최우선
+        # 확인하여 end banner 및 MLflow summary 에 "oom" 라벨을 전파한다.
+        self._oom_observed = False
+
+        # memory_history 시작 — recipe 의 monitoring.memory_history=True 에서만
+        # 켜진다. rank-0 만 활성화하며, 아래 innermost finally 가 snapshot dump 를
+        # 호출한다. RLTrainer.train() 과 동일 패턴.
+        _mem_history_active = self._maybe_start_memory_history()
+
         with mlflow_ctx as mlflow_run:
             if self._is_main_process:
                 if mlflow_run is not None and hasattr(mlflow_run, "info"):
                     mlflow_run_id = mlflow_run.info.run_id
                 self._log_mlflow_params()
+
+            # Run start banner (spec-system-logging-cleanup §U4).
+            # rank-0 only · is_json_mode 이면 자동 skip.
+            self._log_run_banner("start", extra={"run_id": mlflow_run_id})
 
             try:
                 for epoch in range(self.start_epoch, max_epochs):
@@ -427,6 +454,17 @@ class Trainer:
 
                 baseline_info = self._maybe_compute_baseline()
 
+            except torch.cuda.OutOfMemoryError:
+                # OOM 포착 — rank 별 memory 상태를 rank-0 로그에 집계한 뒤 원래 예외를
+                # 재전파하여 torchrun 이 종료 상태를 정확히 인지하게 한다. finally 는
+                # 여전히 cleanup / on_train_end / end banner / summary 를 정상 처리한다.
+                # (spec-system-logging-cleanup §U5)
+                self._oom_observed = True
+                try:
+                    self._dump_oom_summary()
+                except Exception as summary_err:  # noqa: BLE001 — summary 실패가 OOM 을 가려선 안 된다
+                    logger.warning("OOM summary dump failed: %s", summary_err)
+                raise
             finally:
                 # Nested try/finally 구조: cleanup → on_train_end → summary 중 어디에서
                 # 예외가 재전파되어도 **signal handler 복원은 반드시 실행**되어야 한다.
@@ -435,6 +473,11 @@ class Trainer:
                 # MLflow run이 zombie 상태(stopped_reason tag 누락)로 남지 않도록,
                 # on_train_end 호출을 별도 try/except로 감싼다.
                 # (spec-trainer-robustness-fixes cycle 1 — 1-1, 1-2 방어)
+                if self._oom_observed:
+                    # stopped_reason 은 loop 내부에서 미리 세팅될 수 있으므로 OOM 을
+                    # 최우선으로 덮어쓴다. end banner / MLflow summary 양쪽에 "oom"
+                    # 라벨이 들어가 grep 으로 장애 원인을 파악할 수 있게 한다. (§U5)
+                    stopped_reason = "oom"
                 try:
                     # Strategy cleanup
                     if self.strategy is not None:
@@ -452,9 +495,35 @@ class Trainer:
                         logger.warning("on_train_end 콜백 실패: %s", e)
 
                     training_duration = time.time() - start_time
+
+                    # End banner (spec-system-logging-cleanup §U4) — rank-0 한 줄
+                    # 요약을 summary 로깅 직전에 출력. grep 으로 run 종료 상태를
+                    # 파악 가능하게 한다. checkpoints_saved 는 on_train_end 이후
+                    # 최종 상태가 되므로 이 시점에서 집계한다.
+                    _banner_ckpts, _, _ = aggregate_checkpoint_stats(self.callbacks)
+                    _banner_loss = self.last_metrics.get("train_loss") or self.last_metrics.get("loss")
+                    self._log_run_banner(
+                        "end",
+                        extra={
+                            "stopped_reason": stopped_reason,
+                            "duration": training_duration,
+                            "checkpoints_saved": _banner_ckpts,
+                            "final_loss": _banner_loss,
+                            "total_steps": self.global_step,
+                        },
+                    )
+
                     if self._is_main_process:
                         self._log_mlflow_summary(training_duration, stopped_reason)
                 finally:
+                    # memory_history snapshot — 정상 종료·OOM·signal 모두에서 실행되어야
+                    # 프로파일링 파일이 확실히 남는다. 내부적으로 active=False 일 때는
+                    # no-op. summary 실패가 snapshot 저장을 막지 않도록 방어한다. (§U5)
+                    try:
+                        self._maybe_dump_memory_snapshot(_mem_history_active)
+                    except Exception as snap_err:  # noqa: BLE001
+                        logger.warning("memory snapshot final dump failed: %s", snap_err)
+
                     # Signal handler 복원 — cleanup/on_train_end/_log_mlflow_summary가
                     # 예외를 던지더라도 handler는 반드시 원복되어야 한다. 라이브러리
                     # 사용자(Python API로 Trainer 직접 호출) 환경에서 원래 핸들러를
@@ -578,6 +647,23 @@ class Trainer:
                         self.global_step,
                         extra={"train_loss": actual_loss},
                     )
+
+                    # Text step-progress (spec-system-logging-cleanup §U4).
+                    # file-redirect 환경에서도 step 진행이 stdout 에 남도록 한다.
+                    # `log_every_n_steps` 간격마다 + 마지막 step 에서 1회 출력.
+                    _mon_cfg = self._recipe_dict.get("monitoring", {}) if isinstance(self._recipe_dict, dict) else {}
+                    _every_n = int(_mon_cfg.get("log_every_n_steps", 10) or 10)
+                    _max_steps = getattr(self, "_progress_max_steps", 0) or self._estimate_total_steps()
+                    if self.global_step > 0 and (
+                        self.global_step % _every_n == 0
+                        or (_max_steps and self.global_step >= _max_steps)
+                    ):
+                        self._log_step_progress(
+                            loss=actual_loss,
+                            grad_norm=None,
+                            start_time=getattr(self, "_progress_start_time", time.time()),
+                            max_steps=_max_steps or max(self.global_step, 1),
+                        )
 
             # Mid-epoch validation (step 단위 또는 소수 에폭)
             if (
@@ -1060,3 +1146,107 @@ class Trainer:
         except Exception as e:  # noqa: BLE001
             logger.debug("peak_memory_gb 집계 실패(무시): %s", e)
             return None
+
+    # ── OOM / memory_history helpers (spec-system-logging-cleanup §U5) ──
+    #
+    # 실제 구현은 ``mdp.training._logging_helpers`` 의 free function. 아래 bound
+    # method 들은 trainer-specific 상태(optimizer·algorithm)만 해석해 helper 로
+    # 위임하는 얇은 shim. RLTrainer 와 대칭.
+
+    def _dump_oom_summary(self) -> None:
+        """OOM 발생 시 모든 rank 의 memory 상태를 rank-0 에 집계한다.
+
+        ``_all_gather_with_timeout`` 가 5초 타임아웃을 걸어 다른 rank 가 이미
+        죽은 상황에서 NCCL collective 가 hang 하지 않도록 방어한다
+        (cycle 1 review 2-2).
+        """
+        dump_oom_summary(logger=logger)
+
+    def _maybe_start_memory_history(self) -> bool:
+        """``monitoring.memory_history=True`` 면 tensor-level snapshot 을 켠다."""
+        return maybe_start_memory_history(
+            recipe_dict=self._recipe_dict, logger=logger,
+        )
+
+    def _maybe_dump_memory_snapshot(self, active: bool) -> None:
+        """``_maybe_start_memory_history`` 가 성공했을 때에만 snapshot 을 파일로 dump."""
+        maybe_dump_memory_snapshot(active=active, logger=logger)
+
+    # ── System logging helpers (spec-system-logging-cleanup §U4) ──
+
+    @staticmethod
+    def _fmt_eta(seconds: float) -> str:
+        """Format an ETA duration as ``HH:MM:SS`` (or ``MM:SS`` when < 1h).
+
+        ``_logging_helpers.fmt_eta`` 로 위임.
+        """
+        return fmt_eta(seconds)
+
+    def _log_step_progress(
+        self,
+        loss: float,
+        grad_norm: float | None,
+        *,
+        start_time: float,
+        max_steps: int,
+    ) -> None:
+        """rank-0 text step-progress 한 줄을 로거로 흘린다 (RLTrainer 와 대칭).
+
+        caller 는 이미 (a) rank-0 guard, (b) log_every_n_steps 타이밍을 모두
+        처리했다는 전제로 호출한다. Trainer(SFT) 의 optimizer 는 단일 인스턴스
+        이므로 ``self.optimizer.param_groups[0]['lr']`` 로 LR 을 읽는다.
+        """
+        try:
+            current_lr = (
+                self.optimizer.param_groups[0]["lr"]
+                if self.optimizer is not None and self.optimizer.param_groups
+                else 0.0
+            )
+        except Exception:  # noqa: BLE001
+            current_lr = 0.0
+
+        log_step_progress(
+            logger=logger,
+            global_step=self.global_step,
+            max_steps=max_steps,
+            loss=loss,
+            current_lr=current_lr,
+            grad_norm=grad_norm,
+            start_time=start_time,
+        )
+
+    def _log_run_banner(
+        self,
+        kind: "str",
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Start / End 배너를 rank-0 에서 한 번만 출력한다 (RLTrainer 와 대칭).
+
+        SFT Trainer 의 algorithm 필드는 없으므로 ``recipe.task`` 를 algorithm
+        자리에 사용한다 (RLTrainer 는 algorithm 클래스명).
+        """
+        recipe = getattr(self.settings, "recipe", None)
+        algorithm_label = getattr(recipe, "task", "sft") if recipe else "sft"
+        strategy_name = (
+            type(self.strategy).__name__ if self.strategy is not None else "NoStrategy"
+        )
+
+        peak_memory_gib = None
+        if kind == "end":
+            peak_summary = self._peak_memory_summary_extra() or {}
+            peak_memory_gib = peak_summary.get("peak_memory_gb")
+
+        log_run_banner(
+            logger=logger,
+            kind=kind,
+            is_main_process=self._is_main_process,
+            settings=self.settings,
+            algorithm_label=algorithm_label,
+            strategy_name=strategy_name,
+            max_steps=self.max_steps,
+            epochs=self.epochs,
+            global_step=self.global_step,
+            peak_memory_gib=peak_memory_gib,
+            extra=extra,
+        )

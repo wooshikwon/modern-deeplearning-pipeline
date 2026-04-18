@@ -32,6 +32,14 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
+from mdp.training._logging_helpers import (
+    dump_oom_summary,
+    fmt_eta,
+    log_run_banner,
+    log_step_progress,
+    maybe_dump_memory_snapshot,
+    maybe_start_memory_history,
+)
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
     log_static_params,
@@ -410,6 +418,122 @@ class RLTrainer:
         except Exception as e:  # noqa: BLE001
             logger.debug("peak_memory_gb 집계 실패(무시): %s", e)
             return None
+
+    # ── OOM / memory_history helpers (spec-system-logging-cleanup §U5) ──
+    #
+    # 실제 구현은 ``mdp.training._logging_helpers`` 의 free function 에 있다.
+    # 아래 bound method 들은 trainer-specific 상태(LR 조회·algorithm 이름 등)를
+    # 해석해 helper 로 위임하는 얇은 shim. Trainer(SFT) 도 동일 패턴이며, cycle 1
+    # review 2-1 의 문자 단위 대칭 중복을 단일 helper 로 해소한다.
+
+    def _dump_oom_summary(self) -> None:
+        """OOM 발생 시 모든 rank 의 memory 상태를 rank-0 에 집계한다.
+
+        ``_all_gather_with_timeout`` 가 5초 타임아웃을 걸어 다른 rank 가 이미
+        죽은 상황에서 NCCL collective 가 hang 하지 않도록 방어한다
+        (cycle 1 review 2-2). Trainer 쪽 shim 과 대칭.
+        """
+        dump_oom_summary(logger=logger)
+
+    def _maybe_start_memory_history(self) -> bool:
+        """``monitoring.memory_history=True`` 면 tensor-level snapshot 을 켠다.
+
+        rank-0 만 켠다. Trainer 쪽 shim 과 대칭.
+        """
+        return maybe_start_memory_history(
+            recipe_dict=self._recipe_dict, logger=logger,
+        )
+
+    def _maybe_dump_memory_snapshot(self, active: bool) -> None:
+        """``_maybe_start_memory_history`` 가 성공했을 때에만 snapshot 을 파일로 dump."""
+        maybe_dump_memory_snapshot(active=active, logger=logger)
+
+    # ── System logging helpers (spec-system-logging-cleanup §U4) ──
+
+    @staticmethod
+    def _fmt_eta(seconds: float) -> str:
+        """Format an ETA duration as ``HH:MM:SS`` (or ``MM:SS`` when < 1h).
+
+        음수·inf·NaN 은 ``"--:--"``. ``_logging_helpers.fmt_eta`` 로 위임.
+        """
+        return fmt_eta(seconds)
+
+    def _log_step_progress(
+        self,
+        loss: float,
+        grad_norm: float | None,
+        *,
+        start_time: float,
+        max_steps: int,
+    ) -> None:
+        """rank-0 text step-progress 한 줄을 로거로 흘린다.
+
+        file-redirect 환경(tqdm 비활성)에서도 step/loss/lr/grad_norm/throughput/ETA
+        가 stdout 에 남도록 하는 경로. caller 는 (a) rank-0 guard, (b) log_every_n
+        타이밍을 모두 처리했다는 전제로 호출한다.
+
+        RL 은 policy optimizer 의 첫 param_group 에서 LR 을 읽는다 — multi-group
+        (LoRA+head) 도 첫 group 값을 대표로 사용 (step-progress 한 줄에 모든
+        group LR 을 나열하면 가독성이 떨어지므로).
+        """
+        try:
+            policy_opt = self.optimizers.get("policy")
+            current_lr = (
+                policy_opt.param_groups[0]["lr"]
+                if policy_opt is not None and policy_opt.param_groups
+                else 0.0
+            )
+        except Exception:  # noqa: BLE001 — LR 조회 실패는 progress log 를 깨뜨려선 안 된다
+            current_lr = 0.0
+
+        log_step_progress(
+            logger=logger,
+            global_step=self.global_step,
+            max_steps=max_steps,
+            loss=loss,
+            current_lr=current_lr,
+            grad_norm=grad_norm,
+            start_time=start_time,
+        )
+
+    def _log_run_banner(
+        self,
+        kind: "str",
+        *,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Start / End 배너를 rank-0 에서 한 번만 출력한다.
+
+        ``kind`` 는 ``"start"`` 또는 ``"end"`` — start 는 train() 진입 직후,
+        end 는 summary 로깅 직전에 호출된다. ``is_json_mode()`` 이면 출력을
+        건너뛴다 (spec §U4 제약). 배너는 의미상 rank-0 only 이므로
+        ``extra={"all_ranks": True}`` 를 쓰지 않는다.
+
+        RL 은 ``type(self.algorithm).__name__`` 을 algorithm label 로 사용.
+        """
+        strategy_name = (
+            type(self.strategy).__name__ if self.strategy is not None else "NoStrategy"
+        )
+        algorithm_label = type(self.algorithm).__name__
+
+        peak_memory_gib = None
+        if kind == "end":
+            peak_summary = self._peak_memory_summary_extra() or {}
+            peak_memory_gib = peak_summary.get("peak_memory_gb")
+
+        log_run_banner(
+            logger=logger,
+            kind=kind,
+            is_main_process=self._is_main_process,
+            settings=self.settings,
+            algorithm_label=algorithm_label,
+            strategy_name=strategy_name,
+            max_steps=self.max_steps,
+            epochs=self.epochs,
+            global_step=self.global_step,
+            peak_memory_gib=peak_memory_gib,
+            extra=extra,
+        )
 
     def _gather_fsdp_policy_state_dict(self) -> "dict | None":
         """FSDP 모델의 full state dict를 all-rank 협력으로 수집한다.
@@ -810,17 +934,19 @@ class RLTrainer:
         for model in self.frozen.values():
             model.eval()
 
-        # ── FSDP 샤딩 + 메모리 베이스라인 진단 ──
-        # FSDP wrap 직후, compile/학습 이전 시점의 순수 모델 메모리를 측정한다.
+        # ── 메모리 베이스라인 진단 (strategy 조건부) ──
+        # Wrap 직후, compile/학습 이전 시점의 순수 모델 메모리를 측정한다.
         #
-        # 메모리 구성 (FULL_SHARD policy + NO_SHARD frozen, 8B bf16, 4 GPU):
-        #   policy shard  : 16 GiB / world_size  (FULL_SHARD, GPU당 param 조각)
-        #   frozen replica: frozen 모델 전체 × dtype bytes  (NO_SHARD, GPU당 복제본)
-        #   예: policy 4 GiB + reference 16 GiB = ~20 GiB baseline
+        # Strategy별 기대값:
+        #   DDPStrategy       : 모델 전체 복제본 — shard 미적용이 설계상 정상
+        #   FSDPStrategy      : policy는 FULL_SHARD → GPU당 param 조각, frozen은 NO_SHARD → GPU당 복제본
+        #                       예: 8B bf16 policy 4 GiB/GPU + reference 16 GiB = ~20 GiB baseline
         #
-        # 확인 항목:
-        #   1. allocated vs expected_total: policy 샤딩 + frozen 복제본 합계와 비교
-        #   2. trainable_params: LoRA 어댑터만 requires_grad여야 함 (~0.5% of total)
+        # 로그 level 규칙 (spec-system-logging-cleanup §U3):
+        #   DDP               : debug (운영 기본 조용, 설계상 shard 미적용이 정상)
+        #   FSDP + ratio > 3  : warning (shard 미적용 의심)
+        #   FSDP + ratio <= 3 : info (정상 baseline)
+        # 모든 log는 rank별 정보라 `extra={"all_ranks": True}` 로 Rank0Filter 에스케이프.
         if torch.cuda.is_available():
             _rank = int(os.environ.get("RANK", "0"))
             _local_rank = int(os.environ.get("LOCAL_RANK", "0"))
@@ -836,30 +962,62 @@ class RLTrainer:
                 sum(p.numel() * p.element_size() for p in m.parameters()) / 1024 ** 3
                 for m in self.frozen.values()
             )
-            logger.info(
-                "FSDP shard baseline: rank=%d | allocated=%.2f GiB | reserved=%.2f GiB"
-                " | policy trainable=%.1fM params | frozen replica=%.1f GiB (NO_SHARD)",
-                _rank, _mem_alloc, _mem_resv,
-                _trainable_params / 1e6, _frozen_replica_gib,
+            _strategy_name = (
+                type(self.strategy).__name__ if self.strategy is not None else "NoStrategy"
             )
-            if _rank == 0:
-                # use_orig_params=True에서 total_orig는 unsharded 원본 크기를 반환한다.
-                _policy_shard_gib = 16.0 / _world_size  # 8B bf16 ÷ world_size
-                _expected_total_gib = _policy_shard_gib + _frozen_replica_gib
-                _ratio = _mem_alloc / _expected_total_gib if _expected_total_gib else 0
-                logger.info(
-                    "FSDP shard baseline: expected policy shard=%.1f GiB"
-                    " + frozen replica=%.1f GiB = %.1f GiB total."
-                    " actual=%.2f GiB (%.1f×). >>3× → policy shard 미적용 의심.",
-                    _policy_shard_gib, _frozen_replica_gib,
-                    _expected_total_gib, _mem_alloc, _ratio,
+            _is_fsdp = _strategy_name.startswith("FSDP")
+            _is_ddp = _strategy_name == "DDPStrategy"
+
+            if _is_ddp:
+                # DDPStrategy → shard 미적용이 설계상 정상. 운영 기본 조용(debug).
+                logger.debug(
+                    "DDP strategy — no model sharding (expected). rank=%d |"
+                    " allocated=%.2f GiB | reserved=%.2f GiB |"
+                    " policy trainable=%.1fM params | frozen replica=%.1f GiB",
+                    _rank, _mem_alloc, _mem_resv,
+                    _trainable_params / 1e6, _frozen_replica_gib,
+                    extra={"all_ranks": True},
                 )
-                if _total_params / 1e9 > 1.0 and _trainable_params / _total_params > 0.1:
-                    logger.warning(
-                        "FSDP shard baseline: trainable ratio %.1f%% — LoRA freeze 미적용 의심."
-                        " 기대값: LoRA만 trainable (전체의 ~0.5%% 수준)",
-                        100 * _trainable_params / _total_params,
-                    )
+            else:
+                # FSDP / 기타 — shard baseline 전체 진단.
+                logger.info(
+                    "FSDP shard baseline: rank=%d | allocated=%.2f GiB | reserved=%.2f GiB"
+                    " | policy trainable=%.1fM params | frozen replica=%.1f GiB (NO_SHARD)",
+                    _rank, _mem_alloc, _mem_resv,
+                    _trainable_params / 1e6, _frozen_replica_gib,
+                    extra={"all_ranks": True},
+                )
+                if _rank == 0:
+                    # use_orig_params=True에서 total_orig는 unsharded 원본 크기를 반환한다.
+                    _policy_shard_gib = 16.0 / _world_size  # 8B bf16 ÷ world_size
+                    _expected_total_gib = _policy_shard_gib + _frozen_replica_gib
+                    _ratio = _mem_alloc / _expected_total_gib if _expected_total_gib else 0
+                    if _is_fsdp and _ratio > 3:
+                        logger.warning(
+                            "FSDP shard baseline: expected policy shard=%.1f GiB"
+                            " + frozen replica=%.1f GiB = %.1f GiB total."
+                            " actual=%.2f GiB (%.1f×). >>3× → policy shard 미적용 의심.",
+                            _policy_shard_gib, _frozen_replica_gib,
+                            _expected_total_gib, _mem_alloc, _ratio,
+                            extra={"all_ranks": True},
+                        )
+                    else:
+                        logger.info(
+                            "FSDP shard baseline: expected policy shard=%.1f GiB"
+                            " + frozen replica=%.1f GiB = %.1f GiB total."
+                            " actual=%.2f GiB (%.1f×).",
+                            _policy_shard_gib, _frozen_replica_gib,
+                            _expected_total_gib, _mem_alloc, _ratio,
+                            extra={"all_ranks": True},
+                        )
+                    # LoRA freeze 의심은 FSDP에서만 유효 — DDP는 위에서 조기 return됨
+                    if _is_fsdp and _total_params / 1e9 > 1.0 and _trainable_params / _total_params > 0.1:
+                        logger.warning(
+                            "FSDP shard baseline: trainable ratio %.1f%% — LoRA freeze 미적용 의심."
+                            " 기대값: LoRA만 trainable (전체의 ~0.5%% 수준)",
+                            100 * _trainable_params / _total_params,
+                            extra={"all_ranks": True},
+                        )
 
         # torch.compile — must be AFTER FSDP wrapping, trainable models only
         if self.compile_mode:
@@ -920,11 +1078,28 @@ class RLTrainer:
         batch_idx = 0
         step_logits = None  # on_batch_end 콜백용 마지막 스텝 logits
 
+        # OOM 관측 플래그 — train loop 이 torch.cuda.OutOfMemoryError 를 던지면
+        # 내부 except 블록에서 True 로 세팅한 뒤 re-raise 한다. 기존 finally 블록
+        # 안 stopped_reason 계산이 이 플래그를 최우선으로 확인하여 배너·summary
+        # 양쪽에 "oom" 라벨을 전파한다. (spec-system-logging-cleanup §U5)
+        self._oom_observed = False
+
+        # memory_history 시작 — recipe 의 monitoring.memory_history=True 에서만
+        # 켜진다. rank-0 만 활성화하며, 실패 시 warning 후 False 반환하여 학습은
+        # 계속 진행된다. 아래 finally 블록이 snapshot dump 를 호출한다.
+        _mem_history_active = self._maybe_start_memory_history()
+
         with mlflow_ctx as mlflow_run:
             if self._is_main_process:
                 if mlflow_run is not None and hasattr(mlflow_run, "info"):
                     mlflow_run_id = mlflow_run.info.run_id
                 self._log_mlflow_params()
+
+            # Run start banner (spec-system-logging-cleanup §U4).
+            # rank-0 only · is_json_mode 이면 자동 skip.
+            # max_steps 는 local 변수를 extra 로 힌트 — banner 포맷은 self.max_steps 를 쓰지만
+            # epoch-only run 에서는 self.max_steps=None 이라 "-"으로 출력된다.
+            self._log_run_banner("start", extra={"run_id": mlflow_run_id})
 
             try:
                 self._fire("on_epoch_start", epoch=self.epoch_counter)
@@ -1082,6 +1257,22 @@ class RLTrainer:
                                 extra={"loss": step_loss},
                             )
 
+                            # Text step-progress (spec-system-logging-cleanup §U4).
+                            # file-redirect 환경에서도 step 진행이 stdout 에 남도록 한다.
+                            # `log_every_n_steps` 간격마다 + 마지막 step 에서 1회 출력.
+                            _mon_cfg = self._recipe_dict.get("monitoring", {}) if isinstance(self._recipe_dict, dict) else {}
+                            _every_n = int(_mon_cfg.get("log_every_n_steps", 10) or 10)
+                            if self.global_step > 0 and (
+                                self.global_step % _every_n == 0
+                                or self.global_step >= max_steps
+                            ):
+                                self._log_step_progress(
+                                    loss=step_loss,
+                                    grad_norm=None,
+                                    start_time=start_time,
+                                    max_steps=max_steps,
+                                )
+
                     # RL step-based validation
                     if (
                         self.val_loader is not None
@@ -1106,6 +1297,18 @@ class RLTrainer:
                                 },
                             )
 
+            except torch.cuda.OutOfMemoryError:
+                # OOM 포착 — rank 별 memory 상태를 rank-0 로그에 집계한 뒤 원래 예외를
+                # 재전파하여 torchrun 이 종료 상태를 정확히 인지하게 한다. 이 except
+                # 는 아래 finally 보다 먼저 실행되며, finally 블록은 여전히
+                # on_train_end / cleanup / end banner / summary 를 정상 처리한다.
+                # (spec-system-logging-cleanup §U5)
+                self._oom_observed = True
+                try:
+                    self._dump_oom_summary()
+                except Exception as summary_err:  # noqa: BLE001 — summary 실패가 OOM 을 가려선 안 된다
+                    logger.warning("OOM summary dump failed: %s", summary_err)
+                raise
             finally:
                 # Nested try/finally 구조: on_train_end / FSDP gather / cleanup /
                 # _log_mlflow_summary 중 어디에서 예외가 재전파되어도 **signal handler
@@ -1122,8 +1325,13 @@ class RLTrainer:
                     except Exception as e:
                         logger.warning("on_train_end 콜백 실패: %s", e)
 
-                    # stopped_reason 결정. signal 수신이 callback early-stop보다 우선.
-                    if self._stop_requested:
+                    # stopped_reason 결정. OOM 관측이 최우선, 그 다음 signal > early_stop >
+                    # max_steps > completed. spec-system-logging-cleanup §U5 — OOM 관측
+                    # 시 "oom" 라벨을 end banner 및 MLflow summary 에 그대로 반영해
+                    # grep 으로 장애 원인을 파악할 수 있게 한다.
+                    if self._oom_observed:
+                        stopped_reason = "oom"
+                    elif self._stop_requested:
                         stopped_reason = (
                             "signal_term"
                             if self._stop_signal_name == "SIGTERM"
@@ -1159,9 +1367,37 @@ class RLTrainer:
                         except Exception as e:
                             logger.warning(f"Strategy cleanup 실패: {e}")
 
+                    # End banner (spec-system-logging-cleanup §U4) —
+                    # summary 로깅 바로 전에 rank-0 한 줄 요약. grep 으로 run 의
+                    # 종료 상태를 파악 가능하게 한다. checkpoints_saved 는 rank-0
+                    # 쪽에서 log_mlflow_summary 가 집계하므로 여기에서는 최소
+                    # 정보만 보낸다(배너는 별도 집계 하지 않고 사후 단계의 값을
+                    # 사용한다 — 순서상 callbacks 누적은 on_train_end 완료 시점에
+                    # 이미 최종 상태다).
+                    _banner_ckpts, _, _ = aggregate_checkpoint_stats(self.callbacks)
+                    self._log_run_banner(
+                        "end",
+                        extra={
+                            "stopped_reason": stopped_reason,
+                            "duration": training_duration,
+                            "checkpoints_saved": _banner_ckpts,
+                            "final_loss": avg_loss,
+                            "total_steps": self.global_step,
+                        },
+                    )
+
                     if self._is_main_process:
                         self._log_mlflow_summary(training_duration, stopped_reason, policy_state_dict=fsdp_policy_sd)
                 finally:
+                    # memory_history snapshot — 정상 종료·OOM·signal 모두에서 실행되어야
+                    # 프로파일링 파일이 확실히 남는다. 내부적으로 active=False 일 때는
+                    # no-op. _log_mlflow_summary 의 임의 예외가 snapshot 을 못 남기게
+                    # 하지 않도록 별도 try/except 로 방어한다. (§U5)
+                    try:
+                        self._maybe_dump_memory_snapshot(_mem_history_active)
+                    except Exception as snap_err:  # noqa: BLE001
+                        logger.warning("memory snapshot final dump failed: %s", snap_err)
+
                     # Signal handler 복원 — cleanup/on_train_end/_log_mlflow_summary가
                     # 예외를 던지더라도 handler는 반드시 원복되어야 한다.
                     # Trainer.train()과 동일 패턴.

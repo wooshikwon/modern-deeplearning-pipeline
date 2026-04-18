@@ -204,6 +204,17 @@ def main() -> None:
     # INFO로 설정하여 GC/FSDP 진단 메시지가 로그에 남도록 한다.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
 
+    # spec-system-logging-cleanup §U2: Rank-0 filter · 외부 logger downgrade ·
+    # warning suppress 를 HF ``from_pretrained`` 첫 호출 이전에 완료해야 httpx
+    # INFO 요청 로그가 처음부터 차단된다. argparse 이전에 env-only 로 1차
+    # setup 을 건다 (settings 가 아직 없으므로 recipe.monitoring.verbose 는
+    # 미반영). setup_logging 은 **args-aware idempotent** — 동일 인자 재호출은
+    # no-op 이지만, 인자가 바뀌면 이전 Rank0Filter/외부 logger level 을 해제한
+    # 뒤 새 인자로 재조립한다. 따라서 settings 로드 후 2차 호출이 recipe
+    # `monitoring.verbose=true` 를 실제로 발효시킬 수 있다.
+    from mdp.cli._logging_bootstrap import bootstrap_logging
+    bootstrap_logging()
+
     parser = argparse.ArgumentParser(description="MDP torchrun worker")
     parser.add_argument(
         "--settings-path", required=True, help="Settings JSON 파일 경로"
@@ -222,6 +233,14 @@ def main() -> None:
     cb_configs: list[dict] | None = raw.pop("__cb_configs", None)
 
     settings = Settings(**raw)
+
+    # settings 가 준비된 뒤 bootstrap_logging(settings) 재호출 — recipe
+    # monitoring.verbose 값과 env 가 OR 합성된다. setup_logging 의 args-aware
+    # idempotency 가 1차/2차 인자 차이를 감지해 Rank0Filter 제거 + 외부 logger
+    # level 복원으로 verbose 모드 전환을 실제로 수행한다. **이 2차 호출 제거
+    # 금지** — 제거 시 recipe.verbose=True 가 무력화되어 디버깅 recipe 가
+    # silent 하게 운영 기본값으로 돌아간다 (cycle 1 review 1-2 의 근본 문제).
+    bootstrap_logging(settings)
 
     # DistributedSampler가 dataloader 생성 시 분산 통신을 요구하므로,
     # create_dataloaders 이전에 process group을 초기화한다.
