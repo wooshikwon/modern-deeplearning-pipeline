@@ -284,3 +284,202 @@ def test_dispatcher_unwraps_ddp_style_wrapper() -> None:
     assert hidden.shape == (1, 4, 16)
     assert head_weight.shape == (100, 16)
     assert inner.called_with["batch_keys"] == ["input_ids"]
+
+
+# ────────────────────────────────────────────────────────────── #
+#  Priority 2 — PEFT 래핑 투과 (review 1-1)                      #
+# ────────────────────────────────────────────────────────────── #
+#
+#  PeftModel은 HF PreTrainedModel을 상속하지 않기 때문에 `isinstance(PreTrainedModel)`
+#  직접 검사만으로는 dispatcher 경로가 설정되지 않는다. 실제 LoRA 경로에서는
+#  `peft_model.base_model.model`이 진짜 PreTrainedModel이므로 dispatcher가 2단계
+#  duck-typing 언래핑으로 내려가야 한다. 실제 `peft` 패키지의 PeftModel은 GPU
+#  환경에서만 검증 가능하지만, dispatcher의 판정 로직은 `getattr(base_model,
+#  "model")`로만 구현되어 있으므로 동일 shape의 minimal stub으로도 충분히 회귀
+#  고정 가능하다.
+
+
+class _FakePeftModel(nn.Module):
+    """PeftModel.base_model.model 체인을 흉내 내는 최소 스텁.
+
+    ``isinstance(self, PreTrainedModel)``은 False지만 ``base_model.model``은
+    진짜 PreTrainedModel이므로 dispatcher가 Priority 2의 PEFT 분기로 내려가야
+    한다. 실제 LoRA처럼 parameter grafting을 하지는 않지만, dispatcher가
+    "PEFT 래핑을 인식하고 투과하여 내부 HF 모델의 `_extract_hf_pretrained`로
+    라우팅하는가"만 격리 검증한다.
+    """
+
+    def __init__(self, inner_hf: nn.Module) -> None:
+        super().__init__()
+        # 실제 PeftModel 구조: self.base_model = LoraModel, base_model.model = PreTrainedModel
+        self.base_model = SimpleNamespace(model=inner_hf)
+
+
+def test_dispatcher_priority_2_peft_wrapping_routes_to_inner_hf_model() -> None:
+    """PEFT 스타일 래핑(`base_model.model` 체인)은 내부 HF 모델로 dispatch된다.
+
+    review-2026-04-18-U6-c1 §1-1에서 확정한 회귀 고정. 이 가드가 빠지면
+    weighted-ntp Phase 3 Baseline(LoRA+HF Llama) 전체가
+    ``NotImplementedError: Model PeftModel...``로 실패한다.
+    """
+    inner, cfg = _build_tiny_hf_model()
+    wrapped = _FakePeftModel(inner)
+    # PeftModel은 PreTrainedModel을 상속하지 않는다는 전제 확인.
+    from transformers import PreTrainedModel
+
+    assert not isinstance(wrapped, PreTrainedModel)
+
+    batch = {
+        "input_ids": torch.randint(0, cfg.vocab_size, (2, 5)),
+        "attention_mask": torch.ones(2, 5, dtype=torch.long),
+    }
+
+    hidden, head_weight = _call_dispatcher(wrapped, batch)
+
+    # inner의 HF 경로 결과와 동일해야 함.
+    assert hidden.shape == (2, 5, cfg.n_embd)
+    assert head_weight.shape == (cfg.vocab_size, cfg.n_embd)
+    # head_weight은 inner.get_output_embeddings().weight을 참조 (tied-weights)
+    assert head_weight.data_ptr() == inner.get_output_embeddings().weight.data_ptr()
+
+
+def test_dispatcher_priority_2_peft_wrapping_inside_ddp_wrapper() -> None:
+    """DDP(`.module`) + PEFT(`base_model.model`) 2중 래핑도 정상 투과한다.
+
+    DDP 언래핑(`getattr(model, "module", model)`)이 먼저 적용된 후 PEFT 분기가
+    동작해야 한다. 실서버 4-rank 학습의 전형적 조합.
+    """
+    inner, cfg = _build_tiny_hf_model()
+    peft_wrapped = _FakePeftModel(inner)
+    ddp_wrapped = _FakeWrapper(peft_wrapped)
+
+    batch = {"input_ids": torch.randint(0, cfg.vocab_size, (1, 4))}
+    hidden, head_weight = _call_dispatcher(ddp_wrapped, batch)
+
+    assert hidden.shape == (1, 4, cfg.n_embd)
+    assert head_weight.shape == (cfg.vocab_size, cfg.n_embd)
+
+
+class _NonPeftDuckStub(nn.Module):
+    """`base_model.model`을 가지지만 내부가 PreTrainedModel이 아닌 경우.
+
+    PEFT 분기가 `isinstance(peft_inner, PreTrainedModel)` 재검사 없이 무조건
+    dispatch하면 Priority 3/4 경로가 죽는다. 비-HF duck-type이 우연히 같은
+    속성 체인을 가져도 Priority 5(NotImplementedError)로 떨어져야 한다.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.base_model = SimpleNamespace(model=_PlainModule())
+
+
+def test_dispatcher_peft_chain_requires_hf_inner() -> None:
+    """`base_model.model`이 있어도 그 내부가 PreTrainedModel이 아니면 HF로
+    라우팅하지 않고 이후 Priority로 fall-through 한다."""
+    stub = _NonPeftDuckStub()
+    with pytest.raises(NotImplementedError) as exc:
+        _call_dispatcher(stub, {"input_ids": torch.tensor([[1]])})
+    # PlainModule이 최종 miss 대상이어야 한다 (내부가 아닌 wrapper 이름도 허용).
+    assert "기본 구현이 없습니다" in str(exc.value)
+
+
+# ────────────────────────────────────────────────────────────── #
+#  Dispatcher 반환 계약 — (hidden, head_weight) 동일 device        #
+#  (review 1-2)                                                   #
+# ────────────────────────────────────────────────────────────── #
+#
+#  Liger-Kernel FLCE는 Triton 커널이라 모든 인자가 동일 GPU device에 있어야
+#  하는데, PEFT 래핑이나 tied-weights 경로에서 `lm_head.weight`이 CPU에 남는
+#  케이스가 실서버에서 관찰됐다(review-2026-04-18-U6-c1 §1-2 v4·v5 실패).
+#  dispatcher가 반환 직전에 `head_weight.to(hidden.device)`를 강제하므로,
+#  hidden이 어느 device에 있든 head_weight 역시 같은 device로 따라가야 한다.
+
+
+class _HeadOnCpuHFModel(nn.Module):
+    """PreTrainedModel-like 껍데기 — ``get_output_embeddings().weight``이 CPU에
+    남아 있는 상황을 모사한다.
+
+    실제 HF 모델 forward를 흉내 내되 ``lm_head.weight``은 CPU에 고정하고
+    forward hidden_states 튜플은 caller가 지정한 device로 반환한다.
+    """
+
+    def __init__(self, vocab: int = 17, hidden: int = 8, hidden_device: str = "cpu") -> None:
+        super().__init__()
+        self._vocab = vocab
+        self._hidden = hidden
+        self._hidden_device = torch.device(hidden_device)
+        # head_weight은 항상 CPU에 두어 device mismatch를 유발.
+        self._head_weight = torch.randn(vocab, hidden, device="cpu")
+
+    # transformers.PreTrainedModel isinstance가 되도록 실제 클래스에 동적 등록 —
+    # 아래 fixture에서 monkeypatch.
+    def get_output_embeddings(self):
+        return SimpleNamespace(weight=self._head_weight)
+
+    def forward(self, *, input_ids, attention_mask=None, output_hidden_states=False):
+        B, S = input_ids.shape
+        hidden = torch.randn(B, S, self._hidden, device=self._hidden_device)
+        # HF ModelOutput-like 튜플: hidden_states는 layer+1 tuple. 마지막만 필요.
+        return SimpleNamespace(hidden_states=(hidden,), logits=None)
+
+
+def test_extract_hf_pretrained_returns_same_device_tensors() -> None:
+    """``_extract_hf_pretrained``가 ``(hidden, head_weight)``을 같은 device로
+    정렬해 반환한다(review 1-2 계약).
+
+    hidden은 ``meta`` device에, ``get_output_embeddings().weight``은 CPU에
+    두고 dispatcher 하위 헬퍼를 직접 호출한다. PeftModel 래핑이나 tied-weights
+    경로에서 관찰된 device mismatch(Liger FLCE Triton kernel 실패 원인)가
+    dispatcher 반환 직전에 `.to(hidden.device)`로 흡수되는지를 고정 검증.
+    """
+    # `_extract_hf_pretrained`만 격리 호출하므로 isinstance 통과용 상속은 필요 없다.
+    model = _HeadOnCpuHFModel(vocab=17, hidden=8, hidden_device="meta")
+    batch = {"input_ids": torch.zeros(1, 3, dtype=torch.long)}
+
+    trainer_stub = SimpleNamespace()
+    hidden, head_weight = RLTrainer._extract_hf_pretrained(
+        trainer_stub, model, batch, layer_idx=-1
+    )
+    # 핵심 계약: 동일 device.
+    assert hidden.device == head_weight.device, (
+        f"dispatcher가 device 일관성 계약을 어겼다: hidden={hidden.device}, "
+        f"head_weight={head_weight.device}"
+    )
+    assert hidden.device.type == "meta"
+
+
+def test_extract_hf_pretrained_noop_when_already_same_device() -> None:
+    """이미 같은 device면 .to() 호출이 identity여야 한다 (ptr 유지).
+
+    GPT-2 path는 tied embedding이라 head_weight.data_ptr()이 wte.weight과
+    동일하다. 기본 CPU 환경에서 수행되므로 추가 복사 없이 같은 tensor가
+    반환되어야 한다(기존 성공 경로 보존).
+    """
+    model, cfg = _build_tiny_hf_model()
+    batch = {"input_ids": torch.randint(0, cfg.vocab_size, (1, 3))}
+    hidden, head_weight = _call_dispatcher(model, batch)
+
+    assert hidden.device == head_weight.device
+    assert head_weight.data_ptr() == model.get_output_embeddings().weight.data_ptr()
+
+
+def test_extract_torchvision_resnet_returns_same_device_tensors() -> None:
+    """torchvision ResNet 경로도 dispatcher 반환 계약을 준수한다 (대칭 확인)."""
+    pytest.importorskip("torchvision")
+    from torchvision.models import resnet18
+
+    model = resnet18(weights=None)
+    model.eval()
+    batch = {"pixel_values": torch.randn(1, 3, 224, 224)}
+    hidden, head_weight = _call_dispatcher(model, batch)
+    assert hidden.device == head_weight.device
+
+
+def test_extract_timm_returns_same_device_tensors() -> None:
+    """timm 경로도 dispatcher 반환 계약을 준수한다 (대칭 확인)."""
+    timm = pytest.importorskip("timm")
+    model = timm.create_model("resnet18", pretrained=False, num_classes=5)
+    model.eval()
+    batch = {"pixel_values": torch.randn(1, 3, 224, 224)}
+    hidden, head_weight = _call_dispatcher(model, batch)
+    assert hidden.device == head_weight.device

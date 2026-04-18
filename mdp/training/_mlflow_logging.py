@@ -249,6 +249,7 @@ def log_summary(
     checkpoint_stats: tuple[int, Path | None, str] | None,
     sanitized_config: Mapping[str, Any] | None,
     artifact_dirs: Iterable[tuple[Path, str]] = (),
+    extra: Mapping[str, float] | None = None,
 ) -> None:
     """Run 종료 직전 호출. Trainer·RLTrainer 양쪽의 summary 경로 통합.
 
@@ -266,6 +267,10 @@ def log_summary(
     - ``sanitized_config``: 비어 있지 않으면 ``log_dict(..., "config.json")``.
     - ``artifact_dirs``: ``(src_dir, artifact_path_prefix)`` 반복. 각 튜플에 대해
       ``log_artifacts(str(src_dir), artifact_path=prefix)``.
+    - ``extra``: run-summary에 추가 기록할 key→float dict. prefix 없이 그대로
+      ``log_metrics``에 병합된다 (예: ``{"peak_memory_gb": 68.4}``). caller 책임
+      네이밍 — spec-logging-consistency 원칙 3(slash 네이밍은 group-level에만
+      적용)에 어긋나지 않도록 key는 flat string 권장.
 
     ``mlflow.active_run()`` 없으면 모든 쓰기 생략.
     """
@@ -281,6 +286,8 @@ def log_summary(
         }
         if final_metrics:
             summary_metrics.update({f"final_{k}": float(v) for k, v in final_metrics.items()})
+        if extra:
+            summary_metrics.update({str(k): float(v) for k, v in extra.items()})
         mlflow.log_metrics(summary_metrics)
 
         mlflow.set_tag("stopped_reason", stopped_reason)

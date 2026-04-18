@@ -1009,6 +1009,10 @@ class Trainer:
         except Exception as e:
             logger.warning(f"MLflow summary 인자 준비 실패 (학습 결과는 유효합니다): {e}")
 
+        # Peak memory metric — review 2-2 대체 구현(RLTrainer와 대칭). rank 0의
+        # `torch.cuda.max_memory_allocated()`를 GiB 단위로 summary에 기록한다.
+        extra_summary = self._peak_memory_summary_extra()
+
         log_summary(
             training_duration_seconds=training_duration,
             total_steps=self.global_step,
@@ -1017,6 +1021,7 @@ class Trainer:
             checkpoint_stats=(total_checkpoints, best_path, monitor_hint),
             sanitized_config=sanitized_config,
             artifact_dirs=artifact_dirs,
+            extra=extra_summary,
         )
 
         # 서빙 가능 모델 생성 + artifact 등록 — 공용 헬퍼와 별도 경로.
@@ -1036,3 +1041,22 @@ class Trainer:
                 "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
                 monitor_hint,
             )
+
+    def _peak_memory_summary_extra(self) -> dict[str, float] | None:
+        """Run 종료 시 현재 device의 CUDA peak memory를 GiB로 반환.
+
+        spec-algorithm-hidden-states-support U6 review 2-2에서 요구된 최소 관측 지점.
+        CUDA가 없거나 예외가 나면 ``None``을 반환하여 summary에 아무 영향을 주지
+        않는다. spec-system-logging-cleanup §U5의 ``memory_history`` 정식 기능이
+        도입되기 전까지의 단일 지표. RLTrainer와 동일 구현 계약.
+        """
+        try:
+            if not torch.cuda.is_available():
+                return None
+            peak_bytes = torch.cuda.max_memory_allocated()
+            if peak_bytes <= 0:
+                return None
+            return {"peak_memory_gb": peak_bytes / (1024**3)}
+        except Exception as e:  # noqa: BLE001
+            logger.debug("peak_memory_gb 집계 실패(무시): %s", e)
+            return None

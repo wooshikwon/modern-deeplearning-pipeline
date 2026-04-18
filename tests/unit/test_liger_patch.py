@@ -58,7 +58,13 @@ def test_apply_liger_patches_missing_returns_false(monkeypatch, caplog):
 
 
 def test_apply_liger_patches_success_returns_true(monkeypatch, caplog):
-    """가짜 liger_kernel 모듈을 주입했을 때 patch가 적용되고 INFO 로그가 남는다."""
+    """가짜 liger_kernel 모듈을 주입했을 때 patch가 적용되고 INFO 로그가 남는다.
+
+    review-2026-04-18-U6-c1 §2-1 회귀 고정: Liger 기본 flag 다섯 가지
+    (rope / cross_entropy / fused_linear_cross_entropy / rms_norm / swiglu)를
+    **명시적으로** 지정한다. spec §U2 "FLCE only" 원칙을 위반하지 않도록
+    기본값(True)을 False로 덮어쓰는 것이 핵심.
+    """
     calls: list[dict] = []
 
     fake_transformers = types.ModuleType("liger_kernel.transformers")
@@ -80,7 +86,16 @@ def test_apply_liger_patches_success_returns_true(monkeypatch, caplog):
         result = apply_liger_patches()
 
     assert result is True
-    assert calls == [{"fused_linear_cross_entropy": True}]
+    # 2-1 핵심: 5개 flag를 전부 명시 호출.
+    assert len(calls) == 1, f"apply_liger_kernel_to_llama must be called exactly once, got {calls}"
+    kwargs = calls[0]
+    assert kwargs == {
+        "rope": False,
+        "cross_entropy": False,
+        "fused_linear_cross_entropy": True,
+        "rms_norm": False,
+        "swiglu": False,
+    }, f"spec §U2 'FLCE only' flag set mismatch: {kwargs}"
     assert any(
         "Liger kernel applied" in r.message and r.levelno == logging.INFO
         for r in caplog.records

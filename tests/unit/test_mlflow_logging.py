@@ -259,3 +259,56 @@ def test_log_summary_writes_final_metrics() -> None:
     assert tag_calls["stopped_reason"] == "completed"
     assert tag_calls["checkpoints_saved"] == "3"
     assert tag_calls["best_checkpoint"] == "/tmp/best.ckpt"
+
+
+def test_log_summary_extra_merges_into_metrics() -> None:
+    """``extra`` 인자로 전달된 key→float 쌍이 summary metric dict에 그대로 병합된다.
+
+    review-2026-04-18-U6-c1 §2-2 대체 구현(peak_memory_gb)의 데이터 계약 고정.
+    caller가 flat key 문자열을 주면 그대로 키로 쓰되 값은 float 캐스팅한다.
+    """
+    with patch("mlflow.active_run", return_value=MagicMock()), patch(
+        "mlflow.log_metrics"
+    ) as mock_log_metrics, patch("mlflow.set_tag"), patch(
+        "mlflow.log_dict"
+    ), patch("mlflow.log_artifacts"):
+        log_summary(
+            training_duration_seconds=10.0,
+            total_steps=50,
+            stopped_reason="completed",
+            final_metrics=None,
+            checkpoint_stats=None,
+            sanitized_config=None,
+            artifact_dirs=(),
+            extra={"peak_memory_gb": 68.4},
+        )
+
+    assert mock_log_metrics.call_count == 1
+    logged = mock_log_metrics.call_args.args[0]
+    assert logged["peak_memory_gb"] == pytest.approx(68.4)
+    # 기본 키는 그대로 유지.
+    assert logged["training_duration_seconds"] == pytest.approx(10.0)
+
+
+def test_log_summary_extra_none_is_noop() -> None:
+    """``extra=None`` 또는 빈 dict는 기존 호출과 완전히 동등하다(역호환)."""
+    with patch("mlflow.active_run", return_value=MagicMock()), patch(
+        "mlflow.log_metrics"
+    ) as mock_log_metrics, patch("mlflow.set_tag"), patch(
+        "mlflow.log_dict"
+    ), patch("mlflow.log_artifacts"):
+        log_summary(
+            training_duration_seconds=5.0,
+            total_steps=10,
+            stopped_reason="completed",
+            final_metrics=None,
+            checkpoint_stats=None,
+            sanitized_config=None,
+            artifact_dirs=(),
+            extra=None,
+        )
+
+    assert mock_log_metrics.call_count == 1
+    logged = mock_log_metrics.call_args.args[0]
+    # peak_memory_gb 같은 추가 키가 없어야 한다.
+    assert set(logged.keys()) == {"training_duration_seconds", "total_steps"}

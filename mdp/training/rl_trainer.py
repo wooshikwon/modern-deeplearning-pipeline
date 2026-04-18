@@ -354,6 +354,12 @@ class RLTrainer:
             logger.warning(f"sanitize_config 실패: {e}")
             sanitized_config = None
 
+        # Peak memory metric — review 2-2 대체 구현. rank 0의
+        # `torch.cuda.max_memory_allocated()`를 GiB 단위로 summary에 기록한다.
+        # spec-system-logging-cleanup §U5의 `memory_history` 정식 기능이 들어오기
+        # 전까지의 최소 관측 지점으로, CUDA 미사용 / 예외 발생 시 조용히 skip한다.
+        extra_summary = self._peak_memory_summary_extra()
+
         log_summary(
             training_duration_seconds=training_duration,
             total_steps=self.global_step,
@@ -362,6 +368,7 @@ class RLTrainer:
             checkpoint_stats=checkpoint_stats,
             sanitized_config=sanitized_config,
             artifact_dirs=(),
+            extra=extra_summary,
         )
 
         # policy adapter를 MLflow artifact로 저장 — FSDP cooperative gather 결과를 사용.
@@ -380,6 +387,29 @@ class RLTrainer:
                 "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
                 monitor_hint,
             )
+
+    def _peak_memory_summary_extra(self) -> dict[str, float] | None:
+        """Run 종료 시 rank 0의 CUDA peak memory를 GiB로 반환한다.
+
+        spec-algorithm-hidden-states-support U6의 peak memory observation
+        요구에 대한 최소 구현. CUDA가 없거나 예외가 나면 ``None``을 반환하여
+        summary 로깅에 아무 영향도 주지 않는다. rank 1~3에서도 그대로 호출하되
+        집계 자체는 rank 0 숫자에 의존 — rank 간 차이가 궁금하면 별도 feature
+        (spec-system-logging-cleanup U5의 OOM rank summary)로 구현 예정.
+        """
+        try:
+            if not torch.cuda.is_available():
+                return None
+            # 현재 프로세스가 보는 device에 대해 집계. DDP/torchrun에서는 rank별
+            # device를 잡아주지만 caller가 rank 0만 호출하므로 결과적으로 rank 0
+            # device의 peak가 기록된다.
+            peak_bytes = torch.cuda.max_memory_allocated()
+            if peak_bytes <= 0:
+                return None
+            return {"peak_memory_gb": peak_bytes / (1024**3)}
+        except Exception as e:  # noqa: BLE001
+            logger.debug("peak_memory_gb 집계 실패(무시): %s", e)
+            return None
 
     def _gather_fsdp_policy_state_dict(self) -> "dict | None":
         """FSDP 모델의 full state dict를 all-rank 협력으로 수집한다.
@@ -1431,12 +1461,20 @@ class RLTrainer:
                 # BaseModel의 기본 구현이 NotImplementedError이므로 dispatcher로 위임
                 pass
 
-        # Priority 2: HF PreTrainedModel
+        # Priority 2: HF PreTrainedModel (직접 또는 PEFT 래핑 투과).
+        # PeftModel은 HF PreTrainedModel을 상속하지 않으므로 isinstance 직접 체크에
+        # 걸리지 않는다. PeftModel.base_model(LoraModel).model(PreTrainedModel) 경로로
+        # 내려가면 LM head가 살아있는 진짜 PreTrainedModel이 나온다.
+        # 비-PEFT HF 모델(LlamaForCausalLM 등)은 먼저 isinstance에 걸려 언래핑 skip.
         try:
             from transformers import PreTrainedModel
 
             if isinstance(unwrapped, PreTrainedModel):
                 return self._extract_hf_pretrained(unwrapped, batch, layer_idx)
+            peft_base = getattr(unwrapped, "base_model", None)
+            peft_inner = getattr(peft_base, "model", None) if peft_base is not None else None
+            if peft_inner is not None and isinstance(peft_inner, PreTrainedModel):
+                return self._extract_hf_pretrained(peft_inner, batch, layer_idx)
         except ImportError:
             pass
 
@@ -1485,6 +1523,12 @@ class RLTrainer:
 
         ``output_hidden_states=True``로 forward 호출하여
         ``hidden_states[layer_idx]``와 ``get_output_embeddings().weight``을 반환한다.
+
+        Returns:
+            ``(hidden, head_weight)`` — 둘 다 동일 device 보장 (계약 확정 후처리).
+            PEFT 래핑이나 custom LM-head 구성으로 ``head_weight``이 CPU에 남은
+            경우 Liger FLCE(Triton kernel)가 pointer 접근 불가로 실패하므로,
+            dispatcher 계약 수준에서 ``head_weight.to(hidden.device)``로 흡수한다.
         """
         out = model(
             input_ids=batch["input_ids"],
@@ -1505,7 +1549,11 @@ class RLTrainer:
                 f"HF 모델 {type(model).__name__}에는 output embedding이 없습니다 "
                 "(encoder-only 모델 등). extract_features_and_head를 override하세요."
             )
-        return hidden, output_embeddings.weight
+        head_weight = output_embeddings.weight
+        # 계약: (hidden, head_weight)는 동일 device. 이미 같으면 to()는 no-op.
+        if head_weight.device != hidden.device:
+            head_weight = head_weight.to(hidden.device)
+        return hidden, head_weight
 
     def _extract_timm(
         self,
@@ -1516,6 +1564,8 @@ class RLTrainer:
 
         ``forward_features`` + ``get_classifier``의 weight을 반환한다.
         ``Identity`` classifier(num_classes=0)는 지원 불가.
+
+        Returns ``(features, weight)``에 대해 dispatcher 계약상 동일 device를 보장한다.
         """
         pixel_values = batch.get("pixel_values")
         if pixel_values is None:
@@ -1536,6 +1586,9 @@ class RLTrainer:
                 f"timm 모델 {type(model).__name__}의 classifier에 weight 속성이 "
                 "없습니다. extract_features_and_head를 override하세요."
             )
+        # 계약: (features, weight)는 동일 device.
+        if weight.device != features.device:
+            weight = weight.to(features.device)
         return features, weight
 
     def _extract_torchvision_resnet(
@@ -1572,7 +1625,11 @@ class RLTrainer:
                 f"torchvision 모델 {type(model).__name__}의 fc가 없습니다. "
                 "extract_features_and_head를 override하세요."
             )
-        return hidden, fc.weight
+        head_weight = fc.weight
+        # 계약: (hidden, head_weight)는 동일 device.
+        if head_weight.device != hidden.device:
+            head_weight = head_weight.to(hidden.device)
+        return hidden, head_weight
 
     def _forward_model(self, model: nn.Module, batch: dict, role: str = "policy") -> dict:
         """Causal forward를 수행한다.

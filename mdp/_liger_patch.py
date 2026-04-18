@@ -42,12 +42,21 @@ def apply_liger_patches() -> bool:
         return False
 
     try:
-        apply_liger_kernel_to_llama(fused_linear_cross_entropy=True)
+        # spec §U2 준수 — "FLCE only". Liger의 기본값은 rope=True/rms_norm=True/swiglu=True
+        # 이지만 FLCE가 유일한 타깃이므로 다른 monkey-patch는 명시적으로 False로 차단한다.
+        # cross_entropy는 FLCE로 대체되므로 중복 활성화 불필요.
+        apply_liger_kernel_to_llama(
+            rope=False,
+            cross_entropy=False,
+            fused_linear_cross_entropy=True,
+            rms_norm=False,
+            swiglu=False,
+        )
     except Exception as e:  # noqa: BLE001
         # apply_*는 transformers의 특정 버전에서만 동작. 호환성 문제는 graceful degradation.
         logger.warning("Liger monkey-patch failed: %s", e)
         return False
 
     _APPLIED = True
-    logger.info("Liger kernel applied: fused_linear_cross_entropy=True")
+    logger.info("Liger kernel applied: fused_linear_cross_entropy=True (others explicitly False)")
     return True
