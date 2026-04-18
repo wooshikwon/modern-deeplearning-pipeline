@@ -34,6 +34,17 @@ def _init_distributed_if_torchrun(settings) -> None:
     if dist.is_initialized():
         return
 
+    # CUDA current-device를 LOCAL_RANK에 고정. 이 호출이 없으면 모든 rank의
+    # ``torch.cuda.current_device()``가 기본값 0을 반환하고, Triton 커널(Liger FLCE
+    # 등)을 포함해 current device를 참조하는 CUDA 라이브러리가 rank 1~N의 텐서
+    # 포인터를 "다른 device"로 간주해 ``ValueError: Pointer argument (at 0) cannot
+    # be accessed from Triton (cpu tensor?)``를 던진다. ``.to(f"cuda:{local_rank}")``
+    # 로 만들어 둔 실제 텐서 device와 current device를 맞추기 위한 필수 1줄
+    # (2026-04-18 U6 sanity v2~v6 실패의 근본 원인, review-c3 §H9 확정).
+    if torch.cuda.is_available():
+        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+        torch.cuda.set_device(local_rank)
+
     # backend: Config.compute.distributed.backend → fallback nccl(cuda)/gloo(cpu)
     dist_cfg = settings.config.compute.distributed
     backend = None
