@@ -557,7 +557,62 @@ mdp 자체 로그(`logger = logging.getLogger(__name__)`)는 영향받지 않는
 ### MLflow 에러 처리
 
 - 1회성 호출(`_log_mlflow_params`, `_log_mlflow_summary`): 실패 시 `logger.warning`
-- 매 step 호출(`_mlflow_log_metric`): 실패 시 `logger.debug` (MLflow 장애 시 경고 폭주 방지)
+- 매 step 호출(`log_step_metrics`): 실패 시 `logger.debug` (MLflow 장애 시 경고 폭주 방지)
+
+---
+
+## MLflow Logging Conventions
+
+MDP는 `mdp/training/_mlflow_logging.py` 공용 헬퍼를 통해 Trainer·RLTrainer 양쪽이 동일한 키·시점·API로 MLflow에 기록한다. 값의 성격에 따라 저장소가 기계적으로 결정되며, 같은 개념은 항상 같은 저장소로 간다.
+
+### 3분류 규약 (static / dynamic / summary)
+
+| 범주 | 저장소 API | 대표 키 | 호출 시점 | 의미 |
+|------|-----------|---------|-----------|------|
+| **static** | `mlflow.log_params` | `task`, `model_class`, `policy_class`, `algorithm`, `batch_size`, `epochs`, `max_steps`, `precision`, `gradient_accumulation_steps`, `learning_rate_init`, `adapter_component`, `adapter_r`, `strategy`, `dataset_source`, `pretrained` | run 시작 시 1회 (`log_static_params`) | 실험을 재현할 때 필요한 "어떻게 실행했는가". Recipe·Settings 선언값 직송 |
+| **dynamic** | `mlflow.log_metrics(step=...)` | `learning_rate`, `learning_rate/{group_name_or_idx}`, `momentum`, `weight_decay`, `train_loss`, `val_*` | step/epoch 경계 (`log_step_metrics`·`log_epoch_metrics`) | scheduler로 변하는 "훈련 중 무슨 일이 일어났는가"의 시계열 |
+| **summary** | `mlflow.set_tag` + `mlflow.log_metrics` (+ `log_dict`, `log_artifacts`) | tag: `stopped_reason`, `checkpoints_saved`, `best_checkpoint` / metric: `training_duration_seconds`, `total_steps`, `final_{k}` | run 종료 직전 (`log_summary`) | "run이 어떻게 끝났는가"의 단일 스냅샷 |
+
+### Multi-group Optimizer 네이밍
+
+`collect_optimizer_state`가 `optimizer.param_groups` 전체를 순회해 아래 규약으로 metric 키를 생성한다.
+
+| 축 | 키 형태 | 예시 |
+|---|---|---|
+| single-group, single-optimizer | `learning_rate` | `learning_rate` |
+| single-group, multi-optimizer | `learning_rate/{opt_name}` | `learning_rate/policy`, `learning_rate/critic` |
+| multi-group, single-optimizer | `learning_rate/group_{idx}` (param_group에 `name` 있으면 `learning_rate/{name}`) | `learning_rate/group_0`, `learning_rate/lora` |
+| multi-group, multi-optimizer | `learning_rate/{opt_name}/group_{idx}` (name 있으면 `/{name}`) | `learning_rate/policy/lora` |
+
+`momentum`, `weight_decay`도 해당 param_group에 키가 실제 존재할 때만 같은 규칙으로 추가된다(SGD는 momentum 포함, AdamW는 없음 — optimizer 종류를 caller가 몰라도 자연스럽게 분기). slash 네이밍은 MLflow UI에서 계층 그룹으로 표시되며 Composer(`lr-Adam/group0`)·Lightning(`Adam/pg1`) 업계 관례와 일치한다.
+
+### Trainer ↔ RLTrainer 대칭
+
+| 시점 | Trainer | RLTrainer |
+|------|---------|-----------|
+| run 시작 | `log_static_params(recipe, settings)` | 동일 |
+| 매 grad_accum 경계 | `log_step_metrics(self._optimizer_dict(), global_step, extra={"train_loss": ...})` | `log_step_metrics(self.optimizers, global_step, extra={"loss": ...})` |
+| epoch 경계 (Trainer만 epoch 축 보유) | `log_epoch_metrics(self._optimizer_dict(), epoch, extra={"epoch_train_loss": ..., **val_metrics})` | (epoch 개념 없음, step만) |
+| run 종료 | `log_summary(final_metrics=self.last_metrics, checkpoint_stats=aggregate_checkpoint_stats(...), ...)` | 동일 (RLTrainer도 `final_*` 블록 보유 — U3 대칭 복구) |
+
+Trainer의 `_optimizer_dict()`가 단일 `self.optimizer`를 `{"policy": ...}`로 포장하여 RLTrainer의 `self.optimizers` dict와 같은 시그니처를 갖춘다 — 공용 헬퍼가 양쪽에서 동일하게 동작.
+
+### 하위 호환 주의
+
+spec-logging-consistency 적용 이후 MLflow run에서 **더 이상 생성되지 않는** 키:
+
+| 구 키 | 폐지 이유 | 대체 키 |
+|------|----------|---------|
+| `params/learning_rate` | warmup step 0 `optimizer.param_groups[0]["lr"]` 스냅샷이 recipe 선언값으로 오인되는 구조적 결함(원칙 2 위반) | `params/learning_rate_init` (recipe 선언값) + `metrics/learning_rate` (scheduler-adjusted 시계열) |
+| `params/policy_lr` | 동일 (RLTrainer 측 비대칭 네이밍 + 동일 결함) | 위와 동일 |
+
+기존 대시보드·스크립트가 `params/learning_rate` 또는 `params/policy_lr`을 조회한다면 `params/learning_rate_init`(정적, Recipe 선언값)로 전환하거나 `metrics/learning_rate` step 0 값(실제 적용된 LR의 시계열 첫 점)을 사용한다. 두 값은 warmup이 활성화된 경우 **의미가 다르다** — `params/learning_rate_init`는 "Recipe에 명시된 base LR", `metrics/learning_rate` step 0은 "warmup_start_factor가 적용된 실제 step 0의 LR".
+
+### 상호 참조
+
+- `stopped_reason`·`checkpoints_saved` tag 적재 규칙은 본 문서 "Train Result" 섹션과 `docs/training.md` "Graceful Shutdown"·"ModelCheckpoint `strict` 옵션" 섹션에 별도 명세(spec-trainer-robustness-fixes)
+- Intervention callback의 `intervention.*` MLflow tag 규약은 `docs/training.md` 콜백 섹션에 명세(spec-callback-restructure)
+- 공용 헬퍼는 콜백이 아닌 **Trainer builtin** 경로다 — spec-callback-restructure가 `LRMonitor` 콜백을 삭제한 근거("로깅은 builtin")와 일관
 
 ---
 

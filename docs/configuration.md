@@ -366,11 +366,9 @@ compute:
 
 - _component_: EMACallback
   decay: 0.999
-
-- _component_: LRMonitor
-
-- _component_: ProgressBar
 ```
+
+학습률 로깅은 Trainer builtin 경로가 `mdp/training/_mlflow_logging.py` 공용 헬퍼(`log_step_metrics`·`log_epoch_metrics`)를 통해 매 step·매 epoch `learning_rate` metric을 MLflow에 기록하므로 별도 콜백이 필요 없다(자세한 규약은 [Training Guide](training.md)의 "MLflow Logging Conventions" 섹션 참조).
 
 **병합 규칙**: `--callbacks` 파일이 지정되면 Recipe의 `callbacks:` 섹션을 override한다.
 
@@ -381,8 +379,6 @@ compute:
 | `ModelCheckpoint` | 체크포인트 저장 (best/latest, top-k) |
 | `EarlyStopping` | 메트릭 정체 시 조기 종료 |
 | `EMACallback` | Exponential Moving Average |
-| `LRMonitor` | 학습률 로깅 (풀 경로: `LearningRateMonitor`) |
-| `ProgressBar` | Rich 진행 바 |
 
 ---
 

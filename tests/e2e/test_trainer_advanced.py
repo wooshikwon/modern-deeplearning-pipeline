@@ -336,3 +336,99 @@ def test_device_map_model_rejected() -> None:
 
     with pytest.raises(RuntimeError, match="device_map"):
         trainer.train()
+
+
+# ─────────────────────────────────────────────────────────────────────
+# spec-logging-consistency (U5): Trainer의 step-level LR metric 기록 검증.
+#
+# U2에서 `log_step_metrics`를 `_train_one_epoch`의 grad_accum 경계 + residual
+# flush 두 지점에 삽입했다. 본 테스트는 warmup scheduler를 사용할 때 step 0
+# 시점의 optimizer LR이 `recipe.optimizer.lr × warmup_start_factor`로 시작하며,
+# 그 값이 MLflow `log_metrics`에 그대로 흐르는지 검증한다. 과거 `policy_lr`
+# 스냅샷이 param에 박히던 weighted-ntp Phase 3 혼란을 반대쪽(metric 경로)에서
+# 회귀 방어한다.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_trainer_logs_step_level_lr() -> None:
+    """Trainer가 step마다 `learning_rate` metric을 기록하고, warmup step 0에서
+    `base_lr × start_factor` 값이 관측된다.
+
+    실제 `mdp.training._mlflow_logging` 모듈 + 실제 optimizer 인스턴스를 거치되,
+    MLflow 자체는 `unittest.mock.patch`로 캡처한다(네트워크 없음). `log_metrics`
+    호출 중 step=1(첫 optimizer step 이후)의 인자에 `learning_rate` 키가 존재하고,
+    값이 `base_lr × warmup_start_factor` 근처임을 확인한다.
+    """
+    from contextlib import nullcontext
+    from unittest.mock import MagicMock, patch
+
+    base_lr = 1e-4
+    warmup_start_factor = 1e-8  # MDP 기본값 (LinearLR ZeroDivisionError 회피)
+
+    settings = make_test_settings(
+        epochs=1,
+        optimizer={"_component_": "AdamW", "lr": base_lr},
+        scheduler={
+            "_component_": "torch.optim.lr_scheduler.CosineAnnealingLR",
+            "T_max": 5,
+            "warmup_ratio": 0.03,
+            "warmup_start_factor": warmup_start_factor,
+            "warmup_end_factor": 1.0,
+        },
+    )
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    # 5개 이상 배치를 둬 최소 2회 step-level 로깅이 발생하도록 한다.
+    train_loader = ListDataLoader(make_vision_batches(5, 4, 2, 8))
+
+    trainer = Trainer(settings=settings, model=model, train_loader=train_loader)
+    trainer.device = torch.device("cpu")
+    trainer.amp_enabled = False
+
+    # MLflow run이 시작된 것처럼 보이게 `active_run`이 truthy를 반환. `_start_mlflow_run`
+    # 은 nullcontext로 대체하여 파일시스템 tracking backend의 실제 디렉토리 생성도
+    # 없앤다.
+    with patch.object(trainer, "_start_mlflow_run", return_value=nullcontext()), patch(
+        "mlflow.active_run", return_value=MagicMock()
+    ), patch("mlflow.log_metrics") as mock_log_metrics, patch(
+        "mlflow.log_params"
+    ), patch("mlflow.set_tag"), patch("mlflow.log_dict"), patch(
+        "mlflow.log_artifacts"
+    ):
+        trainer.train()
+
+    # ─── 검증 ───────────────────────────────────────────────────────
+    # `log_step_metrics`가 호출될 때마다 `mlflow.log_metrics(merged, step=...)` 형태.
+    # step 인자가 있는 호출 중 `learning_rate` 키를 포함한 것만 추린다.
+    step_calls = [
+        c for c in mock_log_metrics.call_args_list
+        if c.kwargs.get("step") is not None and "learning_rate" in c.args[0]
+    ]
+    assert len(step_calls) > 0, (
+        f"step-level learning_rate 로그가 없습니다. "
+        f"log_metrics calls: {mock_log_metrics.call_args_list}"
+    )
+
+    # 첫 step(=1) 호출에서 관측되는 learning_rate 값.
+    first_step_call = step_calls[0]
+    logged_lr = first_step_call.args[0]["learning_rate"]
+
+    # Warmup step 1의 LR: LinearLR(start_factor=1e-8, end_factor=1.0)는 step 0에서
+    # 이미 `base_lr × start_factor`를 param_groups에 반영한 상태로 시작한다.
+    # 이후 매 step마다 선형 증가하지만, total_iters가 충분히 크면 첫 step 값은
+    # 여전히 `start_factor × base_lr` 수준(≤ end_factor × base_lr 상한).
+    expected_initial = base_lr * warmup_start_factor
+    # end_factor × base_lr 이하가 LinearLR 동작의 상한 (Cosine 단계 이전).
+    assert logged_lr <= base_lr, (
+        f"Warmup 적용 후 첫 step LR이 base_lr({base_lr})보다 커서는 안 됨: {logged_lr}"
+    )
+    # start_factor × base_lr 이상(첫 step에서 이미 최소 1 interval 진행).
+    assert logged_lr >= expected_initial * 0.999, (
+        f"첫 step LR({logged_lr})이 start_factor×base_lr({expected_initial})에 미달. "
+        f"warmup LinearLR 경로가 깨진 것"
+    )
+
+    # `train_loss`도 같은 step 호출에 병합되어 있어야 한다(단일 round-trip).
+    assert "train_loss" in first_step_call.args[0], (
+        f"step-level 호출의 extra에 train_loss가 있어야 합니다. "
+        f"keys={list(first_step_call.args[0].keys())}"
+    )

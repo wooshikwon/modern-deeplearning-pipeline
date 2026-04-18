@@ -32,6 +32,12 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
+from mdp.training._mlflow_logging import (
+    log_epoch_metrics,
+    log_static_params,
+    log_step_metrics,
+    log_summary,
+)
 from mdp.training._schedulers import (
     create_scheduler_with_warmup,
     parse_warmup_config,
@@ -305,78 +311,70 @@ class RLTrainer:
             logger.warning(f"MLflow run 시작 실패: {e}")
             return nullcontext()
 
-    def _mlflow_log_metric(self, key: str, value: float, step: int) -> None:
-        if not self._is_main_process:
-            return
-        try:
-            import mlflow
-            mlflow.log_metric(key, value, step=step)
-        except Exception as e:
-            logger.debug("MLflow metric 로깅 실패 (key=%s): %s", key, e)
-
     def _log_mlflow_params(self) -> None:
-        try:
-            import mlflow
+        """Run 시작 시 static param 로깅을 공용 헬퍼에 위임한다.
 
-            recipe = self.settings.recipe
-            policy_spec = recipe.rl.models["policy"]
-            params = {
-                "task": recipe.task,
-                "algorithm": type(self.algorithm).__name__,
-                "policy_class": policy_spec.get("_component_", "unknown"),
-                "policy_pretrained": policy_spec.get("pretrained", "none"),
-                "dataset_source": recipe.data.dataset.get("source", "unknown"),
-                "batch_size": recipe.data.dataloader.batch_size,
-                "max_steps": self.max_steps or 0,
-                "precision": recipe.training.precision,
-                "policy_lr": self.optimizers["policy"].param_groups[0]["lr"],
-            }
-            policy_adapter = policy_spec.get("adapter")
-            if policy_adapter is not None:
-                params["adapter_component"] = policy_adapter.get("_component_", "unknown")
-                if policy_adapter.get("r") is not None:
-                    params["adapter_r"] = policy_adapter["r"]
-            # Strategy — Config.compute.distributed
-            dist = self.settings.config.compute.distributed
-            if isinstance(dist, dict) and dist.get("strategy"):
-                s = dist["strategy"]
-                params["strategy"] = s.get("_component_", s) if isinstance(s, dict) else s
-            mlflow.log_params(params)
-        except Exception as e:
-            logger.warning(f"MLflow params 로깅 실패: {e}")
+        `_mlflow_logging.log_static_params`가 원칙 2(optimizer 인스턴스 상태는 param으로
+        내보내지 않음)·원칙 3(multi-group slash 네이밍)를 일괄 책임진다. 본 래퍼는
+        호출 타이밍과 rank 가드(caller 쪽 `_is_main_process`) 외에는 어떤 결정도
+        내리지 않는다 — Trainer와 동일한 대칭 계약.
+        """
+        log_static_params(self.settings.recipe, self.settings)
 
-    def _log_mlflow_summary(self, training_duration: float, stopped_reason: str = "completed", policy_state_dict: "dict | None" = None) -> None:
+    def _log_mlflow_summary(
+        self,
+        training_duration: float,
+        stopped_reason: str = "completed",
+        policy_state_dict: "dict | None" = None,
+    ) -> None:
+        """Run 종료 시 summary 로깅을 공용 헬퍼에 위임한다.
+
+        Trainer와의 대칭을 위해 `final_metrics=self.last_metrics`를 포함한다(U3의
+        핵심 변경). `last_metrics`가 비어 있으면 `log_summary` 내부가 guard로 skip
+        하므로 caller는 그대로 넘기면 된다. Checkpoint 집계 결과는 기존대로
+        `self._checkpoints_saved`에 보존해 `train()` 반환 dict가 그대로 쓸 수 있도록
+        한다(spec-trainer-robustness-fixes 호환).
+
+        policy artifact export는 FSDP all-gather·tempdir 수명 관리가 있어
+        `log_summary`의 범용 `artifact_dirs` 경로로 흡수하지 않고 별도로 호출한다.
+        """
         # Checkpoint 집계 — `_common.aggregate_checkpoint_stats`가 Trainer와 동일한
         # duck typing 규칙을 단일 구현으로 제공한다. RL 구성은 Critic + Policy 각각에
         # ModelCheckpoint를 붙일 수 있어 여러 콜백이 공존해도 `saved_checkpoints`
         # 속성을 가진 콜백만 누적된다. `monitor_hint`는 아래 zero-warning에서 사용.
-        total_checkpoints, best_path, monitor_hint = aggregate_checkpoint_stats(
-            self.callbacks,
-        )
+        checkpoint_stats = aggregate_checkpoint_stats(self.callbacks)
+        total_checkpoints, _best_path, monitor_hint = checkpoint_stats
         self._checkpoints_saved = total_checkpoints
 
+        # sanitized_config — Trainer와 동일 출처·동일 파일 경로.
         try:
-            import mlflow
             from mdp.utils.sanitize import sanitize_config
+            sanitized_config = sanitize_config(self.settings.model_dump())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"sanitize_config 실패: {e}")
+            sanitized_config = None
 
-            mlflow.log_metrics({
-                "training_duration_seconds": training_duration,
-                "total_steps": self.global_step,
-            })
-            mlflow.set_tag("stopped_reason", stopped_reason)
-            mlflow.set_tag("checkpoints_saved", str(total_checkpoints))
-            if best_path is not None:
-                mlflow.set_tag("best_checkpoint", str(best_path))
-            config_dict = sanitize_config(self.settings.model_dump())
-            mlflow.log_dict(config_dict, "config/settings.json")
+        log_summary(
+            training_duration_seconds=training_duration,
+            total_steps=self.global_step,
+            stopped_reason=stopped_reason,
+            final_metrics=self.last_metrics,
+            checkpoint_stats=checkpoint_stats,
+            sanitized_config=sanitized_config,
+            artifact_dirs=(),
+        )
 
-            # policy adapter를 MLflow artifact로 저장
-            self._export_policy_artifact(policy_state_dict=policy_state_dict)
-        except Exception as e:
-            logger.warning(f"MLflow summary 로깅 실패: {e}")
+        # policy adapter를 MLflow artifact로 저장 — FSDP cooperative gather 결과를 사용.
+        # `log_summary`의 artifact_dirs 경로로 넘기지 않는 이유는 tempfile 디렉토리의
+        # 수명을 `_export_policy_artifact` 안에서 `with` 문으로 닫기 때문(밖으로
+        # 노출하면 수명 관리가 복잡해짐).
+        if self._is_main_process:
+            try:
+                self._export_policy_artifact(policy_state_dict=policy_state_dict)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Policy artifact 등록 실패: {e}")
 
         # zero-checkpoint warning — 산출물 0인 run을 사용자가 놓치지 않도록.
-        # `monitor_hint`는 위의 `aggregate_checkpoint_stats` 호출에서 이미 준비됨.
         if total_checkpoints == 0:
             logger.warning(
                 "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
@@ -949,7 +947,21 @@ class RLTrainer:
                                     logits=step_logits,
                                 )
 
-                        self._fire("on_epoch_end", epoch=self.epoch_counter, metrics={"loss": total_loss / max(num_steps, 1)})
+                        _epoch_train_loss = total_loss / max(num_steps, 1)
+                        self._fire(
+                            "on_epoch_end",
+                            epoch=self.epoch_counter,
+                            metrics={"loss": _epoch_train_loss},
+                        )
+                        # Epoch-level MLflow logging — Trainer와 대칭. `step=epoch`으로
+                        # LR snapshot + epoch_train_loss를 1회 기록한다. step-level과는
+                        # 축이 분리되어 있으며 MLflow UI에서 독립 시계열로 표시된다.
+                        if self._is_main_process:
+                            log_epoch_metrics(
+                                self.optimizers,
+                                self.epoch_counter,
+                                extra={"epoch_train_loss": _epoch_train_loss},
+                            )
                         self.epoch_counter += 1
 
                         # Epoch-level scheduler stepping
@@ -969,6 +981,19 @@ class RLTrainer:
                             val_metrics = self._run_rl_validation()
                             self._fire("on_validation_end", epoch=self.epoch_counter, metrics=val_metrics)
                             self.last_metrics.update(val_metrics)
+                            # Trainer와 대칭으로, validation metric을 학습 중 MLflow에 즉시
+                            # 기록한다(`trainer.py` _validate의 log_epoch_metrics 대칭).
+                            # 키는 `val_*` prefix를 붙여 epoch 축으로 흘린다. 없으면
+                            # 사용자가 학습 중 validation 추이를 UI에서 볼 수 없다.
+                            if self._is_main_process and val_metrics:
+                                log_epoch_metrics(
+                                    self.optimizers,
+                                    self.epoch_counter,
+                                    extra={
+                                        (k if k.startswith("val_") else f"val_{k}"): v
+                                        for k, v in val_metrics.items()
+                                    },
+                                )
 
                         self._fire("on_epoch_start", epoch=self.epoch_counter)
 
@@ -994,9 +1019,6 @@ class RLTrainer:
                     total_loss += step_loss
                     num_steps += 1
 
-                    # step-level logging
-                    self._mlflow_log_metric("loss", step_loss, self.global_step)
-
                     if batch_idx % self.grad_accum_steps == 0:
                         self._fire(
                             "on_batch_end", step=self.global_step,
@@ -1010,6 +1032,26 @@ class RLTrainer:
                             logits=step_logits,
                         )
 
+                        # step-level logging — grad_accum 경계에서만 발화하여 Trainer와
+                        # 대칭(`trainer.py` L556 내부의 `log_step_metrics` 호출과 동일한
+                        # 시점). 공용 헬퍼가 (a) `self.optimizers`의 param_group별
+                        # `learning_rate[/{group_name_or_idx}]` metric + (b) `extra`의
+                        # loss를 같은 step 인덱스로 1회 `mlflow.log_metrics` 호출에
+                        # 흡수한다. CriticValueModel처럼 policy optimizer가 2-group
+                        # (LoRA + head)인 경우 `learning_rate/group_0`·
+                        # `learning_rate/group_1`(또는 name이 있으면 `learning_rate/lora`·
+                        # `learning_rate/head`)이 매 step 기록된다. 과거 이 호출이
+                        # grad_accum 경계 밖에 있어 `grad_accum_steps > 1`에서 같은
+                        # `self.global_step` 값으로 여러 entry가 누적되며 MLflow UI
+                        # 곡선이 왜곡되던 결함을 해소한다(원칙 4 "같은 시점·같은 API").
+                        # rank 가드는 `_is_main_process`에서 일괄 처리한다.
+                        if self._is_main_process:
+                            log_step_metrics(
+                                self.optimizers,
+                                self.global_step,
+                                extra={"loss": step_loss},
+                            )
+
                     # RL step-based validation
                     if (
                         self.val_loader is not None
@@ -1022,6 +1064,17 @@ class RLTrainer:
                         val_metrics = self._run_rl_validation()
                         self._fire("on_validation_end", epoch=self.epoch_counter, metrics=val_metrics)
                         self.last_metrics.update(val_metrics)
+                        # Trainer와 대칭으로, step-based validation metric을 학습 중
+                        # MLflow에 즉시 기록(`val_*` prefix, step 축).
+                        if self._is_main_process and val_metrics:
+                            log_step_metrics(
+                                self.optimizers,
+                                self.global_step,
+                                extra={
+                                    (k if k.startswith("val_") else f"val_{k}"): v
+                                    for k, v in val_metrics.items()
+                                },
+                            )
 
             finally:
                 # Nested try/finally 구조: on_train_end / FSDP gather / cleanup /
