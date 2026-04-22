@@ -20,8 +20,9 @@ from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
 
-# [PROBE 2026-04-23] 첫 optimizer step에서 LoRA grad 상태 출력 (일회성).
+# [PROBE 2026-04-23] 일회성 진단 flag.
 _probe_backward_fired = False
+_probe_loss_fired = False
 
 
 def aggregate_checkpoint_stats(
@@ -243,7 +244,31 @@ def backward_and_step(
 
     # Backward with accumulation scaling
     accum = 1 if force_step else grad_accum_steps
+    global _probe_loss_fired
     for loss in losses.values():
+        # [PROBE 2026-04-23] 첫 backward 호출 시 loss 상태 + grad_fn chain 출력.
+        if not _probe_loss_fired:
+            _probe_loss_fired = True
+            logger.info(
+                "PROBE[loss] requires_grad=%s grad_fn=%s dtype=%s value=%.6f",
+                loss.requires_grad,
+                type(loss.grad_fn).__name__ if loss.grad_fn is not None else None,
+                loss.dtype, loss.item(),
+            )
+            # BFS trace grad_fn chain (최대 20개 node). Liger FLCE가 chain에 있는지 확인.
+            _visited: set[int] = set()
+            _queue = [loss.grad_fn]
+            _names: list[str] = []
+            while _queue and len(_names) < 20:
+                _fn = _queue.pop(0)
+                if _fn is None or id(_fn) in _visited:
+                    continue
+                _visited.add(id(_fn))
+                _names.append(type(_fn).__name__)
+                for _next_fn, _ in _fn.next_functions:
+                    if _next_fn is not None:
+                        _queue.append(_next_fn)
+            logger.info("PROBE[grad_fn_chain] %s", " -> ".join(_names))
         scaler.scale(loss / accum).backward()
 
     # Optimizer step at accumulation boundary or force
