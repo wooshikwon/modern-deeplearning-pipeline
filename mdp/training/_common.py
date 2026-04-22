@@ -20,6 +20,9 @@ from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
 
+# [PROBE 2026-04-23] 첫 optimizer step에서 LoRA grad 상태 출력 (일회성).
+_probe_backward_fired = False
+
 
 def aggregate_checkpoint_stats(
     callbacks: list,
@@ -246,6 +249,7 @@ def backward_and_step(
     # Optimizer step at accumulation boundary or force
     if force_step or at_accum_boundary:
         grad_norms: dict[str, float] = {}
+        global _probe_backward_fired
         for name, opt in optimizers.items():
             scaler.unscale_(opt)
             model = trainable_models.get(name)
@@ -254,15 +258,38 @@ def backward_and_step(
                 lora_B_sq = 0.0
                 has_A = False
                 has_B = False
+                # [PROBE 2026-04-23] 첫 step에서 LoRA grad 상태 카운트
+                probe_lora_total = 0
+                probe_grad_none = 0
+                probe_grad_zero = 0
+                probe_samples: list[str] = []
                 for pname, p in model.named_parameters():
+                    is_lora_A = "lora_A" in pname
+                    is_lora_B = "lora_B" in pname
+                    if (is_lora_A or is_lora_B) and p.requires_grad:
+                        probe_lora_total += 1
+                        if p.grad is None:
+                            probe_grad_none += 1
+                        else:
+                            _pn = float(p.grad.detach().data.norm(2).item())
+                            if _pn == 0.0:
+                                probe_grad_zero += 1
+                            if len(probe_samples) < 3:
+                                probe_samples.append(f"{pname.rsplit('.', 2)[0]}:{_pn:.4e}")
                     if p.grad is None:
                         continue
-                    if "lora_A" in pname:
+                    if is_lora_A:
                         lora_A_sq += float(p.grad.detach().data.norm(2).item()) ** 2
                         has_A = True
-                    elif "lora_B" in pname:
+                    elif is_lora_B:
                         lora_B_sq += float(p.grad.detach().data.norm(2).item()) ** 2
                         has_B = True
+                if not _probe_backward_fired:
+                    _probe_backward_fired = True
+                    logger.info(
+                        "PROBE[backward] opt=%s lora_params=%d grad_None=%d grad_zero=%d samples=%s",
+                        name, probe_lora_total, probe_grad_none, probe_grad_zero, probe_samples,
+                    )
                 if has_A:
                     grad_norms[f"{name}/lora_A"] = lora_A_sq ** 0.5
                 if has_B:

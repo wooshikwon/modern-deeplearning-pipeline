@@ -56,6 +56,9 @@ from mdp.training.callbacks.ema import EMACallback
 
 logger = logging.getLogger(__name__)
 
+# [PROBE 2026-04-23] 일회성 진단 플래그 (grad_norm=0.00 원인 추적용).
+_probe_extract_fired = False
+
 
 class RLTrainer:
     """RL alignment 학습 루프."""
@@ -1870,6 +1873,21 @@ class RLTrainer:
                 "(encoder-only 모델 등). extract_features_and_head를 override하세요."
             )
         head_weight = output_embeddings.weight
+        # [PROBE 2026-04-23] 첫 호출에서 hidden/head의 그래프 연결 상태 출력.
+        # grad_norm=0.00 원인 진단: extract 단계에서 그래프가 끊겼는가 확인.
+        global _probe_extract_fired
+        if not _probe_extract_fired:
+            _probe_extract_fired = True
+            logger.info(
+                "PROBE[extract] model_type=%s use_efficient=%s "
+                "hidden.requires_grad=%s hidden.grad_fn=%s hidden.shape=%s "
+                "head.requires_grad=%s head.shape=%s",
+                type(model).__name__, use_efficient_path,
+                hidden.requires_grad,
+                type(hidden.grad_fn).__name__ if hidden.grad_fn is not None else None,
+                tuple(hidden.shape),
+                head_weight.requires_grad, tuple(head_weight.shape),
+            )
         return hidden, head_weight
 
     def _extract_timm(
