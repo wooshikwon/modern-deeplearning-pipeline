@@ -1750,7 +1750,14 @@ class RLTrainer:
             peft_base = getattr(unwrapped, "base_model", None)
             peft_inner = getattr(peft_base, "model", None) if peft_base is not None else None
             if peft_inner is not None and isinstance(peft_inner, PreTrainedModel):
-                return self._extract_hf_pretrained(peft_inner, batch, layer_idx)
+                # [2026-04-23] peft_inner(벗겨진 LlamaForCausalLM) 직접 호출은
+                # PeftModel.forward의 adapter state 관리를 우회해 LoRA delta가
+                # computation graph에서 누락된다 (grad_norm=0.00 재현 확인).
+                # unwrapped(PeftModel)를 그대로 전달하면 base_model.__call__이
+                # LoraModel → LlamaForCausalLM 체인을 타고 LoRA forward가 보존된다.
+                # PeftModel은 __getattr__로 .base_model·.get_output_embeddings()를
+                # 모두 위임하므로 _extract_hf_pretrained 내부 로직과 호환된다.
+                return self._extract_hf_pretrained(unwrapped, batch, layer_idx)
         except ImportError:
             pass
 
