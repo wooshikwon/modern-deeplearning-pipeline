@@ -1212,9 +1212,9 @@ class RLTrainer:
                     self._fire("on_batch_start", step=self.global_step)
 
                     if needs_gen:
-                        step_loss, step_logits = self._train_step_generation(batch, device_type)
+                        step_loss, step_logits, step_grad_norms = self._train_step_generation(batch, device_type)
                     else:
-                        step_loss, step_logits = self._train_step_offline(batch, device_type, batch_idx)
+                        step_loss, step_logits, step_grad_norms = self._train_step_offline(batch, device_type, batch_idx)
 
                     batch_idx += 1
                     if step_loss is None:
@@ -1249,15 +1249,20 @@ class RLTrainer:
                         # 곡선이 왜곡되던 결함을 해소한다(원칙 4 "같은 시점·같은 API").
                         # rank 가드는 `_is_main_process`에서 일괄 처리한다.
                         if self._is_main_process:
+                            # grad_norm/{name}/{total|lora_A|lora_B}: backward_and_step가
+                            # 측정한 pre-clip gradient norm (LoRA 없으면 키 생략).
+                            extra_metrics: dict[str, float] = {"loss": step_loss}
+                            extra_metrics.update(
+                                {f"grad_norm/{k}": v for k, v in step_grad_norms.items()}
+                            )
                             log_step_metrics(
                                 self.optimizers,
                                 self.global_step,
-                                extra={"loss": step_loss},
+                                extra=extra_metrics,
                             )
 
                             # Text step-progress (spec-system-logging-cleanup §U4).
-                            # file-redirect 환경에서도 step 진행이 stdout 에 남도록 한다.
-                            # `log_every_n_steps` 간격마다 + 마지막 step 에서 1회 출력.
+                            # stdout은 policy/total만 — LoRA 세분값은 MLflow UI에서 확인.
                             _mon_cfg = self._recipe_dict.get("monitoring", {}) if isinstance(self._recipe_dict, dict) else {}
                             _every_n = int(_mon_cfg.get("log_every_n_steps", 10) or 10)
                             if self.global_step > 0 and (
@@ -1266,7 +1271,7 @@ class RLTrainer:
                             ):
                                 self._log_step_progress(
                                     loss=step_loss,
-                                    grad_norm=None,
+                                    grad_norm=step_grad_norms.get("policy/total"),
                                     start_time=start_time,
                                     max_steps=max_steps,
                                 )
@@ -1457,12 +1462,16 @@ class RLTrainer:
 
     def _train_step_offline(
         self, batch: dict, device_type: str, batch_idx: int
-    ) -> tuple[float | None, "torch.Tensor | None"]:
-        """DPO — 데이터가 이미 완성된 경로.
+    ) -> tuple[float | None, "torch.Tensor | None", dict[str, float]]:
+        """DPO / WeightedNTPLoss — 데이터가 이미 완성된 경로.
 
         Returns:
-            (loss_scalar, policy_logits) — logits는 on_batch_end 콜백에 전달된다.
-            preference 배치는 logits가 chosen/rejected로 분리되어 있으므로 None을 반환한다.
+            (loss_scalar, policy_logits, grad_norms):
+            - logits는 on_batch_end 콜백에 전달된다.
+              preference 배치는 logits가 chosen/rejected로 분리되어 있으므로 None.
+            - grad_norms는 backward_and_step가 반환한 pre-clip gradient norm dict
+              (키: ``"{optimizer_name}/total"``, ``"{optimizer_name}/lora_A"``,
+              ``"{optimizer_name}/lora_B"``). step이 실행되지 않은 micro-step은 빈 dict.
         """
         is_preference = "chosen_input_ids" in batch
         needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
@@ -1501,7 +1510,7 @@ class RLTrainer:
             n: s for n, s in self.schedulers.items()
             if self.scheduler_intervals.get(n) == "step"
         }
-        result = backward_and_step(
+        result, grad_norms = backward_and_step(
             losses=losses,
             optimizers=self.optimizers,
             schedulers=step_schedulers,
@@ -1512,13 +1521,26 @@ class RLTrainer:
             grad_clip_norm=self.grad_clip_norm,
         )
         if result is None:
-            return None, None
+            return None, None, {}
         if result is True:
             self.global_step += 1
-        return losses.get("policy", list(losses.values())[0]).item(), step_logits
+        return (
+            losses.get("policy", list(losses.values())[0]).item(),
+            step_logits,
+            grad_norms,
+        )
 
-    def _train_step_generation(self, batch: dict, device_type: str) -> tuple[float, None]:
-        """GRPO / PPO — policy가 텍스트를 생성하고, 그 결과로 학습."""
+    def _train_step_generation(
+        self, batch: dict, device_type: str
+    ) -> tuple[float | None, None, dict[str, float]]:
+        """GRPO / PPO — policy가 텍스트를 생성하고, 그 결과로 학습.
+
+        Returns:
+            (loss_scalar, None, grad_norms):
+            - logits는 생성 루프 내 중간 값 노출 시 메모리 압력이 커서 반환하지 않는다.
+            - grad_norms는 mini-epoch 마지막 ``backward_and_step``의 반환값
+              (pre-clip gradient norm). all_nan으로 break된 경로는 빈 dict.
+        """
         from mdp.training.losses.rl import compute_log_probs
 
         prompt_ids = batch["input_ids"]
@@ -1578,6 +1600,7 @@ class RLTrainer:
         needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
         needs_logits = getattr(self.algorithm, "needs_logits", True)
         last_loss = 0.0
+        last_grad_norms: dict[str, float] = {}
         all_nan = True
         for _ in range(mini_epochs):
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
@@ -1604,7 +1627,7 @@ class RLTrainer:
                 n: s for n, s in self.schedulers.items()
                 if self.scheduler_intervals.get(n) == "step"
             }
-            result = backward_and_step(
+            result, grad_norms = backward_and_step(
                 losses=losses,
                 optimizers=self.optimizers,
                 schedulers=step_schedulers,
@@ -1619,12 +1642,13 @@ class RLTrainer:
                 break
             all_nan = False
             last_loss = losses.get("policy", list(losses.values())[0]).item()
+            last_grad_norms = grad_norms
 
         if all_nan:
-            return None, None
+            return None, None, {}
         self.global_step += 1
         # generation 경로는 logits를 수집하지 않는다 (생성 루프 내 중간 logits를 노출하면 과도한 메모리 압력 발생)
-        return last_loss, None
+        return last_loss, None, last_grad_norms
 
     def _compute_rewards(
         self,

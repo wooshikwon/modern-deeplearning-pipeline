@@ -607,7 +607,7 @@ class Trainer:
                 if self.scheduler is not None and self.scheduler_interval == "step"
                 else {}
             )
-            result = backward_and_step(
+            result, grad_norms = backward_and_step(
                 losses={"model": loss},
                 optimizers={"model": self.optimizer},
                 schedulers=step_schedulers,
@@ -640,11 +640,17 @@ class Trainer:
                 # LR을 slash 네이밍으로 흘리며, ``extra``의 train_loss를 같은 step 축에
                 # 병합한다. 과거 ``_mlflow_log_metric("train_loss", ...)`` 단독 호출을
                 # 대체(단일 MLflow round-trip).
+                # grad_norm/{name}/{total|lora_A|lora_B}는 backward_and_step에서
+                # pre-clip 측정된 pre-optimizer gradient norm을 그대로 MLflow 축에 태운다.
                 if self._is_main_process:
+                    extra_metrics: dict[str, float] = {"train_loss": actual_loss}
+                    extra_metrics.update(
+                        {f"grad_norm/{k}": v for k, v in grad_norms.items()}
+                    )
                     log_step_metrics(
                         self._optimizer_dict(),
                         self.global_step,
-                        extra={"train_loss": actual_loss},
+                        extra=extra_metrics,
                     )
 
                     # Text step-progress (spec-system-logging-cleanup §U4).
@@ -659,7 +665,7 @@ class Trainer:
                     ):
                         self._log_step_progress(
                             loss=actual_loss,
-                            grad_norm=None,
+                            grad_norm=grad_norms.get("model/total"),
                             start_time=getattr(self, "_progress_start_time", time.time()),
                             max_steps=_max_steps or max(self.global_step, 1),
                         )

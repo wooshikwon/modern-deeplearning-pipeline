@@ -121,10 +121,14 @@ def _make_stub(
 
 @contextmanager
 def _stub_backward(monkeypatch: pytest.MonkeyPatch):
-    """``backward_and_step``를 성공 반환으로 치환. optimizer 실제 호출 회피."""
+    """``backward_and_step``를 성공 반환으로 치환. optimizer 실제 호출 회피.
+
+    반환 튜플의 둘째 원소는 grad_norm dict — 스텁은 빈 dict를 돌려 caller의
+    unpack을 만족시킨다.
+    """
 
     def _ok(**kwargs):
-        return True
+        return True, {}
 
     monkeypatch.setattr(rl_trainer_module, "backward_and_step", _ok)
     yield
@@ -256,7 +260,7 @@ class TestLogitsOnlyPath:
         stub = _make_stub(algo, spy)
 
         with _stub_backward(monkeypatch):
-            _, step_logits = _call_offline(stub, _pointwise_batch())
+            _, step_logits, _ = _call_offline(stub, _pointwise_batch())
 
         # forward 1회 (trainable=policy), dispatcher 0회.
         assert [c["role"] for c in spy.forward_model_calls] == ["policy"]
@@ -284,7 +288,7 @@ class TestLogitsAndHiddenPath:
         stub = _make_stub(algo, spy)
 
         with _stub_backward(monkeypatch):
-            _, step_logits = _call_offline(stub, _pointwise_batch())
+            _, step_logits, _ = _call_offline(stub, _pointwise_batch())
 
         # forward 1회 + dispatcher 1회 = backbone 경로 2회.
         assert [c["role"] for c in spy.forward_model_calls] == ["policy"]
@@ -312,7 +316,7 @@ class TestHiddenOnlyPath:
         stub = _make_stub(algo, spy)
 
         with _stub_backward(monkeypatch):
-            _, step_logits = _call_offline(stub, _pointwise_batch())
+            _, step_logits, _ = _call_offline(stub, _pointwise_batch())
 
         # forward 0회 (trainable 스킵), dispatcher 1회.
         assert spy.forward_model_calls == []

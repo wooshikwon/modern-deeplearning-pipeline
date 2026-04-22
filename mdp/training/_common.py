@@ -211,13 +211,24 @@ def backward_and_step(
     at_accum_boundary: bool,
     grad_clip_norm: float | None = None,
     force_step: bool = False,
-) -> bool | None:
+) -> tuple[bool | None, dict[str, float]]:
     """Shared backward + optimizer step.
 
     Returns:
-        True: optimizer step executed.
-        False: backward done, not at accumulation boundary.
-        None: NaN/Inf detected, gradients cleared, caller should skip.
+        (stepped, grad_norms):
+        - stepped: True = step 실행, False = accumulation 경계 아님, None = NaN/Inf skip.
+        - grad_norms: optimizer별 gradient norm (pre-clip).
+          키 규약:
+            "{optimizer_name}/total"   — 전체 trainable 파라미터 L2 norm
+            "{optimizer_name}/lora_A"  — LoRA A 파라미터 L2 norm (LoRA 있을 때만)
+            "{optimizer_name}/lora_B"  — LoRA B 파라미터 L2 norm (LoRA 있을 때만)
+          step 없거나 clip 비활성·LoRA 없음이면 부분/빈 dict.
+
+    LoRA 분리 probe는 ``clip_grad_norm_``이 gradient를 in-place로 수정하기 전에
+    측정해야 실제 backward pass가 올려둔 값을 반영한다. 이 분리값이 있어야
+    "LoRA adapter에 gradient가 흐르는가"를 total norm 뒤에 숨지 않고 직접
+    확인할 수 있다 — peft + gradient_checkpointing + enable_input_require_grads
+    조합은 backward path가 끊기기 쉬운 영역이라 이 진단이 재발 방지에 필수.
     """
     # NaN/Inf guard
     for name, loss in losses.items():
@@ -225,7 +236,7 @@ def backward_and_step(
             logger.warning("NaN/Inf loss detected in '%s', skipping step", name)
             for opt in optimizers.values():
                 opt.zero_grad(set_to_none=True)
-            return None
+            return None, {}
 
     # Backward with accumulation scaling
     accum = 1 if force_step else grad_accum_steps
@@ -234,10 +245,33 @@ def backward_and_step(
 
     # Optimizer step at accumulation boundary or force
     if force_step or at_accum_boundary:
+        grad_norms: dict[str, float] = {}
         for name, opt in optimizers.items():
             scaler.unscale_(opt)
-            if grad_clip_norm is not None and name in trainable_models:
-                clip_grad_norm_(trainable_models[name].parameters(), grad_clip_norm)
+            model = trainable_models.get(name)
+            if model is not None:
+                lora_A_sq = 0.0
+                lora_B_sq = 0.0
+                has_A = False
+                has_B = False
+                for pname, p in model.named_parameters():
+                    if p.grad is None:
+                        continue
+                    if "lora_A" in pname:
+                        lora_A_sq += float(p.grad.detach().data.norm(2).item()) ** 2
+                        has_A = True
+                    elif "lora_B" in pname:
+                        lora_B_sq += float(p.grad.detach().data.norm(2).item()) ** 2
+                        has_B = True
+                if has_A:
+                    grad_norms[f"{name}/lora_A"] = lora_A_sq ** 0.5
+                if has_B:
+                    grad_norms[f"{name}/lora_B"] = lora_B_sq ** 0.5
+                if grad_clip_norm is not None:
+                    _total = clip_grad_norm_(model.parameters(), grad_clip_norm)
+                    grad_norms[f"{name}/total"] = (
+                        _total.item() if hasattr(_total, "item") else float(_total)
+                    )
             scaler.step(opt)
             sched = schedulers.get(name)
             if sched is not None:
@@ -246,6 +280,6 @@ def backward_and_step(
 
         for opt in optimizers.values():
             opt.zero_grad(set_to_none=True)
-        return True
+        return True, grad_norms
 
-    return False
+    return False, {}

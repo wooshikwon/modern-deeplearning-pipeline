@@ -101,10 +101,14 @@ def _make_trainer_stub(
 
 @contextmanager
 def _stub_backward_and_step(monkeypatch: pytest.MonkeyPatch):
-    """`backward_and_step`를 성공(True) 반환으로 교체. optimizer 상호작용 회피."""
+    """`backward_and_step`를 성공(True, {}) 반환으로 교체. optimizer 상호작용 회피.
+
+    반환 튜플의 둘째 원소는 grad_norm dict — 스텁은 빈 dict를 돌려 caller의
+    unpack을 만족시키고 실제 gradient 측정은 스킵한다.
+    """
 
     def _ok(**kwargs):
-        return True
+        return True, {}
 
     monkeypatch.setattr(rl_trainer_module, "backward_and_step", _ok)
     yield
@@ -201,7 +205,7 @@ class TestOfflineNeedsLogitsTrue:
         batch = {"input_ids": torch.arange(8).view(2, 4)}
 
         with _stub_backward_and_step(monkeypatch):
-            _, step_logits = _call_offline(stub, batch)
+            _, step_logits, _ = _call_offline(stub, batch)
 
         assert step_logits is not None
         assert step_logits.shape == (2, 4, 16)
@@ -239,7 +243,7 @@ class TestOfflineNeedsLogitsFalse:
 
         # compute_loss 내부의 assert가 hidden/head 주입을 이미 검증한다.
         with _stub_backward_and_step(monkeypatch):
-            loss_val, step_logits = _call_offline(stub, batch)
+            loss_val, step_logits, _ = _call_offline(stub, batch)
 
         # step_logits는 None — policy_out에 "logits" 키 없음
         assert step_logits is None
@@ -319,7 +323,7 @@ class TestOfflinePreferencePath:
         }
 
         with _stub_backward_and_step(monkeypatch):
-            _, step_logits = _call_offline(stub, batch)
+            _, step_logits, _ = _call_offline(stub, batch)
 
         # preference 경로: step_logits=None (chosen/rejected 분리로 인함).
         # _forward_preference가 frozen({})과 trainable({policy})에 각 1회 호출 = 총 2회.
