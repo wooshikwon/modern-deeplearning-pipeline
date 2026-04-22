@@ -152,7 +152,49 @@ mdp rl-train -r rl-recipe.yaml -c config.yaml
 | **GRPO** | policy + reference + reward | 예 (K개 응답) | 그룹 상대 최적화 |
 | **PPO** | policy + reference + value + reward | 예 | 근접 정책 최적화 |
 
-> **외부 알고리즘 주입**: RLTrainer는 `rl.algorithm._component_`로 임의의 loss 클래스를 받는다. `compute_loss(trainable_out, frozen_out, batch) -> {"policy": Tensor}` 규약과 `needs_generation`/`mini_epochs` 속성만 맞추면 외부 패키지의 loss 클래스를 그대로 주입할 수 있다 (예: `weighted_ntp.algorithms.WeightedNTPLoss`).
+> **외부 알고리즘 주입**: RLTrainer는 `rl.algorithm._component_`로 임의의 loss 클래스를 받는다. `compute_loss(trainable_out, frozen_out, batch) -> {"policy": Tensor}` 규약과 `needs_generation`/`needs_hidden_states`/`needs_logits` / `mini_epochs` 속성만 맞추면 외부 패키지의 loss 클래스를 그대로 주입할 수 있다 (예: `weighted_ntp.algorithms.WeightedNTPLoss`). 계약 flag와 구현 패턴은 `docs/extending.md` "커스텀 RL 알고리즘" 섹션을 참조한다.
+
+### Algorithm Interface — forward 분기 로직
+
+RLTrainer는 매 step에서 알고리즘이 선언한 3개 flag를 `getattr` duck typing으로 조회해 forward 경로를 재구성한다. `mdp/training/losses/base.py`의 `BaseAlgorithm`이 선언하는 ClassVar 3개(`needs_logits=True` / `needs_hidden_states=False` / `needs_generation=False`)가 단일 진실 원천이고, 알고리즘은 필요한 flag만 override한다. 계약 상세와 조합별 예시는 `docs/extending.md`의 "커스텀 RL 알고리즘" 섹션에 있고, 이 항목은 **trainer 내부 분기 순서**를 기술한다.
+
+`_train_step_offline` / `_train_step_generation` 공통 순서 (pointwise / mini-epoch 분기):
+
+1. `needs_logits = getattr(algorithm, "needs_logits", True)`로 flag 조회. default True이므로 선언 누락 = 기존 forward 경로 유지.
+2. `needs_logits=True`면 `self.trainable`의 각 모델에 대해 `_forward_model`을 실행하여 `trainable_out[<name>]["logits"]`을 채운다.
+3. `needs_logits=False`면 `trainable_out = {name: {} for name in self.trainable}`로 빈 dict만 초기화. logits forward를 스킵하여 `(B, S, V)` tensor와 backbone activation 중복을 제거.
+4. `needs_hidden_states=True`면 `_extract_hidden_states_and_head(self.trainable["policy"], batch)` dispatcher를 호출하여 `trainable_out["policy"]`에 `"hidden_states"` / `"output_head_weight"` 키를 setdefault로 주입.
+5. `algorithm.compute_loss(trainable_out, frozen_out, batch)`로 loss dict를 얻는다.
+
+**Preference 경로(DPO 등)**는 chosen/rejected logits 둘 다 필수이므로 `needs_logits=False` 선언이 있어도 의도적으로 무시한다. `is_preference` 분기가 먼저 `_forward_preference`로 흘러 위 게이트의 영향권 밖이다.
+
+**Frozen 모델 forward는 언제나 실행된다**. `self.frozen`에 등록된 모델(reference, value, reward 등)은 algorithm의 flag와 독립적으로 `_forward_model` 경로를 탄다. frozen skip 여부까지 계약에 끌어올리는 것은 "현재 `needs_logits=False`를 선언하는 fused-loss 계열은 대체로 frozen도 안 쓴다"는 경험적 관찰이 확립되기 전까지 out-of-scope.
+
+**generation 경로의 `old_logits` forward**는 `needs_logits` 게이트와 무관하게 실행된다. PPO/GRPO가 old_log_probs 계산에 사용하는 rollout 단계 forward이므로 flag로 스킵할 수 없다.
+
+#### 실측 효과 — needs_logits=False 도입 전후
+
+`weighted_ntp` sanity run(H200 4× DDP, bs=32, Llama-3-8B, gradient_checkpointing + Liger FLCE)에서 Phase A(`needs_hidden_states=True`만 도입) → Phase B(`needs_logits=False` 추가)로 옮기면서:
+
+| 지표 | Phase A (c4~c6) | Phase B (c7) | 변화 |
+|---|---:|---:|:---:|
+| peak_memory_gb | 114.25 | 60.51 | **−47%** |
+| duration (10 step sanity) | 212.3s | 137.6s | **−35%** |
+| loss (bit-level) | 0.7557 | 0.7557 | **동일** |
+
+peak 감소는 `(B, S, V)` logits tensor(약 15.6 GiB @ bf16)와 그에 딸린 LlamaForCausalLM backbone activation(약 16 GiB)이 trainer에서 더 이상 생성되지 않아, batch 1 backward 시점의 grad_accum 누적 peak에서 동시에 사라진 결과다. 수학적 등가성은 algorithm이 이미 Phase A에서 `policy_out.get("logits")` None-safe 경로와 `use_flce` gate로 logits 미사용 경로를 구현해둔 덕에 유지된다.
+
+#### Liger 의존성 선언 패턴 — hard-guard 정책
+
+`needs_logits=False`를 선언한 알고리즘은 **logits tensor 없이 loss를 계산할 대체 경로가 반드시 준비되어 있다**는 강한 계약을 trainer와 맺는다. 가장 흔한 대체 경로는 `liger-kernel`의 FLCE이며, 이 kernel은 `(B, S, V)` logits을 materialize하지 않고 hidden state + output head weight로 per-token CE를 직접 계산한다.
+
+**정책**: runtime에 대체 경로가 준비되지 못한 상태(Liger 미설치, hidden/head 주입 실패 등)를 만나면 algorithm은 instance-level downgrade로 silent fallback하지 않는다. 대신 `compute_loss`에서 `RuntimeError`를 명시적으로 raise하여 학습을 즉시 중단시킨다.
+
+**근거**: silent fallback은 "학습이 조용히 돌아가지만 peak memory 절감 효과는 사라진 상태"를 만든다. 사용자가 Liger 전제로 config를 짰다가 환경에 Liger가 없어 chunked fallback으로 조용히 동작하면, OOM이 재발해야 원인을 추적하게 된다. Hard-guard는 silent mis-training의 진단 비용보다 graceful degradation의 편의가 작다는 판단이다.
+
+**RuntimeError 메시지 요구사항**: (1) 의존성 상태(예: `_LIGER_AVAILABLE=False`), (2) dispatcher 주입 상태(`"hidden_states" in policy_out`, `"output_head_weight" in policy_out`), (3) 복구 경로(`needs_logits=True`로 override하면 기존 logits forward 경로 복원). 사용자가 의도적으로 downgrade를 원할 때만 명시적 override를 강제한다.
+
+참조 구현: `weighted_ntp.algorithms.WeightedNTPLoss.compute_loss` — `use_flce = _LIGER_AVAILABLE and "hidden_states" in policy_out and "output_head_weight" in policy_out` gate가 False일 때 위 3가지 진단 정보를 포함한 `RuntimeError`를 raise.
 
 ### DPO 학습 예시
 

@@ -483,25 +483,57 @@ class MyParallel(BaseStrategy):
 
 ## 커스텀 RL 알고리즘
 
-RLTrainer는 알고리즘 클래스를 일반 Python 객체로 취급한다 (`nn.Module` 불필요). 다음 규약을 따르면 된다:
+RLTrainer는 알고리즘 클래스를 일반 Python 객체로 취급한다 (`nn.Module` 불필요). 알고리즘은 **Trainer가 어떤 입력을 준비할지를 선언하는 3개의 `ClassVar[bool]` flag**로 자신의 forward 요구를 표현하고, `compute_loss`에서 loss dict를 반환한다.
 
-- **클래스 속성**
-  - `needs_generation: bool` — `True`면 매 스텝마다 policy가 응답을 생성(`model.generate`)하고, 그 출력을 reward model에 넣어 reward를 계산 (GRPO/PPO 패턴). `False`면 offline 배치를 그대로 사용 (DPO, weighted-NTP 패턴)
-  - `mini_epochs: int` — 생성된 배치당 optimizer step 횟수 (PPO는 4~8, DPO/weighted-NTP는 1)
+### 계약 flag 3종 (forward 요구 선언)
 
-- **필수 메서드**: `compute_loss(trainable_out, frozen_out, batch) -> dict[str, Tensor]`
-  - `trainable_out[name]`: trainable 모델(예: `"policy"`)의 forward 출력
-  - `frozen_out[name]`: frozen 모델(예: `"reference"`, `"value"`, `"reward"`)의 forward 출력
-  - 반환: `{trainable_name: scalar_loss}`. 키는 `rl.models.*`의 이름과 일치해야 optimizer가 매칭된다
+알고리즘은 `mdp.training.losses.base.BaseAlgorithm`이 선언한 ClassVar 3개를 필요에 따라 override한다. BaseAlgorithm 상속은 선택적이다 — plain class에서 동일 이름의 ClassVar만 선언해도 trainer가 duck typing으로 조회한다(`getattr(algorithm, flag, default)`). BaseAlgorithm을 상속하는 쪽이 타입 체커·IDE 지원·단일 진실 원천을 얻는다.
+
+| flag | 기본값 | 의미 | Trainer 동작 |
+|------|:---:|---|---|
+| `needs_logits: ClassVar[bool]` | `True` | `compute_loss`가 `trainable_out[<name>]["logits"]`를 읽는가 | **False 선언 시** `_forward_model` 스킵 — `trainable_out[<name>]`은 빈 dict로 초기화된다 |
+| `needs_hidden_states: ClassVar[bool]` | `False` | `compute_loss`가 마지막 layer의 hidden state + output head weight를 읽는가 | **True 선언 시** `_extract_hidden_states_and_head` dispatcher가 호출되어 `trainable_out["policy"]`에 `"hidden_states"` / `"output_head_weight"` 키가 주입된다 |
+| `needs_generation: ClassVar[bool]` | `False` | 매 step마다 policy rollout(샘플 생성)이 필요한가 | **True 선언 시** `_train_step_generation` 경로로 진입 — `policy.generate()` → reward → mini-epoch update |
+
+### 의미 있는 조합 3가지
+
+| needs_generation | needs_hidden_states | needs_logits | 예시 | Trainer 동작 |
+|:---:|:---:|:---:|---|---|
+| `False` | `False` | `True` | DPO (기본 preference alignment) | chosen/rejected forward 1회 (logits 기반) |
+| `True` | `False` | `True` | GRPO / PPO | generation rollout → 매 mini-epoch마다 forward 1회 |
+| `False` | `True` | `False` | `WeightedNTPLoss` (Liger FLCE 기반 fused loss) | `_forward_model` 스킵 + hidden/head 주입 → logits tensor와 backbone activation 중복 제거 |
+
+**네 번째 조합 `(hidden=True, logits=True)`**: 계약상 허용된다(`_LogitsAndHiddenAlgo` 같은 가상 consumer를 가정 가능). 그러나 현재 RLTrainer 구현에서 `_forward_model` + `_extract_hidden_states_and_head`가 **독립적인 두 번의 backbone forward**를 일으키므로, backbone activation graph가 이중으로 잔존한다. 실제 소비자가 등장하면 backlog spec `spec-training-restructure`의 "forward 통합" Unit에서 병합 대상이 된다. 현재는 consumer 0.
+
+**의미 없는 조합 `(hidden=False, logits=False)`**: 선언 가능하지만 `compute_loss`가 hidden도 logits도 못 받으므로 실질적으로 loss를 계산할 입력이 없다. 도구가 금지하지는 않으나 경로 자체가 잘못된 구성이다.
+
+### 필수 메서드
+
+`compute_loss(trainable_out, frozen_out, batch) -> dict[str, Tensor]`
+
+- `trainable_out[name]`: trainable 모델의 forward 출력. `needs_logits=True`면 `"logits"` 키, `needs_hidden_states=True`면 `"hidden_states"` / `"output_head_weight"` 키가 추가된다. 둘 다 False인 조합에서는 `{}`.
+- `frozen_out[name]`: frozen 모델(`"reference"`, `"value"`, `"reward"` 등)의 forward 출력. frozen 모델은 `needs_logits` 선언 여부와 무관하게 자체 조건으로 forward한다(self.frozen이 비어있으면 `{}`).
+- 반환: `{trainable_name: scalar_loss}`. 키는 `rl.models.*`의 이름과 일치해야 optimizer가 매칭된다.
+
+### 선택 속성
+
+- `mini_epochs: int` (default 1) — `needs_generation=True` 경로에서 생성된 batch당 optimizer step 횟수 (PPO는 4~8, DPO/WeightedNTP는 1).
+
+### 패턴 1 — logits 기반 (기본)
+
+DPO/PPO/GRPO처럼 logits을 읽는 알고리즘은 **아무 flag도 override하지 않거나** `needs_generation`만 True로 선언한다. `needs_logits` 기본값 True를 그대로 상속.
 
 ```python
 # my_algorithms/custom.py
+from typing import ClassVar
 import torch
 import torch.nn.functional as F
+from mdp.training.losses.base import BaseAlgorithm
 
-class CustomRLLoss:
-    needs_generation = False
-    mini_epochs = 1
+
+class CustomRLLoss(BaseAlgorithm):
+    # needs_logits=True, needs_hidden_states=False, needs_generation=False 기본값 상속
+    mini_epochs: ClassVar[int] = 1
 
     def __init__(self, beta: float = 0.1):
         self.beta = beta
@@ -528,6 +560,48 @@ class CustomRLLoss:
         )
         return {"policy": ce + self.beta * kl}
 ```
+
+### 패턴 2 — Fused loss (hidden + head, logits 미사용)
+
+Liger FLCE처럼 `(B, S, V)` logits tensor를 HBM에 생성하지 않고 hidden state와 output head weight만으로 per-token CE를 계산하는 경로를 선언한다. trainer가 `_forward_model`을 스킵하므로 logits tensor와 그에 딸린 backbone activation이 제거되어 peak memory가 크게 낮아진다 (`weighted_ntp` 실측 H200 4×: peak 114 → 60 GiB, −47%).
+
+```python
+# my_algorithms/fused_loss.py
+from typing import ClassVar
+import torch
+from mdp.training.losses.base import BaseAlgorithm
+
+
+class MyFusedLoss(BaseAlgorithm):
+    needs_logits: ClassVar[bool] = False
+    needs_hidden_states: ClassVar[bool] = True
+    # needs_generation=False 기본값 상속
+
+    def compute_loss(self, trainable_out, frozen_out, batch):
+        policy_out = trainable_out["policy"]
+        hidden = policy_out["hidden_states"]          # (B, S, H) — dispatcher가 주입
+        head_weight = policy_out["output_head_weight"]  # (V, H) — lm_head 가중치
+        labels = batch["labels"]                       # (B, S)
+
+        # 예: 외부 fused-linear-CE kernel 호출 (logits을 생성하지 않고 CE만 반환)
+        per_token_ce = my_fused_linear_ce(hidden, head_weight, labels)
+        mask = (labels != -100).float()
+        return {"policy": (per_token_ce * mask).sum() / mask.sum().clamp(min=1)}
+```
+
+### Liger 의존성 선언 패턴 — hard-guard
+
+`needs_logits=False`를 선언한 알고리즘은 "logits tensor 없이 loss를 계산할 경로(예: Liger FLCE)가 반드시 준비되어 있다"는 강한 계약을 trainer와 맺는다. 런타임에 그 경로가 **준비되지 못한 상태**(Liger 미설치, hidden/head 주입 실패 등)를 만나면 silent fallback(logits 재요청)을 **하지 않는다**. 대신 `compute_loss`에서 `RuntimeError`를 명시적으로 raise하여 "조용히 학습이 돌아가지만 peak 절감 효과는 사라진 상태"를 원천 차단한다.
+
+이 정책은 silent mis-training의 진단 비용이 graceful degradation의 편의보다 크다는 판단이다. 사용자가 Liger 전제로 H200 bs=32 config를 짰다가 환경에 Liger가 없어 chunked fallback으로 조용히 동작하면, OOM이 나서야 원인을 추적하게 된다. 명시적 실패는 1회 에러 메시지로 근본 원인(환경 의존성 누락)을 바로 드러낸다.
+
+에러 메시지에 포함해야 하는 3가지 진단 정보:
+
+1. 의존성 상태 (예: `_LIGER_AVAILABLE`).
+2. 주입 상태 (`"hidden_states" in policy_out`, `"output_head_weight" in policy_out`).
+3. 복구 경로 — 사용자가 의도적으로 downgrade를 원할 때의 1줄 override (`needs_logits=True` 선언 시 기존 forward 경로 복원).
+
+참조 구현: `weighted_ntp.algorithms.WeightedNTPLoss.compute_loss` — `use_flce` gate가 False일 때 raise하는 RuntimeError.
 
 ```yaml
 rl:

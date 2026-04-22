@@ -243,6 +243,7 @@ def backward_and_step(
             if sched is not None:
                 sched.step()
         scaler.update()
+
         for opt in optimizers.values():
             opt.zero_grad(set_to_none=True)
         return True

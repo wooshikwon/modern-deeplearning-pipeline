@@ -35,8 +35,8 @@ def tiny_peft_hf_model():
     """GPT2 + LoRA: 실제 PEFT 래핑된 HF causal LM.
 
     review-2026-04-18-U6-c2 §관찰 2의 "실제 조합"에 가장 가까운 최소 재현 환경.
-    Llama는 의존성(flash_attn 등)이 무거워 CPU 로컬에서 불가하므로 GPT2로 대체.
     PEFT의 투과 로직(``base_model.model`` 체인)은 모델 종류와 무관하므로 유효.
+    LLaMA 아키텍처 전용 gradient 회귀 테스트는 ``tiny_llama_peft_model`` 픽스처 참조.
     """
     transformers = pytest.importorskip("transformers")
     peft = pytest.importorskip("peft")
@@ -169,6 +169,110 @@ def test_dispatcher_hidden_gradients_flow_through_peft(tiny_peft_hf_model):
     )
 
     # 정리: 테스트 간 grad 누적 방지.
+    model.zero_grad(set_to_none=True)
+    model.eval()
+
+
+@pytest.fixture(scope="module")
+def tiny_llama_peft_model():
+    """LlamaForCausalLM + LoRA: 실제 weighted-ntp가 쓰는 아키텍처 최소 재현.
+
+    2026-04-22 진단 컨텍스트: Probe c8에서 LLaMA-3 8B 학습 시 pre_unscale_grad_norm=0
+    이 관측됐다. 격리 테스트에서 Liger FLCE backward 자체는 정상(T1~T5 PASS)이며
+    GPT-2+PEFT 조합도 정상임을 확인. 그러나 "LLaMA 아키텍처 + _extract_hf_pretrained
+    path" 조합은 별도 검증이 필요했다. LlamaConfig는 flash_attn 없이도 로컬 CPU
+    실행 가능하므로 GPT-2와 동일하게 로컬에서 돌릴 수 있다.
+    """
+    transformers = pytest.importorskip("transformers")
+    peft = pytest.importorskip("peft")
+    from transformers import LlamaConfig, LlamaForCausalLM
+    from peft import LoraConfig, get_peft_model
+
+    cfg = LlamaConfig(
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=4,
+        max_position_embeddings=32,
+        use_cache=False,
+    )
+    base = LlamaForCausalLM(cfg)
+    lora_cfg = LoraConfig(
+        r=4,
+        lora_alpha=8,
+        target_modules=["q_proj", "v_proj"],
+        lora_dropout=0.0,
+        bias="none",
+    )
+    model = get_peft_model(base, lora_cfg)
+    model.eval()
+    return model, cfg
+
+
+def test_dispatcher_gradient_flows_through_llama_arch(tiny_llama_peft_model):
+    """LLaMA 아키텍처에서 dispatcher 반환 hidden → backward → lora_B.grad 비-zero.
+
+    2026-04-22 진단: Probe c8(LLaMA-3 8B, DDP 4-GPU, bf16)에서 pre_unscale_grad_norm=0
+    이 관측됐고, 원인 후보로 "_extract_hf_pretrained의 base_encoder 직접 호출이
+    PEFT autograd hook을 우회"가 제기됐다. 이 테스트는 그 가설이 성립하지 않음을
+    LLaMA 아키텍처로 직접 확정한다.
+
+    검증 핵심:
+    - step 1에서 lora_A.grad == 0은 정상 (lora_B=zeros → chain rule 소거)
+    - lora_B.grad는 비-zero여야 한다 (backward가 LoRA grafting을 통과한 증거)
+
+    Probe c8에서 lora_B도 0이었던 원인은 DDP + bf16 조합이 유력하며 이 테스트
+    범위 밖이다(GPU + DDP 환경 필요).
+    """
+    from mdp.training.rl_trainer import RLTrainer
+    from types import SimpleNamespace
+
+    model, cfg = tiny_llama_peft_model
+    model.train()
+    batch = {
+        "input_ids": torch.randint(0, cfg.vocab_size, (1, 4)),
+        "attention_mask": torch.ones(1, 4, dtype=torch.long),
+    }
+
+    trainer_stub = SimpleNamespace()
+    trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
+        trainer_stub
+    )
+    trainer_stub._extract_timm = RLTrainer._extract_timm.__get__(trainer_stub)
+    trainer_stub._extract_torchvision_resnet = (
+        RLTrainer._extract_torchvision_resnet.__get__(trainer_stub)
+    )
+
+    hidden, head_weight = RLTrainer._extract_hidden_states_and_head(
+        trainer_stub, model, batch, layer_idx=-1
+    )
+    loss = (hidden @ head_weight.t()).sum()
+    loss.backward()
+
+    lora_b_params = [
+        (n, p) for n, p in model.named_parameters()
+        if "lora_B" in n and p.requires_grad
+    ]
+    lora_a_params = [
+        (n, p) for n, p in model.named_parameters()
+        if "lora_A" in n and p.requires_grad
+    ]
+    assert lora_b_params, "lora_B parameter가 없다 — PEFT 래핑 이상."
+
+    # lora_B.grad: step 1에서 비-zero여야 한다 (backward 경로 확인).
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for _, p in lora_b_params), (
+        "LLaMA 아키텍처에서 lora_B.grad가 0이다. dispatcher가 LLaMA-specific "
+        "autograd path를 끊었을 가능성. _extract_hf_pretrained 경로 점검 필요."
+    )
+    # lora_A.grad: step 1, lora_B=zeros → chain rule로 0이 정상.
+    for _, p in lora_a_params:
+        if p.grad is not None:
+            assert p.grad.abs().sum() == 0, (
+                "lora_A.grad가 step 1에서 비-zero — lora_B init이 zeros가 아닌 이상 예외."
+            )
+
     model.zero_grad(set_to_none=True)
     model.eval()
 

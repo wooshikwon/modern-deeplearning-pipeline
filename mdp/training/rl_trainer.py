@@ -107,9 +107,7 @@ class RLTrainer:
                 self.optimizers[name] = klass(model.parameters(), **kwargs)
                 if spec.get("scheduler") is not None:
                     sched_config = dict(spec["scheduler"])
-                    warmup = parse_warmup_config(
-                        sched_config, self._estimate_total_steps()
-                    )
+                    warmup = parse_warmup_config(sched_config, self._estimate_total_steps())
                     s_klass, s_kwargs = self.resolver.resolve_partial(sched_config)
                     base_scheduler = s_klass(self.optimizers[name], **s_kwargs)
                     self.schedulers[name] = create_scheduler_with_warmup(
@@ -1468,15 +1466,25 @@ class RLTrainer:
         """
         is_preference = "chosen_input_ids" in batch
         needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
+        needs_logits = getattr(self.algorithm, "needs_logits", True)
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
             if is_preference:
+                # Preference 경로: DPO는 chosen/rejected logits 둘 다 필요 →
+                # needs_logits=False 선언이 있어도 무시하고 기존 forward 유지 (원칙 4).
                 with torch.no_grad():
                     frozen_out = self._forward_preference(self.frozen, batch)
                 trainable_out = self._forward_preference(self.trainable, batch)
             else:
                 with torch.no_grad():
                     frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
-                trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
+                # needs_logits=False + needs_hidden_states=True인 fused-loss 알고리즘
+                # (예: WeightedNTPLoss)은 trainable forward를 스킵하여 logits tensor와
+                # LlamaForCausalLM backbone activation 중복을 제거한다. 빈 dict로 초기화하여
+                # downstream hidden/head 주입 경로(setdefault)와 호환성을 유지한다.
+                if needs_logits:
+                    trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
+                else:
+                    trainable_out = {name: {} for name in self.trainable}
                 if needs_hidden and "policy" in self.trainable:
                     hidden, head_weight = self._extract_hidden_states_and_head(
                         self.trainable["policy"], batch
@@ -1568,15 +1576,22 @@ class RLTrainer:
         # 4. Mini-epoch update
         mini_epochs = getattr(self.algorithm, "mini_epochs", 1)
         needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
+        needs_logits = getattr(self.algorithm, "needs_logits", True)
         last_loss = 0.0
         all_nan = True
         for _ in range(mini_epochs):
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
                 gen_forward_batch = {"input_ids": generated_ids, "attention_mask": gen_mask}
-                trainable_out = {
-                    name: self._forward_model(m, gen_forward_batch, role=name)
-                    for name, m in self.trainable.items()
-                }
+                # needs_logits=False 알고리즘은 trainable forward를 스킵 (offline 경로와 동일 패턴).
+                # rollout 단계의 old_logits forward(위 L1544)는 PPO/GRPO의 KL penalty 계산에 필수이므로
+                # 플래그와 무관하게 유지된다 (spec §Out of scope).
+                if needs_logits:
+                    trainable_out = {
+                        name: self._forward_model(m, gen_forward_batch, role=name)
+                        for name, m in self.trainable.items()
+                    }
+                else:
+                    trainable_out = {name: {} for name in self.trainable}
                 if needs_hidden and "policy" in self.trainable:
                     hidden, head_weight = self._extract_hidden_states_and_head(
                         self.trainable["policy"], gen_forward_batch

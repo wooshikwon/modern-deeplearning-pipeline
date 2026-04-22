@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 import torch.nn.functional as F
+
+from mdp.training.losses.base import BaseAlgorithm
 
 
 # ── 공유 유틸 ──
@@ -68,7 +70,7 @@ def normalize_advantages(
 # ── DPO ──
 
 
-class DPOLoss:
+class DPOLoss(BaseAlgorithm):
     """Direct Preference Optimization loss.
 
     _component_ 패턴으로 인스턴스화된다:
@@ -176,7 +178,7 @@ def _clipped_surrogate(
 # ── GRPO ──
 
 
-class GRPOLoss:
+class GRPOLoss(BaseAlgorithm):
     """Group Relative Policy Optimization.
 
     Generation 필요. group 내 reward 평균 대비 advantage.
@@ -191,7 +193,7 @@ class GRPOLoss:
           kl_coeff: 0.1
     """
 
-    needs_generation = True
+    needs_generation: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -246,7 +248,7 @@ class GRPOLoss:
 # ── PPO ──
 
 
-class PPOLoss:
+class PPOLoss(BaseAlgorithm):
     """Proximal Policy Optimization.
 
     Generation 필요. Value model로 per-token GAE advantage + clipped surrogate.
@@ -262,7 +264,7 @@ class PPOLoss:
           gae_lambda: 0.95
     """
 
-    needs_generation = True
+    needs_generation: ClassVar[bool] = True
 
     def __init__(
         self,

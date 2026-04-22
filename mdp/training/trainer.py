@@ -162,8 +162,7 @@ class Trainer:
             return None, "step"
 
         config = dict(config)  # copy — parse_warmup_config는 in-place pop 수행
-        total_steps = self._estimate_total_steps()
-        warmup = parse_warmup_config(config, total_steps)
+        warmup = parse_warmup_config(config, self._estimate_total_steps())
         klass, kwargs = self.resolver.resolve_partial(config)
         base_scheduler = klass(self.optimizer, **kwargs)
         scheduler = create_scheduler_with_warmup(
