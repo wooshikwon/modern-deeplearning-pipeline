@@ -1827,6 +1827,11 @@ class RLTrainer:
             and base_encoder is not None
             and base_encoder is not model
         )
+        # [A/B 테스트 2026-04-23] efficient path가 peft LoRA computation graph를
+        # 끊는지 확인하기 위해 강제 비활성화. sincere-gnat-917 재현(grad_norm=0.00
+        # 4-step 연속)의 원인이 이 경로인지 판정. fallback path(아래 else)는
+        # LlamaForCausalLM 전체를 output_hidden_states=True로 통과시킨다.
+        use_efficient_path = False
         hidden: torch.Tensor | None = None
         if use_efficient_path:
             base_out = base_encoder(
