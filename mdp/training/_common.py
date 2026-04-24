@@ -20,11 +20,6 @@ from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
 
-# [PROBE 2026-04-23] 일회성 진단 flag.
-_probe_backward_fired = False
-_probe_loss_fired = False
-
-
 def aggregate_checkpoint_stats(
     callbacks: list,
 ) -> tuple[int, Path | None, str]:
@@ -228,11 +223,6 @@ def backward_and_step(
             "{optimizer_name}/lora_B"  — LoRA B 파라미터 L2 norm (LoRA 있을 때만)
           step 없거나 clip 비활성·LoRA 없음이면 부분/빈 dict.
 
-    LoRA 분리 probe는 ``clip_grad_norm_``이 gradient를 in-place로 수정하기 전에
-    측정해야 실제 backward pass가 올려둔 값을 반영한다. 이 분리값이 있어야
-    "LoRA adapter에 gradient가 흐르는가"를 total norm 뒤에 숨지 않고 직접
-    확인할 수 있다 — peft + gradient_checkpointing + enable_input_require_grads
-    조합은 backward path가 끊기기 쉬운 영역이라 이 진단이 재발 방지에 필수.
     """
     # NaN/Inf guard
     for name, loss in losses.items():
@@ -244,37 +234,12 @@ def backward_and_step(
 
     # Backward with accumulation scaling
     accum = 1 if force_step else grad_accum_steps
-    global _probe_loss_fired
     for loss in losses.values():
-        # [PROBE 2026-04-23] 첫 backward 호출 시 loss 상태 + grad_fn chain 출력.
-        if not _probe_loss_fired:
-            _probe_loss_fired = True
-            logger.info(
-                "PROBE[loss] requires_grad=%s grad_fn=%s dtype=%s value=%.6f",
-                loss.requires_grad,
-                type(loss.grad_fn).__name__ if loss.grad_fn is not None else None,
-                loss.dtype, loss.item(),
-            )
-            # BFS trace grad_fn chain (최대 20개 node). Liger FLCE가 chain에 있는지 확인.
-            _visited: set[int] = set()
-            _queue = [loss.grad_fn]
-            _names: list[str] = []
-            while _queue and len(_names) < 20:
-                _fn = _queue.pop(0)
-                if _fn is None or id(_fn) in _visited:
-                    continue
-                _visited.add(id(_fn))
-                _names.append(type(_fn).__name__)
-                for _next_fn, _ in _fn.next_functions:
-                    if _next_fn is not None:
-                        _queue.append(_next_fn)
-            logger.info("PROBE[grad_fn_chain] %s", " -> ".join(_names))
         scaler.scale(loss / accum).backward()
 
     # Optimizer step at accumulation boundary or force
     if force_step or at_accum_boundary:
         grad_norms: dict[str, float] = {}
-        global _probe_backward_fired
         for name, opt in optimizers.items():
             scaler.unscale_(opt)
             model = trainable_models.get(name)
@@ -283,38 +248,17 @@ def backward_and_step(
                 lora_B_sq = 0.0
                 has_A = False
                 has_B = False
-                # [PROBE 2026-04-23] 첫 step에서 LoRA grad 상태 카운트
-                probe_lora_total = 0
-                probe_grad_none = 0
-                probe_grad_zero = 0
-                probe_samples: list[str] = []
                 for pname, p in model.named_parameters():
-                    is_lora_A = "lora_A" in pname
-                    is_lora_B = "lora_B" in pname
-                    if (is_lora_A or is_lora_B) and p.requires_grad:
-                        probe_lora_total += 1
-                        if p.grad is None:
-                            probe_grad_none += 1
-                        else:
-                            _pn = float(p.grad.detach().data.norm(2).item())
-                            if _pn == 0.0:
-                                probe_grad_zero += 1
-                            if len(probe_samples) < 3:
-                                probe_samples.append(f"{pname.rsplit('.', 2)[0]}:{_pn:.4e}")
                     if p.grad is None:
                         continue
+                    is_lora_A = "lora_A" in pname
+                    is_lora_B = "lora_B" in pname
                     if is_lora_A:
                         lora_A_sq += float(p.grad.detach().data.norm(2).item()) ** 2
                         has_A = True
                     elif is_lora_B:
                         lora_B_sq += float(p.grad.detach().data.norm(2).item()) ** 2
                         has_B = True
-                if not _probe_backward_fired:
-                    _probe_backward_fired = True
-                    logger.info(
-                        "PROBE[backward] opt=%s lora_params=%d grad_None=%d grad_zero=%d samples=%s",
-                        name, probe_lora_total, probe_grad_none, probe_grad_zero, probe_samples,
-                    )
                 if has_A:
                     grad_norms[f"{name}/lora_A"] = lora_A_sq ** 0.5
                 if has_B:
