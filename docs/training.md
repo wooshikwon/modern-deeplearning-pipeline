@@ -2,6 +2,66 @@
 
 SFT(Supervised Fine-Tuning), RL alignment, 분산 학습, 콜백에 대한 상세 가이드.
 
+## Trainer / RLTrainer 상속 구조 (spec-training-restructure)
+
+`Trainer`(SFT)와 `RLTrainer`(RL)는 모두 `BaseTrainer(ABC)`를 상속한다. `BaseTrainer`는 두 trainer가 중복 구현하던 lifecycle infrastructure를 단일 위치에 집중시킨다.
+
+```
+BaseTrainer(ABC)           — mdp/training/_base.py
+├── Trainer(BaseTrainer)   — mdp/training/trainer.py   (mdp train)
+└── RLTrainer(BaseTrainer) — mdp/training/rl_trainer.py (mdp rl-train)
+```
+
+`BaseTrainer`가 소유하는 것:
+- 공통 shim: `_fire`, `_move_to_device`, `_should_stop`, `_estimate_total_steps`
+- OOM / memory_history wrapper (`_progress_log.py` free function 래핑)
+- System logging wrapper: `_fmt_eta`, `_log_step_progress`, `_log_run_banner`
+- MLflow lifecycle wrapper: `_start_mlflow_run`, `_log_mlflow_params`, `_log_mlflow_summary`
+- Checkpoint state hooks: `_checkpoint_state()` (abstract), `_load_checkpoint_state(state)`
+
+`Trainer` / `RLTrainer`가 보유하는 것:
+- `train()` main loop (epoch/step 루프, 콜백 발화, OOM 처리)
+- Step 실행 메서드 (`_train_step_*`, `_forward_preference`, 등)
+- Validation 루프 (`_validate`, `_run_rl_validation`, 등)
+- `_checkpoint_state()` 구현 → `_checkpoint.save_checkpoint()` 호출
+- `_collect_mlflow_params()` 구현
+
+### Checkpoint I/O 호출 경로
+
+체크포인트 저장·복원·export는 `mdp/training/_checkpoint.py` free function이 담당한다. Trainer/RLTrainer는 더 이상 `_save_checkpoint`, `_maybe_resume`, `_export_policy_artifact` 메서드를 소유하지 않는다.
+
+```
+# Save
+trainer._checkpoint_state() -> dict  # 현재 상태 수집
+_checkpoint.save_checkpoint(state, ckpt_dir)  # I/O
+
+# Resume
+_checkpoint.load_checkpoint(ckpt_dir) -> dict  # I/O
+trainer._load_checkpoint_state(state)  # 상태 복원
+
+# Export
+_checkpoint.export_model_artifact(model, metadata, mlflow_run, ...)
+```
+
+FSDP 환경에서는 `_checkpoint.gather_fsdp_state_dict(model)`이 all-rank collective로 full state dict를 수집한다.
+
+### Feature Extractor 호출 경로
+
+`_extract_hidden_states_and_head` dispatcher는 `mdp/training/_features.py` stateless free function으로 분리되어 있다. `RLTrainer`는 이를 직접 호출하며, 얇은 bound method shim(`self._extract_hidden_states_and_head`)이 기존 테스트 호환성을 위해 유지된다.
+
+```python
+from mdp.training._features import extract_hidden_states_and_head
+
+# RLTrainer 내부: needs_hidden_states=True 경로
+hidden, head_weight = extract_hidden_states_and_head(
+    self.trainable["policy"], batch, layer_idx=-1
+)
+```
+
+`_features.py`는 stateless이므로 향후 inference callback에서도 trainer 인스턴스 없이 재사용 가능하다.
+
+---
+
 ## SFT 학습
 
 ### 기본 사용법
@@ -172,6 +232,32 @@ RLTrainer는 매 step에서 알고리즘이 선언한 3개 flag를 `getattr` duc
 
 **generation 경로의 `old_logits` forward**는 `needs_logits` 게이트와 무관하게 실행된다. PPO/GRPO가 old_log_probs 계산에 사용하는 rollout 단계 forward이므로 flag로 스킵할 수 없다.
 
+#### Memory-Efficient CE Helper — `compute_per_token_ce_chunked_from_hidden`
+
+`(needs_logits=False, needs_hidden_states=True)` 경로의 알고리즘은 hidden states와 output head weight만으로 per-token CE를 계산해야 한다. MDP는 이 용도로 아래 free function을 제공한다.
+
+**위치**: `mdp/training/losses/_ce_helpers.py`
+
+**시그니처**:
+
+```python
+from mdp.training.losses._ce_helpers import compute_per_token_ce_chunked_from_hidden
+
+compute_per_token_ce_chunked_from_hidden(
+    hidden_states: Tensor,    # (B, S, H)
+    head_weight: Tensor,      # (V, H)
+    labels: Tensor,           # (B, S)
+    chunk_size: int,
+    ignore_index: int = -100,
+) -> Tensor                   # (B, S-1)
+```
+
+**동작**: hidden states를 sequence 축(`S-1` dim)으로 `chunk_size`만큼 나누어 각 chunk 안에서만 `hidden_chunk @ head_weight.T`를 계산한다. 각 chunk의 forward 계산은 `torch.utils.checkpoint.checkpoint(use_reentrant=False)`로 감싸져 backward 시점까지 `(B, chunk, V)` 중간 텐서가 autograd graph에 남지 않는다. 이를 통해 어떤 시점에도 `(B, S, V)` 전체 logits tensor가 HBM에 materialize되지 않는다.
+
+**대표 소비자**: `WeightedNTPLoss` (`weighted_ntp.algorithms.WeightedNTPLoss`). `needs_logits=False, needs_hidden_states=True` 플래그를 선언하고 `self.loss_chunk_size`를 `chunk_size` 인자로 전달한다.
+
+**FLCE 경로 보류 이유**: Liger FLCE는 `bf16 + reduction="none" + 큰 num_valid` 조합에서 backward gradient가 전부 0으로 수치 붕괴하는 결함이 확정됐다 (sincere-gnat-917). 업스트림 패치가 1년 이상 미해결이므로 MDP helper로 대체한다.
+
 #### 실측 효과 — needs_logits=False 도입 전후
 
 `weighted_ntp` sanity run(H200 4× DDP, bs=32, Llama-3-8B, gradient_checkpointing + Liger FLCE)에서 Phase A(`needs_hidden_states=True`만 도입) → Phase B(`needs_logits=False` 추가)로 옮기면서:
@@ -183,18 +269,6 @@ RLTrainer는 매 step에서 알고리즘이 선언한 3개 flag를 `getattr` duc
 | loss (bit-level) | 0.7557 | 0.7557 | **동일** |
 
 peak 감소는 `(B, S, V)` logits tensor(약 15.6 GiB @ bf16)와 그에 딸린 LlamaForCausalLM backbone activation(약 16 GiB)이 trainer에서 더 이상 생성되지 않아, batch 1 backward 시점의 grad_accum 누적 peak에서 동시에 사라진 결과다. 수학적 등가성은 algorithm이 이미 Phase A에서 `policy_out.get("logits")` None-safe 경로와 `use_flce` gate로 logits 미사용 경로를 구현해둔 덕에 유지된다.
-
-#### Liger 의존성 선언 패턴 — hard-guard 정책
-
-`needs_logits=False`를 선언한 알고리즘은 **logits tensor 없이 loss를 계산할 대체 경로가 반드시 준비되어 있다**는 강한 계약을 trainer와 맺는다. 가장 흔한 대체 경로는 `liger-kernel`의 FLCE이며, 이 kernel은 `(B, S, V)` logits을 materialize하지 않고 hidden state + output head weight로 per-token CE를 직접 계산한다.
-
-**정책**: runtime에 대체 경로가 준비되지 못한 상태(Liger 미설치, hidden/head 주입 실패 등)를 만나면 algorithm은 instance-level downgrade로 silent fallback하지 않는다. 대신 `compute_loss`에서 `RuntimeError`를 명시적으로 raise하여 학습을 즉시 중단시킨다.
-
-**근거**: silent fallback은 "학습이 조용히 돌아가지만 peak memory 절감 효과는 사라진 상태"를 만든다. 사용자가 Liger 전제로 config를 짰다가 환경에 Liger가 없어 chunked fallback으로 조용히 동작하면, OOM이 재발해야 원인을 추적하게 된다. Hard-guard는 silent mis-training의 진단 비용보다 graceful degradation의 편의가 작다는 판단이다.
-
-**RuntimeError 메시지 요구사항**: (1) 의존성 상태(예: `_LIGER_AVAILABLE=False`), (2) dispatcher 주입 상태(`"hidden_states" in policy_out`, `"output_head_weight" in policy_out`), (3) 복구 경로(`needs_logits=True`로 override하면 기존 logits forward 경로 복원). 사용자가 의도적으로 downgrade를 원할 때만 명시적 override를 강제한다.
-
-참조 구현: `weighted_ntp.algorithms.WeightedNTPLoss.compute_loss` — `use_flce = _LIGER_AVAILABLE and "hidden_states" in policy_out and "output_head_weight" in policy_out` gate가 False일 때 위 3가지 진단 정보를 포함한 `RuntimeError`를 raise.
 
 ### DPO 학습 예시
 
@@ -674,9 +748,9 @@ FSDP shard baseline 경고 같은 strategy-의존 메시지는 `type(self.strate
 
 DDP run에서는 "shard 미적용 의심" 문구가 원천적으로 나오지 않는다. LoRA freeze 의심 경고도 동일하게 `_is_fsdp` 가드로 이동.
 
-### Trainer ↔ RLTrainer 대칭 — `_logging_helpers.py` 공용 헬퍼
+### Trainer ↔ RLTrainer 대칭 — `_progress_log.py` 공용 헬퍼
 
-Start/End banner, step progress, OOM summary, memory_history on/off 6개 함수는 `mdp/training/_logging_helpers.py`의 free function으로 추출되어 있고, Trainer와 RLTrainer는 각자의 `_dump_oom_summary`·`_log_run_banner`·`_log_step_progress`·`_fmt_eta`·`_maybe_start_memory_history`·`_maybe_dump_memory_snapshot` bound method를 얇은 shim으로 유지해 기존 테스트 호환성을 지킨다. 두 trainer의 실질 차이는 (a) step-progress에서 LR 조회 경로(SFT는 `self.optimizer`, RL은 `self.optimizers["policy"]`)와 (b) start-banner의 algorithm 필드(SFT는 `recipe.task`, RL은 `type(self.algorithm).__name__`)뿐이며, shim이 trainer-specific 값을 해석해 helper로 위임한다. 이 배치는 `_common.aggregate_checkpoint_stats`(spec-trainer-robustness-fixes)·`_schedulers.py`(spec-lr-warmup-configurable)·`_mlflow_logging.py`(spec-logging-consistency)에 이어 **Trainer 간 중복 제거 → 대칭 강제** 패턴의 네 번째 인스턴스다. 새 trainer 추가 시 동일 shim 패턴으로 확장 가능.
+Start/End banner, step progress, OOM summary, memory_history on/off 6개 함수는 `mdp/training/_progress_log.py`의 free function으로 추출되어 있고 (`_logging_helpers.py`에서 rename — `mdp/utils/logging.py`와의 이름 혼동 해소, spec-training-restructure U2), `BaseTrainer`가 이를 bound method shim으로 감싸 상속한다. Trainer와 RLTrainer는 `BaseTrainer`를 상속하므로 별도 import 없이 `self._dump_oom_summary`·`self._log_run_banner` 등을 호출한다. 두 trainer의 실질 차이는 (a) step-progress에서 LR 조회 경로(SFT는 `self.optimizer`, RL은 `self.optimizers["policy"]`)와 (b) start-banner의 algorithm 필드(SFT는 `recipe.task`, RL은 `type(self.algorithm).__name__`)뿐이며, shim이 trainer-specific 값을 해석해 helper로 위임한다. 이 배치는 `_common.aggregate_checkpoint_stats`(spec-trainer-robustness-fixes)·`_schedulers.py`(spec-lr-warmup-configurable)·`_mlflow_logging.py`(spec-logging-consistency)에 이어 **Trainer 간 중복 제거 → 대칭 강제** 패턴의 다섯 번째 인스턴스다. 새 trainer 추가 시 `BaseTrainer`를 상속하면 동일 패턴이 자동으로 확장된다.
 
 OOM summary의 `dist.all_gather_object`는 `concurrent.futures.ThreadPoolExecutor`(max_workers=1, daemon) + `future.result(timeout=5.0)` + `shutdown(wait=False)`로 bound되어 다른 rank가 이미 OOM으로 사망한 상황에서도 최대 5초만에 local fallback으로 반환한다. NCCL/gloo 무관 backend-agnostic.
 

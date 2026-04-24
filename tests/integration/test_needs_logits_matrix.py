@@ -46,6 +46,7 @@ import pytest
 import torch
 
 from mdp.training import rl_trainer as rl_trainer_module
+from mdp.training.losses._ce_helpers import compute_per_token_ce_chunked_from_hidden
 from mdp.training.losses.base import BaseAlgorithm
 from mdp.training.rl_trainer import RLTrainer
 
@@ -70,6 +71,7 @@ class _CallSpy:
 def _make_stub(
     algorithm: Any,
     spy: _CallSpy,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     trainable: dict[str, Any] | None = None,
     frozen: dict[str, Any] | None = None,
@@ -82,11 +84,13 @@ def _make_stub(
 
     algorithm은 반드시 ``BaseAlgorithm`` 서브클래스여야 한다 — integration test의
     핵심 계약.
+
+    shim 제거(fix-c1) 이후 모듈 레벨 함수를 monkeypatch로 교체한다.
     """
     trainable = trainable if trainable is not None else {"policy": object()}
     frozen = frozen if frozen is not None else {}
 
-    def _fwd(model, batch, role="policy"):
+    def _spy_fwd(model, batch, role="policy"):
         spy.forward_model_calls.append({"role": role, "model_id": id(model)})
         return {"logits": torch.zeros(*logits_shape)}
 
@@ -94,9 +98,12 @@ def _make_stub(
         # non-preference 경로만 다룬다 — preference는 unit test에서 커버.
         raise AssertionError("preference 경로는 이 파일 범위 밖")
 
-    def _extract(model, batch, layer_idx=-1):
+    def _spy_extract(model, batch, layer_idx=-1):
         spy.extract_hidden_calls.append({"model_id": id(model)})
         return torch.zeros(*hidden_shape), torch.zeros(*head_shape)
+
+    monkeypatch.setattr(rl_trainer_module, "_features_forward_model", _spy_fwd)
+    monkeypatch.setattr(rl_trainer_module, "extract_hidden_states_and_head", _spy_extract)
 
     return SimpleNamespace(
         algorithm=algorithm,
@@ -113,9 +120,7 @@ def _make_stub(
         global_step=0,
         policy=trainable.get("policy"),
         _generation_kwargs={},
-        _forward_model=_fwd,
         _forward_preference=_fwd_pref,
-        _extract_hidden_states_and_head=_extract,
     )
 
 
@@ -139,8 +144,15 @@ def _call_offline(stub: SimpleNamespace, batch: dict) -> tuple:
 
 
 def _pointwise_batch() -> dict[str, torch.Tensor]:
-    """non-preference 배치 — `chosen_input_ids` 없음."""
-    return {"input_ids": torch.arange(8).view(2, 4)}
+    """non-preference 배치 — `chosen_input_ids` 없음.
+
+    labels는 -100 패딩을 섞어서 ignore_index 마스킹 경로도 자연히 커버한다.
+    shape: (B=2, S=4) — hidden_shape=(2, 4, 8)에 맞춤.
+    """
+    return {
+        "input_ids": torch.arange(8).view(2, 4),
+        "labels": torch.tensor([[1, 2, 3, -100], [4, 5, 6, 7]], dtype=torch.long),
+    }
 
 
 # ────────────────────────────────────────────────────────────── #
@@ -213,11 +225,14 @@ class _HiddenOnlyAlgo(BaseAlgorithm):
         self._spy.observed_policy_out_keys.append(tuple(sorted(policy_out.keys())))
         # 계약: logits 키 없음, hidden_states + output_head_weight만.
         assert "logits" not in policy_out
-        loss = (
-            policy_out["hidden_states"].sum() * 0.0
-            + torch.tensor(1.0, requires_grad=True)
+        h = policy_out["hidden_states"]
+        w = policy_out["output_head_weight"]
+        labels = batch["labels"]
+        per_token_ce = compute_per_token_ce_chunked_from_hidden(
+            h, w, labels, chunk_size=4,
         )
-        return {"policy": loss}
+        valid = (labels[:, 1:] != -100).float()
+        return {"policy": per_token_ce.sum() / valid.sum().clamp(min=1)}
 
 
 class _EmptyContractAlgo(BaseAlgorithm):
@@ -257,7 +272,7 @@ class TestLogitsOnlyPath:
     ) -> None:
         spy = _CallSpy()
         algo = _LogitsOnlyAlgo(spy)
-        stub = _make_stub(algo, spy)
+        stub = _make_stub(algo, spy, monkeypatch)
 
         with _stub_backward(monkeypatch):
             _, step_logits, _ = _call_offline(stub, _pointwise_batch())
@@ -285,7 +300,7 @@ class TestLogitsAndHiddenPath:
     ) -> None:
         spy = _CallSpy()
         algo = _LogitsAndHiddenAlgo(spy)
-        stub = _make_stub(algo, spy)
+        stub = _make_stub(algo, spy, monkeypatch)
 
         with _stub_backward(monkeypatch):
             _, step_logits, _ = _call_offline(stub, _pointwise_batch())
@@ -313,7 +328,7 @@ class TestHiddenOnlyPath:
     ) -> None:
         spy = _CallSpy()
         algo = _HiddenOnlyAlgo(spy)
-        stub = _make_stub(algo, spy)
+        stub = _make_stub(algo, spy, monkeypatch)
 
         with _stub_backward(monkeypatch):
             _, step_logits, _ = _call_offline(stub, _pointwise_batch())
@@ -327,6 +342,74 @@ class TestHiddenOnlyPath:
         ]
         # step_logits는 None — policy_out.get("logits")가 키 없으므로 None.
         assert step_logits is None
+
+    def test_helper_integration_end_to_end(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_HiddenOnlyAlgo + compute_per_token_ce_chunked_from_hidden end-to-end.
+
+        dispatcher가 반환한 hidden_states / output_head_weight가 helper를 거쳐
+        scalar loss가 되고, loss.backward()를 통해 hidden_states에 gradient가
+        전파됨을 검증한다. CPU fp32 / torch.utils.checkpoint 정상 동작 확인.
+        """
+        # (B=2, S=4, H=8) hidden, (V=16, H=8) head — grad 추적 활성화.
+        # zeros는 head_weight=0 → gradient가 수학적으로 0이 되므로 randn 사용.
+        torch.manual_seed(42)
+        hidden_param = torch.randn(2, 4, 8, requires_grad=True)
+        head_param = torch.randn(16, 8, requires_grad=True)
+
+        spy = _CallSpy()
+        algo = _HiddenOnlyAlgo(spy)
+
+        # _spy_extract를 grad-enabled tensor 반환으로 교체.
+        def _grad_extract(model, batch, layer_idx=-1):
+            spy.extract_hidden_calls.append({"model_id": id(model)})
+            return hidden_param, head_param
+
+        monkeypatch.setattr(rl_trainer_module, "extract_hidden_states_and_head", _grad_extract)
+        monkeypatch.setattr(rl_trainer_module, "_features_forward_model", lambda *a, **kw: {})
+
+        stub = SimpleNamespace(
+            algorithm=algo,
+            trainable={"policy": object()},
+            frozen={},
+            amp_dtype=torch.float32,
+            amp_enabled=False,
+            optimizers={},
+            schedulers={},
+            scheduler_intervals={},
+            scaler=None,
+            grad_accum_steps=1,
+            grad_clip_norm=None,
+            global_step=0,
+            policy=object(),
+            _generation_kwargs={},
+            _forward_preference=lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("preference 경로는 이 파일 범위 밖")
+            ),
+        )
+
+        # backward_and_step 스텁 없이 직접 loss.backward()를 호출하기 위해
+        # _train_step_offline 대신 compute_loss를 직접 실행한다.
+        # dispatcher 경로가 policy_out을 어떻게 구성하는지는 기존 테스트가 커버하므로,
+        # 여기서는 helper + backward 연계만 검증한다.
+        trainable_out = {
+            "policy": {
+                "hidden_states": hidden_param,
+                "output_head_weight": head_param,
+            }
+        }
+        batch = _pointwise_batch()
+
+        loss_dict = algo.compute_loss(trainable_out, {}, batch)
+        loss = loss_dict["policy"]
+
+        assert loss.isfinite(), f"loss가 finite하지 않음: {loss.item()}"
+
+        loss.backward()
+
+        assert hidden_param.grad is not None, "hidden_param에 gradient가 없음"
+        assert hidden_param.grad.abs().sum() > 0, "hidden_param gradient가 모두 0"
 
 
 class TestEmptyContractPath:
@@ -342,7 +425,7 @@ class TestEmptyContractPath:
     ) -> None:
         spy = _CallSpy()
         algo = _EmptyContractAlgo(spy)
-        stub = _make_stub(algo, spy)
+        stub = _make_stub(algo, spy, monkeypatch)
 
         with _stub_backward(monkeypatch):
             # compute_loss에서 `policy_out["logits"]` 접근 → KeyError.

@@ -501,9 +501,9 @@ RLTrainer는 알고리즘 클래스를 일반 Python 객체로 취급한다 (`nn
 |:---:|:---:|:---:|---|---|
 | `False` | `False` | `True` | DPO (기본 preference alignment) | chosen/rejected forward 1회 (logits 기반) |
 | `True` | `False` | `True` | GRPO / PPO | generation rollout → 매 mini-epoch마다 forward 1회 |
-| `False` | `True` | `False` | `WeightedNTPLoss` (Liger FLCE 기반 fused loss) | `_forward_model` 스킵 + hidden/head 주입 → logits tensor와 backbone activation 중복 제거 |
+| `False` | `True` | `False` | `WeightedNTPLoss` (MDP `_ce_helpers` chunked-from-hidden 경로) | `_forward_model` 스킵 + hidden/head 주입 → logits tensor와 backbone activation 중복 제거 |
 
-**네 번째 조합 `(hidden=True, logits=True)`**: 계약상 허용된다(`_LogitsAndHiddenAlgo` 같은 가상 consumer를 가정 가능). 그러나 현재 RLTrainer 구현에서 `_forward_model` + `_extract_hidden_states_and_head`가 **독립적인 두 번의 backbone forward**를 일으키므로, backbone activation graph가 이중으로 잔존한다. 실제 소비자가 등장하면 backlog spec `spec-training-restructure`의 "forward 통합" Unit에서 병합 대상이 된다. 현재는 consumer 0.
+**네 번째 조합 `(hidden=True, logits=True)`**: 계약상 허용된다(`_LogitsAndHiddenAlgo` 같은 가상 consumer를 가정 가능). 그러나 현재 RLTrainer 구현에서 `_forward_model` + `_extract_hidden_states_and_head`가 **독립적인 두 번의 backbone forward**를 일으키므로, backbone activation graph가 이중으로 잔존한다. 실제 소비자가 등장하면 backlog spec `spec-hidden-logits-forward-unification`의 "forward 통합" Unit에서 병합 대상이 된다. 현재는 consumer 0.
 
 **의미 없는 조합 `(hidden=False, logits=False)`**: 선언 가능하지만 `compute_loss`가 hidden도 logits도 못 받으므로 실질적으로 loss를 계산할 입력이 없다. 도구가 금지하지는 않으나 경로 자체가 잘못된 구성이다.
 
@@ -563,7 +563,7 @@ class CustomRLLoss(BaseAlgorithm):
 
 ### 패턴 2 — Fused loss (hidden + head, logits 미사용)
 
-Liger FLCE처럼 `(B, S, V)` logits tensor를 HBM에 생성하지 않고 hidden state와 output head weight만으로 per-token CE를 계산하는 경로를 선언한다. trainer가 `_forward_model`을 스킵하므로 logits tensor와 그에 딸린 backbone activation이 제거되어 peak memory가 크게 낮아진다 (`weighted_ntp` 실측 H200 4×: peak 114 → 60 GiB, −47%).
+`(B, S, V)` logits tensor를 HBM에 생성하지 않고 hidden state와 output head weight만으로 per-token CE를 계산하는 경로를 선언한다. trainer가 `_forward_model`을 스킵하므로 logits tensor와 그에 딸린 backbone activation이 제거되어 peak memory가 크게 낮아진다 (`weighted_ntp` 실측 H200 4×: peak 114 → 60 GiB, −47%).
 
 ```python
 # my_algorithms/fused_loss.py
@@ -589,19 +589,30 @@ class MyFusedLoss(BaseAlgorithm):
         return {"policy": (per_token_ce * mask).sum() / mask.sum().clamp(min=1)}
 ```
 
-### Liger 의존성 선언 패턴 — hard-guard
+#### MDP 제공 helper — `compute_per_token_ce_chunked_from_hidden`
 
-`needs_logits=False`를 선언한 알고리즘은 "logits tensor 없이 loss를 계산할 경로(예: Liger FLCE)가 반드시 준비되어 있다"는 강한 계약을 trainer와 맺는다. 런타임에 그 경로가 **준비되지 못한 상태**(Liger 미설치, hidden/head 주입 실패 등)를 만나면 silent fallback(logits 재요청)을 **하지 않는다**. 대신 `compute_loss`에서 `RuntimeError`를 명시적으로 raise하여 "조용히 학습이 돌아가지만 peak 절감 효과는 사라진 상태"를 원천 차단한다.
+`(needs_logits=False, needs_hidden_states=True)` 플래그를 선언한 알고리즘은 MDP가 제공하는 helper를 import하여 per-token CE를 바로 얻을 수 있다. 직접 Triton kernel이나 fused kernel을 작성할 필요가 없다.
 
-이 정책은 silent mis-training의 진단 비용이 graceful degradation의 편의보다 크다는 판단이다. 사용자가 Liger 전제로 H200 bs=32 config를 짰다가 환경에 Liger가 없어 chunked fallback으로 조용히 동작하면, OOM이 나서야 원인을 추적하게 된다. 명시적 실패는 1회 에러 메시지로 근본 원인(환경 의존성 누락)을 바로 드러낸다.
+```python
+from mdp.training.losses._ce_helpers import compute_per_token_ce_chunked_from_hidden
 
-에러 메시지에 포함해야 하는 3가지 진단 정보:
+class MyFusedLoss(BaseAlgorithm):
+    needs_logits: ClassVar[bool] = False
+    needs_hidden_states: ClassVar[bool] = True
 
-1. 의존성 상태 (예: `_LIGER_AVAILABLE`).
-2. 주입 상태 (`"hidden_states" in policy_out`, `"output_head_weight" in policy_out`).
-3. 복구 경로 — 사용자가 의도적으로 downgrade를 원할 때의 1줄 override (`needs_logits=True` 선언 시 기존 forward 경로 복원).
+    def compute_loss(self, trainable_out, frozen_out, batch):
+        policy_out = trainable_out["policy"]
+        per_token_ce = compute_per_token_ce_chunked_from_hidden(
+            hidden_states=policy_out["hidden_states"],   # (B, S, H)
+            head_weight=policy_out["output_head_weight"], # (V, H)
+            labels=batch["labels"],                       # (B, S)
+            chunk_size=512,  # 메모리-compute 트레이드오프 튜닝 가능
+        )                                                 # returns (B, S-1)
+        mask = (batch["labels"][:, 1:] != -100).float()
+        return {"policy": (per_token_ce * mask).sum() / mask.sum().clamp(min=1)}
+```
 
-참조 구현: `weighted_ntp.algorithms.WeightedNTPLoss.compute_loss` — `use_flce` gate가 False일 때 raise하는 RuntimeError.
+`compute_per_token_ce_chunked_from_hidden`은 sequence 축 chunking + `torch.utils.checkpoint`(gradient recomputation)로 `(B, S, V)` logits tensor를 어떤 시점에도 HBM에 완전 materialize하지 않는다. bf16 환경에서도 gradient가 정확히 전달된다. 참고 구현: `weighted_ntp.algorithms.WeightedNTPLoss`.
 
 ```yaml
 rl:
