@@ -9,6 +9,7 @@ from typing import Any
 
 import torch
 
+from mdp.training._checkpoint import save_checkpoint as _save_checkpoint_state
 from mdp.training.callbacks.base import BaseCallback
 
 logger = logging.getLogger(__name__)
@@ -83,7 +84,7 @@ class ModelCheckpoint(BaseCallback):
 
         # (metric_value, checkpoint_path) — worst first for easy eviction
         self.best_models: list[tuple[float, str]] = []
-        # 저장에 성공한 체크포인트 디렉토리 목록. _save_checkpoint / save_checkpoint가
+        # 저장에 성공한 체크포인트 디렉토리 목록. save_checkpoint / _save_checkpoint_state가
         # 예외 없이 반환한 직후에만 append한다 (타이밍 규칙). Trainer/RLTrainer의
         # _log_mlflow_summary가 duck typing으로 집계하여 MLflow tag·WARNING에 활용.
         self.saved_checkpoints: list[Path] = []
@@ -289,13 +290,14 @@ class ModelCheckpoint(BaseCallback):
         if self.every_n_steps is not None and global_step > 0 and global_step % self.every_n_steps == 0:
             # RLTrainer: multi-model checkpoint 위임
             trainer = kwargs.get("trainer")
-            if trainer is not None and hasattr(trainer, "_save_checkpoint"):
+            if trainer is not None and hasattr(trainer, "trainable"):
                 ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
                 ckpt_dir.mkdir(parents=True, exist_ok=True)
-                # _save_checkpoint가 예외 없이 완료되어야만 saved_checkpoints에 기록.
-                # 저장 실패 경로에서 리스트에 추가하면 zero-checkpoint 경고의 신뢰성이
-                # 깨진다 ("어설픈 성공 신고" 방지).
-                trainer._save_checkpoint(ckpt_dir)
+                # _save_checkpoint_state(state, ckpt_dir)가 예외 없이 완료되어야만
+                # saved_checkpoints에 기록. 저장 실패 경로에서 리스트에 추가하면
+                # zero-checkpoint 경고의 신뢰성이 깨진다 ("어설픈 성공 신고" 방지).
+                state = trainer._checkpoint_state()
+                _save_checkpoint_state(state, ckpt_dir)
                 self._update_symlink("latest", ckpt_dir)
                 self.saved_checkpoints.append(ckpt_dir)
                 logger.info("Saved RL checkpoint: %s", ckpt_dir)

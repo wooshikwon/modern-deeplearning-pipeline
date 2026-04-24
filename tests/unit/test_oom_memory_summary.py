@@ -204,7 +204,7 @@ class TestDumpOomSummaryDistributed:
         시간 내에 fallback 되는지 확인한다.
         """
         import time as _time
-        from mdp.training._logging_helpers import dump_oom_summary
+        from mdp.training._progress_log import dump_oom_summary
 
         monkeypatch.setenv("RANK", "0")
 

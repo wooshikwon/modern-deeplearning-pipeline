@@ -83,21 +83,9 @@ def test_dispatcher_returns_tensors_on_model_device_with_real_peft(tiny_peft_hf_
     batch = {k: (v.to(expected_device) if isinstance(v, torch.Tensor) else v)
              for k, v in batch.items()}
 
-    # RLTrainer.__init__ 우회 — dispatcher만 bind해 호출.
-    from types import SimpleNamespace
+    from mdp.training._features import extract_hidden_states_and_head
 
-    trainer_stub = SimpleNamespace()
-    trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
-        trainer_stub
-    )
-    trainer_stub._extract_timm = RLTrainer._extract_timm.__get__(trainer_stub)
-    trainer_stub._extract_torchvision_resnet = (
-        RLTrainer._extract_torchvision_resnet.__get__(trainer_stub)
-    )
-
-    hidden, head_weight = RLTrainer._extract_hidden_states_and_head(
-        trainer_stub, model, batch, layer_idx=-1
-    )
+    hidden, head_weight = extract_hidden_states_and_head(model, batch, layer_idx=-1)
 
     # 핵심 계약: hidden·head_weight·input_ids 모두 동일 device.
     assert hidden.device == expected_device
@@ -129,8 +117,7 @@ def test_dispatcher_hidden_gradients_flow_through_peft(tiny_peft_hf_model):
     않는가"를 로컬에서 확정 검증. LoRA 경로는 ``base_model.model``에 대해 linear
     weight를 in-place swap하므로 adapter parameter에 gradient가 흘러야 한다.
     """
-    from mdp.training.rl_trainer import RLTrainer
-    from types import SimpleNamespace
+    from mdp.training._features import extract_hidden_states_and_head
 
     model, cfg = tiny_peft_hf_model
     # grad 흐름 검증을 위해 train mode.
@@ -141,18 +128,7 @@ def test_dispatcher_hidden_gradients_flow_through_peft(tiny_peft_hf_model):
         "attention_mask": torch.ones(1, 4, dtype=torch.long),
     }
 
-    trainer_stub = SimpleNamespace()
-    trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
-        trainer_stub
-    )
-    trainer_stub._extract_timm = RLTrainer._extract_timm.__get__(trainer_stub)
-    trainer_stub._extract_torchvision_resnet = (
-        RLTrainer._extract_torchvision_resnet.__get__(trainer_stub)
-    )
-
-    hidden, head_weight = RLTrainer._extract_hidden_states_and_head(
-        trainer_stub, model, batch, layer_idx=-1
-    )
+    hidden, head_weight = extract_hidden_states_and_head(model, batch, layer_idx=-1)
     # Pseudo-loss: hidden과 head_weight의 matmul 결과 sum.
     logits = hidden @ head_weight.t()
     loss = logits.sum()
@@ -226,8 +202,7 @@ def test_dispatcher_gradient_flows_through_llama_arch(tiny_llama_peft_model):
     Probe c8에서 lora_B도 0이었던 원인은 DDP + bf16 조합이 유력하며 이 테스트
     범위 밖이다(GPU + DDP 환경 필요).
     """
-    from mdp.training.rl_trainer import RLTrainer
-    from types import SimpleNamespace
+    from mdp.training._features import extract_hidden_states_and_head
 
     model, cfg = tiny_llama_peft_model
     model.train()
@@ -236,18 +211,7 @@ def test_dispatcher_gradient_flows_through_llama_arch(tiny_llama_peft_model):
         "attention_mask": torch.ones(1, 4, dtype=torch.long),
     }
 
-    trainer_stub = SimpleNamespace()
-    trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
-        trainer_stub
-    )
-    trainer_stub._extract_timm = RLTrainer._extract_timm.__get__(trainer_stub)
-    trainer_stub._extract_torchvision_resnet = (
-        RLTrainer._extract_torchvision_resnet.__get__(trainer_stub)
-    )
-
-    hidden, head_weight = RLTrainer._extract_hidden_states_and_head(
-        trainer_stub, model, batch, layer_idx=-1
-    )
+    hidden, head_weight = extract_hidden_states_and_head(model, batch, layer_idx=-1)
     loss = (hidden @ head_weight.t()).sum()
     loss.backward()
 

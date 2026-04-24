@@ -41,7 +41,7 @@ class BaseModel(nn.Module, ABC):
             # MDP 자체 계약 우선
             bc = getattr(child, "_block_classes", None)
             if bc:
-                self._block_classes = set(bc)
+                self._block_classes = set(bc)  # type: ignore[misc]
                 return
             # HF 호환: _no_split_modules → _block_classes로 변환
             # _no_split_modules는 단축명("LlamaDecoderLayer")만 제공하므로
@@ -50,13 +50,21 @@ class BaseModel(nn.Module, ABC):
             if ns:
                 full_paths: set[str] = set()
                 for short_name in ns:
+                    resolved = False
                     for _, module in child.named_modules():
                         if type(module).__name__ == short_name:
                             cls = type(module)
                             full_paths.add(f"{cls.__module__}.{cls.__qualname__}")
+                            resolved = True
                             break
+                    if not resolved:
+                        # named_modules() 스캔에서 해당 타입을 찾지 못한 경우
+                        # (예: PEFT 래핑, lazy init, 합성 stub 등)
+                        # short_name 자체를 fallback으로 사용한다.
+                        # FSDP는 string 기반 match이므로 short_name만으로도 작동한다.
+                        full_paths.add(short_name)
                 if full_paths:
-                    self._block_classes = full_paths
+                    self._block_classes = full_paths  # type: ignore[misc]
                     return
 
     # ------------------------------------------------------------------ #

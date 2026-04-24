@@ -83,6 +83,17 @@ mdp inference --run-id <id> --data test.jsonl --format json  # 추론
 
 `mdp init`이 생성하는 Recipe에서 `???`로 표시된 필드만 채우면 된다: `data.dataset.source`, `head.num_classes`(해당 시), `metadata.*`
 
+> **Trainer 진입점**: 외부 코드(agent, plugin, consumer 패키지)가 trainer를 직접 사용할 때는 반드시 `Trainer` 또는 `RLTrainer`를 import한다. `BaseTrainer`는 공통 lifecycle infrastructure를 담는 추상 기반 클래스로, 직접 인스턴스화할 수 없고 외부 진입점이 아니다. `BaseTrainer`를 직접 임포트·인스턴스화하면 `TypeError`(ABC 추상 메서드 미구현)로 실패한다.
+>
+> ```python
+> # 올바른 임포트
+> from mdp.training.trainer import Trainer       # SFT
+> from mdp.training.rl_trainer import RLTrainer  # RL
+>
+> # 금지 — BaseTrainer는 내부 추상 기반 클래스
+> from mdp.training._base import BaseTrainer  # ← 외부 consumer에서 직접 사용 금지
+> ```
+
 ---
 
 ## Two-File System + Callbacks

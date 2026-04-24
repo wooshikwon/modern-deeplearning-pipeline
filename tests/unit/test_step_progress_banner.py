@@ -28,6 +28,7 @@ from mdp.training.trainer import Trainer
 
 _RL_LOGGER = "mdp.training.rl_trainer"
 _SFT_LOGGER = "mdp.training.trainer"
+_BASE_LOGGER = "mdp.training._base"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -37,9 +38,14 @@ _SFT_LOGGER = "mdp.training.trainer"
 
 @pytest.fixture
 def caplog_both(caplog):
-    """RL / SFT trainer logger 모두 DEBUG 이상 수집."""
+    """RL / SFT / BaseTrainer logger 모두 DEBUG 이상 수집.
+
+    spec-training-restructure U2 이후 _log_step_progress / _log_run_banner
+    는 BaseTrainer 로 이동됐으므로 mdp.training._base 로거도 수집한다.
+    """
     caplog.set_level(logging.DEBUG, logger=_RL_LOGGER)
     caplog.set_level(logging.DEBUG, logger=_SFT_LOGGER)
+    caplog.set_level(logging.DEBUG, logger=_BASE_LOGGER)
     return caplog
 
 
@@ -95,6 +101,11 @@ def _make_rl_stub(
         _fmt_eta=RLTrainer._fmt_eta,
         _peak_memory_summary_extra=lambda: None,  # CUDA 미가용 환경 시뮬레이션
     )
+    # spec-training-restructure U2: _algorithm_label 은 BaseTrainer._log_run_banner 가
+    # getattr 로 조회한다. SimpleNamespace 는 메서드를 갖지 않으므로 lambda 로 주입.
+    stub._algorithm_label = lambda: type(algorithm).__name__
+    # _optimizer_for_progress_log 도 BaseTrainer._log_step_progress 가 getattr 로 조회.
+    stub._optimizer_for_progress_log = lambda: optimizer
     return stub
 
 
@@ -137,6 +148,10 @@ def _make_sft_stub(
         _fmt_eta=Trainer._fmt_eta,
         _peak_memory_summary_extra=lambda: None,
     )
+    # spec-training-restructure U2: BaseTrainer._log_run_banner / _log_step_progress 가
+    # getattr 로 조회하는 추상 메서드 구현체를 lambda 로 주입.
+    stub._algorithm_label = lambda: getattr(recipe, "task", "sft")
+    stub._optimizer_for_progress_log = lambda: optimizer
     return stub
 
 

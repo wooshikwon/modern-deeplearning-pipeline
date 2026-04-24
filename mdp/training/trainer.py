@@ -18,7 +18,7 @@ from typing import Any
 
 import torch
 import torch.nn as nn
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
@@ -32,13 +32,11 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
-from mdp.training._logging_helpers import (
-    dump_oom_summary,
-    fmt_eta,
-    log_run_banner,
-    log_step_progress,
-    maybe_dump_memory_snapshot,
-    maybe_start_memory_history,
+from mdp.training._base import BaseTrainer
+from mdp.training._checkpoint import (
+    export_sft_model_artifact,
+    find_best_checkpoint,
+    load_checkpoint,
 )
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
@@ -57,7 +55,7 @@ from mdp.training.callbacks.ema import EMACallback
 logger = logging.getLogger(__name__)
 
 
-class Trainer:
+class Trainer(BaseTrainer):
     """MDP 학습 루프."""
 
     def __init__(
@@ -175,12 +173,6 @@ class Trainer:
             return None
         return self.resolver.resolve(config)
 
-    def _estimate_total_steps(self) -> int:
-        if self.max_steps:
-            return self.max_steps
-        steps_per_epoch = len(self.train_loader) // self.grad_accum_steps
-        return int(steps_per_epoch * (self.epochs or 1))
-
     def _optimizer_dict(self) -> dict[str, torch.optim.Optimizer]:
         """공용 로깅 헬퍼(``_mlflow_logging``)용 optimizer dict 시그니처.
 
@@ -192,16 +184,138 @@ class Trainer:
         """
         return {"policy": self.optimizer}
 
+    # ── BaseTrainer abstract method 구현 ──
+
+    def _optimizer_for_progress_log(self) -> torch.optim.Optimizer | None:
+        """SFT Trainer 는 단일 optimizer 를 그대로 반환한다."""
+        return self.optimizer
+
+    def _algorithm_label(self) -> str:
+        """SFT Trainer 는 recipe.task 를 algorithm 슬롯에 사용한다."""
+        recipe = getattr(self.settings, "recipe", None)
+        return getattr(recipe, "task", "sft") if recipe else "sft"
+
+    def _collect_mlflow_params(self) -> None:
+        """Run 시작 시 실험 재현에 필요한 하이퍼파라미터를 기록한다.
+
+        공용 헬퍼 ``log_static_params``에 위임한다. recipe의 선언 lr은
+        ``learning_rate_init`` 키로 기록된다. warmup step 0 값을 recipe 선언값으로
+        오인하지 않도록 optimizer 런타임 상태는 param으로 내보내지 않는다.
+        """
+        log_static_params(self.settings.recipe, self.settings)
+
+    def _checkpoint_state(self) -> dict:
+        """현재 학습 상태를 dict로 직렬화한다.
+
+        반환 dict는 ``_load_checkpoint_state``에 그대로 전달될 수 있어야 한다.
+        SFT Trainer는 단일 optimizer를 사용하며, key ``""``(빈 문자열)로 루트 ckpt_dir에
+        직접 저장한다 (RLTrainer의 per-model 서브디렉토리와 구별).
+
+        Note: Trainer는 ModelCheckpoint 콜백이 저장을 담당하므로 이 메서드는
+        ``_maybe_resume``에서 ``load_checkpoint`` + ``_load_checkpoint_state`` 경로를
+        통해 복원용으로 사용된다.
+        """
+        return {
+            "trainer_state": {
+                "epoch": getattr(self, "start_epoch", 0),
+                "global_step": self.global_step,
+                "step_in_epoch": getattr(self, "_resume_step_in_epoch", 0),
+            },
+            "scaler": self.scaler.state_dict() if self.scaler.is_enabled() else None,
+        }
+
+    def _load_checkpoint_state(self, state: dict) -> None:
+        """``load_checkpoint``가 반환한 state dict로 학습 상태를 복원한다.
+
+        복원 순서 (순서 민감):
+        1. 모델 weights (adapter → safetensors → pt 우선순위)
+        2. optimizer state_dict
+        3. scheduler state_dict
+        4. GradScaler state_dict
+        5. trainer scalar state (global_step, start_epoch, _resume_step_in_epoch)
+        6. EP scatter (expert parallel 사용 시)
+
+        :param state: ``load_checkpoint(ckpt_dir)``가 반환한 dict.
+        """
+        ckpt_path: Path = state["ckpt_dir"]
+        logger.info(f"체크포인트에서 재개: {ckpt_path}")
+
+        # 1. Model weights: adapter_model.safetensors → model.safetensors → model.pt
+        adapter_path = ckpt_path / "adapter_model.safetensors"
+        safetensors_path = ckpt_path / "model.safetensors"
+        model_pt_path = ckpt_path / "model.pt"
+
+        target = getattr(self.model, "module", self.model)
+
+        if adapter_path.exists():
+            # LoRA / PEFT adapter
+            if hasattr(target, "load_adapter"):
+                from mdp.serving.model_loader import _get_adapter_name
+                adapter_name = _get_adapter_name(ckpt_path)
+                target.load_adapter(str(ckpt_path), adapter_name=adapter_name)
+                logger.info("LoRA adapter loaded from %s (adapter_name=%s)", ckpt_path, adapter_name)
+            else:
+                logger.warning(
+                    "adapter_model.safetensors found but model has no load_adapter method"
+                )
+        elif safetensors_path.exists():
+            try:
+                from safetensors.torch import load_file
+                target.load_state_dict(load_file(safetensors_path))
+            except ImportError:
+                logger.warning("safetensors not installed, cannot load model.safetensors")
+        elif model_pt_path.exists():
+            target.load_state_dict(
+                torch.load(model_pt_path, map_location="cpu", weights_only=True)
+            )
+
+        # 2. Optimizer
+        opt_path = ckpt_path / "optimizer.pt"
+        if opt_path.exists():
+            self.optimizer.load_state_dict(
+                torch.load(opt_path, map_location="cpu", weights_only=True)
+            )
+
+        # 3. Scheduler
+        sched_path = ckpt_path / "scheduler.pt"
+        if sched_path.exists() and self.scheduler is not None:
+            self.scheduler.load_state_dict(
+                torch.load(sched_path, map_location="cpu", weights_only=True)
+            )
+
+        # 4. GradScaler
+        scaler_sd = state.get("scaler")
+        if scaler_sd is not None and self.scaler.is_enabled():
+            self.scaler.load_state_dict(scaler_sd)
+
+        # 5. Trainer scalar state
+        trainer_state = state.get("trainer_state")
+        if trainer_state is not None:
+            saved_epoch = trainer_state.get("epoch", 0)
+            self.global_step = trainer_state.get("global_step", 0)
+            self._resume_step_in_epoch = trainer_state.get("step_in_epoch", 0)
+            # epoch 필드는 "저장 시점의 epoch". step_in_epoch이 0이면
+            # 에폭 끝 checkpoint이므로 다음 에폭부터 재개.
+            if self._resume_step_in_epoch == 0:
+                self.start_epoch = saved_epoch + 1
+            else:
+                self.start_epoch = saved_epoch
+
+        # 6. EP scatter (checkpoint에서 전체 expert를 로드한 후, 비담당 expert를 다시 분배)
+        if self.expert_parallel is not None:
+            self.expert_parallel.scatter_experts(self.model, self.device)
+
     # ── Callback dispatch ──
 
     def _fire(self, hook_name: str, **extra_kwargs: Any) -> None:
         # EP gather: checkpoint를 저장할 수 있는 hook 전에 expert를 모은다.
         # 이후 strategy.save_checkpoint이 완전한 state_dict를 저장할 수 있다.
-        needs_ep_gather = (
+        _do_ep_gather = (
             self.expert_parallel is not None
             and hook_name in ("on_validation_end", "on_batch_end")
         )
-        if needs_ep_gather:
+        if _do_ep_gather:
+            assert self.expert_parallel is not None  # guaranteed by _do_ep_gather
             self.expert_parallel.gather_experts(self.model)
 
         kwargs = {
@@ -226,15 +340,9 @@ class Trainer:
                     logger.warning(f"콜백 {type(cb).__name__}.{hook_name} 실패: {e}")
 
         # EP scatter: checkpoint 저장 후 비담당 expert를 다시 CPU + frozen
-        if needs_ep_gather:
+        if _do_ep_gather:
+            assert self.expert_parallel is not None  # guaranteed by _do_ep_gather
             self.expert_parallel.scatter_experts(self.model, self.device)
-
-    def _should_stop(self) -> bool:
-        if self._stop_requested:
-            return True
-        return any(
-            getattr(cb, "should_stop", False) for cb in self.callbacks
-        )
 
     # ── Training loop ──
 
@@ -253,12 +361,11 @@ class Trainer:
         original_sigterm = signal.getsignal(signal.SIGTERM)
         original_sigint = signal.getsignal(signal.SIGINT)
 
-        def _signal_handler(signum: int, frame: Any) -> None:
+        def _signal_handler(signum: int, _frame: Any) -> None:
             sig_name = signal.Signals(signum).name
             # 첫 시그널만 기록한다. SIGTERM 수신 후 사용자가 Ctrl+C를 누르거나
             # 외부가 이중 신호를 보내도 `_stop_signal_name`이 덮어쓰이지 않게 하여
             # stopped_reason tag가 실제 종료 원인을 정확히 반영하도록 보장한다.
-            # (spec-trainer-robustness-fixes cycle 1 — 1-3 race 방어)
             if not self._stop_requested:
                 logger.warning(
                     "Signal %s received, requesting graceful stop at next step boundary.",
@@ -348,14 +455,15 @@ class Trainer:
             _ckpt_dir = _rec_storage and getattr(_rec_storage, "checkpoint_dir", None)
         if _ckpt_dir:
             for _cb in self.callbacks:
-                if hasattr(_cb, "set_dirpath"):
-                    _cb.set_dirpath(_ckpt_dir)
+                _set = getattr(_cb, "set_dirpath", None)
+                if callable(_set):
+                    _set(_ckpt_dir)
 
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
         start_time = time.time()
-        # spec-system-logging-cleanup §U4 — `_train_one_epoch` 의 step-progress 로그가
-        # 참조한다. train loop 전체에서 단조 증가하는 단일 기준 시각이다.
+        # `_train_one_epoch` 의 step-progress 로그가 참조한다.
+        # train loop 전체에서 단조 증가하는 단일 기준 시각이다.
         self._progress_start_time = start_time
         self._progress_max_steps = total_steps
 
@@ -376,10 +484,10 @@ class Trainer:
             self.start_epoch * len(self.train_loader) + self._resume_step_in_epoch
         )
 
-        # OOM 관측 플래그 (spec-system-logging-cleanup §U5). 학습 loop 안에서
-        # torch.cuda.OutOfMemoryError 가 raise 되면 except 블록이 True 로 세팅하고
-        # 원래 예외를 재전파한다. finally 블록의 stopped_reason 계산이 이를 최우선
-        # 확인하여 end banner 및 MLflow summary 에 "oom" 라벨을 전파한다.
+        # OOM 관측 플래그. 학습 loop 안에서 torch.cuda.OutOfMemoryError 가 raise 되면
+        # except 블록이 True 로 세팅하고 원래 예외를 재전파한다. finally 블록의
+        # stopped_reason 계산이 이를 최우선 확인하여 end banner 및 MLflow summary 에
+        # "oom" 라벨을 전파한다.
         self._oom_observed = False
 
         # memory_history 시작 — recipe 의 monitoring.memory_history=True 에서만
@@ -393,8 +501,7 @@ class Trainer:
                     mlflow_run_id = mlflow_run.info.run_id
                 self._log_mlflow_params()
 
-            # Run start banner (spec-system-logging-cleanup §U4).
-            # rank-0 only · is_json_mode 이면 자동 skip.
+            # Run start banner — rank-0 only · is_json_mode 이면 자동 skip.
             self._log_run_banner("start", extra={"run_id": mlflow_run_id})
 
             try:
@@ -424,12 +531,10 @@ class Trainer:
                         "on_epoch_end", epoch=epoch, metrics={"train_loss": train_loss}
                     )
 
-                    # Epoch-level metrics — spec-logging-consistency §원칙 3/4:
-                    # ``log_epoch_metrics``가 optimizer param_groups 전체를 순회해
-                    # ``learning_rate``(single-group) 또는 ``learning_rate/group_*``
-                    # (multi-group)을 epoch 축에 기록한다. 과거 ``param_groups[0]``
-                    # 하드코딩 경로를 대체하며, 추가로 ``epoch_train_loss``를
-                    # ``extra``로 같이 내보낸다.
+                    # Epoch-level metrics — ``log_epoch_metrics``가 optimizer
+                    # param_groups 전체를 순회해 ``learning_rate``(single-group) 또는
+                    # ``learning_rate/group_*`` (multi-group)을 epoch 축에 기록한다.
+                    # 추가로 ``epoch_train_loss``를 ``extra``로 같이 내보낸다.
                     log_epoch_metrics(
                         self._optimizer_dict(),
                         epoch,
@@ -457,7 +562,6 @@ class Trainer:
                 # OOM 포착 — rank 별 memory 상태를 rank-0 로그에 집계한 뒤 원래 예외를
                 # 재전파하여 torchrun 이 종료 상태를 정확히 인지하게 한다. finally 는
                 # 여전히 cleanup / on_train_end / end banner / summary 를 정상 처리한다.
-                # (spec-system-logging-cleanup §U5)
                 self._oom_observed = True
                 try:
                     self._dump_oom_summary()
@@ -471,11 +575,10 @@ class Trainer:
                 # 예외를 재전파하더라도 `_log_mlflow_summary`가 독립적으로 실행되어
                 # MLflow run이 zombie 상태(stopped_reason tag 누락)로 남지 않도록,
                 # on_train_end 호출을 별도 try/except로 감싼다.
-                # (spec-trainer-robustness-fixes cycle 1 — 1-1, 1-2 방어)
                 if self._oom_observed:
                     # stopped_reason 은 loop 내부에서 미리 세팅될 수 있으므로 OOM 을
                     # 최우선으로 덮어쓴다. end banner / MLflow summary 양쪽에 "oom"
-                    # 라벨이 들어가 grep 으로 장애 원인을 파악할 수 있게 한다. (§U5)
+                    # 라벨이 들어가 grep 으로 장애 원인을 파악할 수 있게 한다.
                     stopped_reason = "oom"
                 try:
                     # Strategy cleanup
@@ -495,10 +598,9 @@ class Trainer:
 
                     training_duration = time.time() - start_time
 
-                    # End banner (spec-system-logging-cleanup §U4) — rank-0 한 줄
-                    # 요약을 summary 로깅 직전에 출력. grep 으로 run 종료 상태를
-                    # 파악 가능하게 한다. checkpoints_saved 는 on_train_end 이후
-                    # 최종 상태가 되므로 이 시점에서 집계한다.
+                    # End banner — rank-0 한 줄 요약을 summary 로깅 직전에 출력.
+                    # grep 으로 run 종료 상태를 파악 가능하게 한다. checkpoints_saved 는
+                    # on_train_end 이후 최종 상태가 되므로 이 시점에서 집계한다.
                     _banner_ckpts, _, _ = aggregate_checkpoint_stats(self.callbacks)
                     _banner_loss = self.last_metrics.get("train_loss") or self.last_metrics.get("loss")
                     self._log_run_banner(
@@ -517,7 +619,7 @@ class Trainer:
                 finally:
                     # memory_history snapshot — 정상 종료·OOM·signal 모두에서 실행되어야
                     # 프로파일링 파일이 확실히 남는다. 내부적으로 active=False 일 때는
-                    # no-op. summary 실패가 snapshot 저장을 막지 않도록 방어한다. (§U5)
+                    # no-op. summary 실패가 snapshot 저장을 막지 않도록 방어한다.
                     try:
                         self._maybe_dump_memory_snapshot(_mem_history_active)
                     except Exception as snap_err:  # noqa: BLE001
@@ -586,6 +688,7 @@ class Trainer:
             self._resume_step_in_epoch = 0  # Only apply once (first epoch after resume)
             logger.info("Skipping %d already-processed batches for epoch resume", start_step)
 
+        actual_loss = 0.0  # default for residual-flush path when loop body skips
         for step, batch in enumerate(self.train_loader):
             if step < start_step:
                 continue
@@ -635,11 +738,10 @@ class Trainer:
                     metrics={"loss": actual_loss},
                 )
 
-                # MLflow step logging (non-blocking) — spec-logging-consistency §U2.
+                # MLflow step logging (non-blocking).
                 # ``log_step_metrics``는 optimizer param_groups의 scheduler-adjusted
                 # LR을 slash 네이밍으로 흘리며, ``extra``의 train_loss를 같은 step 축에
-                # 병합한다. 과거 ``_mlflow_log_metric("train_loss", ...)`` 단독 호출을
-                # 대체(단일 MLflow round-trip).
+                # 병합한다(단일 MLflow round-trip).
                 # grad_norm/{name}/{total|lora_A|lora_B}는 backward_and_step에서
                 # pre-clip 측정된 pre-optimizer gradient norm을 그대로 MLflow 축에 태운다.
                 if self._is_main_process:
@@ -653,8 +755,8 @@ class Trainer:
                         extra=extra_metrics,
                     )
 
-                    # Text step-progress (spec-system-logging-cleanup §U4).
-                    # file-redirect 환경에서도 step 진행이 stdout 에 남도록 한다.
+                    # Text step-progress — file-redirect 환경에서도 step 진행이
+                    # stdout 에 남도록 한다.
                     # `log_every_n_steps` 간격마다 + 마지막 step 에서 1회 출력.
                     _mon_cfg = self._recipe_dict.get("monitoring", {}) if isinstance(self._recipe_dict, dict) else {}
                     _every_n = int(_mon_cfg.get("log_every_n_steps", 10) or 10)
@@ -761,6 +863,7 @@ class Trainer:
 
     @torch.no_grad()
     def _validate(self, epoch: int) -> dict[str, float]:
+        assert self.val_loader is not None  # callers always guard with val_loader is not None
         self.model.eval()
         all_metrics: dict[str, list[float]] = {}
         # DDP/FSDP 래핑 상태에선 ``hasattr(self.model, "validation_step")``가 False를
@@ -782,12 +885,11 @@ class Trainer:
 
         avg_metrics = {k: sum(v) / len(v) for k, v in all_metrics.items()}
 
-        # MLflow epoch logging — spec-logging-consistency §원칙 4 대칭. 공용 헬퍼
-        # ``log_epoch_metrics``의 ``extra`` 인자로 ``val_*`` prefix를 흘려 보내
-        # RLTrainer 쪽과 동일한 경로로 수렴한다(`rl_trainer.py`의 validation
-        # 블록 참조). LR 축이 같은 epoch 인덱스로 함께 기록되지만 값이 동일하므로
-        # 의미 왜곡 없음. rank 가드는 caller ``_run_validation``이 ``_validate``
-        # 호출 전 보증하지 않으므로 여기서 명시.
+        # MLflow epoch logging — 공용 헬퍼 ``log_epoch_metrics``의 ``extra`` 인자로
+        # ``val_*`` prefix를 흘려 보내 RLTrainer 쪽과 동일한 경로로 수렴한다
+        # (`rl_trainer.py`의 validation 블록 참조). LR 축이 같은 epoch 인덱스로
+        # 함께 기록되지만 값이 동일하므로 의미 왜곡 없음. rank 가드는 caller
+        # ``_run_validation``이 ``_validate`` 호출 전 보증하지 않으므로 여기서 명시.
         if self._is_main_process and avg_metrics:
             log_epoch_metrics(
                 self._optimizer_dict(),
@@ -818,19 +920,13 @@ class Trainer:
                 return {}
         elif isinstance(outputs, dict) and "loss" in outputs:
             loss = outputs["loss"]
-        elif hasattr(outputs, "loss") and outputs.loss is not None:
-            loss = outputs.loss
+        elif (_out_loss := getattr(outputs, "loss", None)) is not None:
+            loss = _out_loss
         else:
             logger.warning("_validate_fallback: loss를 계산할 수 없습니다")
             return {}
 
         return {"loss": loss.item() if isinstance(loss, torch.Tensor) else float(loss)}
-
-    def _move_to_device(self, batch: dict[str, Any]) -> dict[str, Any]:
-        return {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
 
     # ── Resume ──
 
@@ -853,76 +949,8 @@ class Trainer:
             logger.warning(f"체크포인트를 찾을 수 없습니다: {ckpt_path}")
             return
 
-        logger.info(f"체크포인트에서 재개: {ckpt_path}")
-
-        # Model weights: adapter_model.safetensors → model.safetensors → model.pt
-        adapter_path = ckpt_path / "adapter_model.safetensors"
-        safetensors_path = ckpt_path / "model.safetensors"
-        model_pt_path = ckpt_path / "model.pt"
-
-        target = getattr(self.model, "module", self.model)
-
-        if adapter_path.exists():
-            # LoRA / PEFT adapter
-            if hasattr(target, "load_adapter"):
-                from mdp.serving.model_loader import _get_adapter_name
-                adapter_name = _get_adapter_name(ckpt_path)
-                target.load_adapter(str(ckpt_path), adapter_name=adapter_name)
-                logger.info("LoRA adapter loaded from %s (adapter_name=%s)", ckpt_path, adapter_name)
-            else:
-                logger.warning(
-                    "adapter_model.safetensors found but model has no load_adapter method"
-                )
-        elif safetensors_path.exists():
-            try:
-                from safetensors.torch import load_file
-
-                state_dict = load_file(safetensors_path)
-                target.load_state_dict(state_dict)
-            except ImportError:
-                logger.warning("safetensors not installed, cannot load model.safetensors")
-        elif model_pt_path.exists():
-            state_dict = torch.load(model_pt_path, map_location="cpu", weights_only=True)
-            target.load_state_dict(state_dict)
-
-        # Optimizer
-        opt_path = ckpt_path / "optimizer.pt"
-        if opt_path.exists():
-            self.optimizer.load_state_dict(
-                torch.load(opt_path, map_location="cpu", weights_only=True)
-            )
-
-        # Scheduler
-        sched_path = ckpt_path / "scheduler.pt"
-        if sched_path.exists() and self.scheduler is not None:
-            self.scheduler.load_state_dict(
-                torch.load(sched_path, map_location="cpu", weights_only=True)
-            )
-
-        # GradScaler
-        scaler_path = ckpt_path / "scaler.pt"
-        if scaler_path.exists() and self.scaler.is_enabled():
-            self.scaler.load_state_dict(
-                torch.load(scaler_path, map_location="cpu", weights_only=True)
-            )
-
-        # Trainer state
-        state_path = ckpt_path / "trainer_state.json"
-        if state_path.exists():
-            state = json.loads(state_path.read_text())
-            saved_epoch = state.get("epoch", 0)
-            self.global_step = state.get("global_step", 0)
-            self._resume_step_in_epoch = state.get("step_in_epoch", 0)
-            # epoch 필드는 "저장 시점의 epoch". step_in_epoch이 0이면
-            # 에폭 끝 checkpoint이므로 다음 에폭부터 재개.
-            if self._resume_step_in_epoch == 0:
-                self.start_epoch = saved_epoch + 1
-            else:
-                self.start_epoch = saved_epoch
-
-        # EP: checkpoint에서 전체 expert를 로드한 후, 비담당 expert를 다시 분배
-        if self.expert_parallel is not None:
-            self.expert_parallel.scatter_experts(self.model, self.device)
+        state = load_checkpoint(ckpt_path)
+        self._load_checkpoint_state(state)
 
     # ── Monitoring baseline ──
 
@@ -959,114 +987,15 @@ class Trainer:
             logger.warning(f"Monitoring baseline 계산 실패: {e}")
             return None
 
-    # ── Checkpoint helpers ──
-
-    def _find_best_checkpoint(self) -> Path | None:
-        """best 또는 latest symlink가 가리키는 체크포인트 디렉토리를 반환한다."""
-        ckpt_dir = Path(self.settings.config.storage.checkpoint_dir)
-        for name in ("best", "latest"):
-            link = ckpt_dir / name
-            if link.exists():
-                return link.resolve()
-        return None
-
-    def _export_and_log_model(self, checkpoint_dir: Path) -> None:
-        """체크포인트에서 모델 artifact를 MLflow에 등록한다.
-
-        LoRA 학습이면 adapter만, full finetuning이면 전체 모델을 저장한다.
-        merge는 수행하지 않는다 — merge는 mdp export / mdp serve 시점에 on-demand.
-        """
-        import json
-        import shutil
-        import tempfile
-
-        import mlflow
-
-        try:
-            recipe = self.settings.recipe
-            model = self.model
-            # DDP/FSDP에서 원본 모델 추출
-            target = getattr(model, "module", model)
-
-            with tempfile.TemporaryDirectory() as tmp:
-                output_dir = Path(tmp)
-
-                # 모델 가중치: PEFT면 adapter만, 아니면 전체
-                has_adapter = hasattr(target, "save_pretrained") and hasattr(target, "peft_config")
-                if has_adapter:
-                    # adapter만 저장 (~50MB)
-                    target.save_pretrained(output_dir)
-                elif hasattr(target, "save_pretrained"):
-                    # HF 모델 전체 저장
-                    target.save_pretrained(output_dir)
-                else:
-                    from safetensors.torch import save_file
-                    save_file(target.state_dict(), output_dir / "model.safetensors")
-
-                # tokenizer 저장
-                tokenizer_name = recipe.data.collator.get("tokenizer") if isinstance(recipe.data.collator, dict) else None
-                if tokenizer_name:
-                    try:
-                        from transformers import AutoTokenizer
-                        AutoTokenizer.from_pretrained(tokenizer_name).save_pretrained(output_dir)
-                    except Exception as e:
-                        logger.warning(f"토크나이저 저장 실패 (무시): {e}")
-
-                # recipe.yaml 복사
-                recipe_src = checkpoint_dir / "recipe.yaml"
-                if recipe_src.exists():
-                    shutil.copy(recipe_src, output_dir / "recipe.yaml")
-
-                mlflow.log_artifacts(tmp, "model")
-                logger.info("모델 artifact를 MLflow에 등록: model/")
-
-        except Exception as e:
-            logger.warning(f"모델 artifact 등록 실패 (학습 결과는 유효합니다): {e}")
-
     # ── MLflow ──
-
-    def _start_mlflow_run(self) -> Any:
-        """Create an MLflow run context (rank-0 only). Returns nullcontext() on failure."""
-        try:
-            import mlflow
-
-            mlflow_cfg = self.settings.config.mlflow
-            if mlflow_cfg is None:
-                return nullcontext()
-
-            if hasattr(mlflow_cfg, "tracking_uri") and mlflow_cfg.tracking_uri:
-                mlflow.set_tracking_uri(mlflow_cfg.tracking_uri)
-            experiment_name = getattr(mlflow_cfg, "experiment_name", None) or getattr(mlflow_cfg, "experiment", None)
-            if experiment_name:
-                mlflow.set_experiment(experiment_name)
-
-            run_kwargs = {}
-            if hasattr(mlflow_cfg, "start_run") and isinstance(mlflow_cfg.start_run, dict):
-                run_kwargs = mlflow_cfg.start_run
-
-            return mlflow.start_run(**run_kwargs)
-        except Exception as e:
-            logger.warning(f"MLflow run 시작 실패: {e}")
-            return nullcontext()
-
-    def _log_mlflow_params(self) -> None:
-        """Run 시작 시 실험 재현에 필요한 하이퍼파라미터를 기록한다.
-
-        spec-logging-consistency §U2 이후 공용 헬퍼 ``log_static_params``에 위임한다.
-        과거에 ``learning_rate = optimizer.param_groups[0]['lr']`` 스냅샷을 param으로
-        기록하던 경로는 **완전 제거**됐다 — warmup step 0 값을 recipe 선언값으로
-        오인하게 만들던 weighted-ntp Phase 3 재현 사례(원칙 2 위반)를 해소한다.
-        대신 recipe의 선언 lr이 ``learning_rate_init`` 키로 기록된다.
-        """
-        log_static_params(self.settings.recipe, self.settings)
 
     def _log_mlflow_summary(
         self, training_duration: float, stopped_reason: str,
     ) -> None:
         """Run 종료 시 최종 메트릭과 config snapshot을 기록한다.
 
-        spec-logging-consistency §U2 이후 MLflow 쓰기 경로는 공용 헬퍼
-        ``log_summary``에 위임된다. 본 래퍼는 **여전히 필요**하다:
+        MLflow 쓰기 경로는 공용 헬퍼 ``log_summary``에 위임된다. 본 래퍼는
+        다음 이유로 여전히 필요하다:
 
         1. ``self._checkpoints_saved`` 속성을 세팅해 ``train()`` 반환 dict가 조회할
            수 있게 한다 (test_checkpoint_monitor 계약).
@@ -1082,7 +1011,7 @@ class Trainer:
         )
         self._checkpoints_saved = total_checkpoints
 
-        # sanitize_config·_find_best_checkpoint 둘 다 self.settings.config에 의존한다.
+        # sanitize_config·find_best_checkpoint 둘 다 self.settings.config에 의존한다.
         # ``test_log_mlflow_summary_aggregates_multi_checkpoint_callbacks`` 같은 테스트는
         # self.settings=None으로 Trainer를 조립해 집계 경로만 고립 검증하므로, 인자
         # 준비 단계 전체를 try로 감싸서 AttributeError를 통째로 흡수한다.
@@ -1094,13 +1023,14 @@ class Trainer:
 
             sanitized_config = sanitize_config(self.settings.model_dump())
 
-            best_ckpt = self._find_best_checkpoint()
+            ckpt_dir = Path(self.settings.config.storage.checkpoint_dir)
+            best_ckpt = find_best_checkpoint(ckpt_dir)
             if best_ckpt:
                 artifact_dirs.append((best_ckpt, "checkpoint"))
         except Exception as e:
             logger.warning(f"MLflow summary 인자 준비 실패 (학습 결과는 유효합니다): {e}")
 
-        # Peak memory metric — review 2-2 대체 구현(RLTrainer와 대칭). rank 0의
+        # Peak memory metric — RLTrainer와 대칭. rank 0의
         # `torch.cuda.max_memory_allocated()`를 GiB 단위로 summary에 기록한다.
         extra_summary = self._peak_memory_summary_extra()
 
@@ -1120,7 +1050,7 @@ class Trainer:
         # ``artifact_dirs``로 일반화하기 부적합하다.)
         if best_ckpt:
             try:
-                self._export_and_log_model(best_ckpt)
+                export_sft_model_artifact(self.model, self.settings, best_ckpt)
             except Exception as e:
                 logger.warning(f"모델 export 실패 (학습 결과는 유효합니다): {e}")
 
@@ -1132,126 +1062,3 @@ class Trainer:
                 "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
                 monitor_hint,
             )
-
-    def _peak_memory_summary_extra(self) -> dict[str, float] | None:
-        """Run 종료 시 현재 device의 CUDA peak memory를 GiB로 반환.
-
-        spec-algorithm-hidden-states-support U6 review 2-2에서 요구된 최소 관측 지점.
-        CUDA가 없거나 예외가 나면 ``None``을 반환하여 summary에 아무 영향을 주지
-        않는다. spec-system-logging-cleanup §U5의 ``memory_history`` 정식 기능이
-        도입되기 전까지의 단일 지표. RLTrainer와 동일 구현 계약.
-        """
-        try:
-            if not torch.cuda.is_available():
-                return None
-            peak_bytes = torch.cuda.max_memory_allocated()
-            if peak_bytes <= 0:
-                return None
-            return {"peak_memory_gb": peak_bytes / (1024**3)}
-        except Exception as e:  # noqa: BLE001
-            logger.debug("peak_memory_gb 집계 실패(무시): %s", e)
-            return None
-
-    # ── OOM / memory_history helpers (spec-system-logging-cleanup §U5) ──
-    #
-    # 실제 구현은 ``mdp.training._logging_helpers`` 의 free function. 아래 bound
-    # method 들은 trainer-specific 상태(optimizer·algorithm)만 해석해 helper 로
-    # 위임하는 얇은 shim. RLTrainer 와 대칭.
-
-    def _dump_oom_summary(self) -> None:
-        """OOM 발생 시 모든 rank 의 memory 상태를 rank-0 에 집계한다.
-
-        ``_all_gather_with_timeout`` 가 5초 타임아웃을 걸어 다른 rank 가 이미
-        죽은 상황에서 NCCL collective 가 hang 하지 않도록 방어한다
-        (cycle 1 review 2-2).
-        """
-        dump_oom_summary(logger=logger)
-
-    def _maybe_start_memory_history(self) -> bool:
-        """``monitoring.memory_history=True`` 면 tensor-level snapshot 을 켠다."""
-        return maybe_start_memory_history(
-            recipe_dict=self._recipe_dict, logger=logger,
-        )
-
-    def _maybe_dump_memory_snapshot(self, active: bool) -> None:
-        """``_maybe_start_memory_history`` 가 성공했을 때에만 snapshot 을 파일로 dump."""
-        maybe_dump_memory_snapshot(active=active, logger=logger)
-
-    # ── System logging helpers (spec-system-logging-cleanup §U4) ──
-
-    @staticmethod
-    def _fmt_eta(seconds: float) -> str:
-        """Format an ETA duration as ``HH:MM:SS`` (or ``MM:SS`` when < 1h).
-
-        ``_logging_helpers.fmt_eta`` 로 위임.
-        """
-        return fmt_eta(seconds)
-
-    def _log_step_progress(
-        self,
-        loss: float,
-        grad_norm: float | None,
-        *,
-        start_time: float,
-        max_steps: int,
-    ) -> None:
-        """rank-0 text step-progress 한 줄을 로거로 흘린다 (RLTrainer 와 대칭).
-
-        caller 는 이미 (a) rank-0 guard, (b) log_every_n_steps 타이밍을 모두
-        처리했다는 전제로 호출한다. Trainer(SFT) 의 optimizer 는 단일 인스턴스
-        이므로 ``self.optimizer.param_groups[0]['lr']`` 로 LR 을 읽는다.
-        """
-        try:
-            current_lr = (
-                self.optimizer.param_groups[0]["lr"]
-                if self.optimizer is not None and self.optimizer.param_groups
-                else 0.0
-            )
-        except Exception:  # noqa: BLE001
-            current_lr = 0.0
-
-        log_step_progress(
-            logger=logger,
-            global_step=self.global_step,
-            max_steps=max_steps,
-            loss=loss,
-            current_lr=current_lr,
-            grad_norm=grad_norm,
-            start_time=start_time,
-        )
-
-    def _log_run_banner(
-        self,
-        kind: "str",
-        *,
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        """Start / End 배너를 rank-0 에서 한 번만 출력한다 (RLTrainer 와 대칭).
-
-        SFT Trainer 의 algorithm 필드는 없으므로 ``recipe.task`` 를 algorithm
-        자리에 사용한다 (RLTrainer 는 algorithm 클래스명).
-        """
-        recipe = getattr(self.settings, "recipe", None)
-        algorithm_label = getattr(recipe, "task", "sft") if recipe else "sft"
-        strategy_name = (
-            type(self.strategy).__name__ if self.strategy is not None else "NoStrategy"
-        )
-
-        peak_memory_gib = None
-        if kind == "end":
-            peak_summary = self._peak_memory_summary_extra() or {}
-            peak_memory_gib = peak_summary.get("peak_memory_gb")
-
-        log_run_banner(
-            logger=logger,
-            kind=kind,
-            is_main_process=self._is_main_process,
-            settings=self.settings,
-            algorithm_label=algorithm_label,
-            strategy_name=strategy_name,
-            max_steps=self.max_steps,
-            epochs=self.epochs,
-            global_step=self.global_step,
-            peak_memory_gib=peak_memory_gib,
-            extra=extra,
-        )

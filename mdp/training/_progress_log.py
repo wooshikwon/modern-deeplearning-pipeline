@@ -1,22 +1,22 @@
-"""Training logging helpers shared by Trainer (SFT) and RLTrainer.
+"""Training progress logging free functions shared by Trainer (SFT) and RLTrainer.
 
 spec-system-logging-cleanup U4/U5 는 두 trainer 에 다음 6 helper 를 대칭으로
 심었다:
 
-- ``_fmt_eta`` — ETA 초를 ``HH:MM:SS`` / ``MM:SS`` / ``--:--`` 포맷으로.
-- ``_log_step_progress`` — rank-0 한 줄 step-progress.
-- ``_log_run_banner`` — Start/End 배너.
-- ``_dump_oom_summary`` — OOM 발생 시 rank 별 memory 상태 집계 로그.
-- ``_maybe_start_memory_history`` — ``torch.cuda.memory._record_memory_history`` on/off.
-- ``_maybe_dump_memory_snapshot`` — snapshot pickle dump.
+- ``fmt_eta`` — ETA 초를 ``HH:MM:SS`` / ``MM:SS`` / ``--:--`` 포맷으로.
+- ``log_step_progress`` — rank-0 한 줄 step-progress.
+- ``log_run_banner`` — Start/End 배너.
+- ``dump_oom_summary`` — OOM 발생 시 rank 별 memory 상태 집계 로그.
+- ``maybe_start_memory_history`` — ``torch.cuda.memory._record_memory_history`` on/off.
+- ``maybe_dump_memory_snapshot`` — snapshot pickle dump.
 
 두 trainer 의 실질 차이는 (a) step-progress 에서 LR 조회 경로 (SFT 는 단일
 optimizer, RL 은 dict["policy"]) 와 (b) start-banner 의 algorithm 필드 (SFT 는
 recipe.task, RL 은 ``type(algorithm).__name__``) 뿐이다. 그 외 포맷·try/except
 흡수·문서화는 문자 단위 동일하다 (cycle 1 review 2-1).
 
-본 모듈은 이 6 helper 를 **free function** 으로 추출한다. Trainer / RLTrainer 는
-얇은 bound method shim 을 유지하여 기존 테스트(``Trainer._dump_oom_summary(stub)``
+본 모듈은 이 6 helper 를 **free function** 으로 추출한다. BaseTrainer / 서브클래스는
+얇은 bound method shim 을 상속하여 기존 테스트(``Trainer._dump_oom_summary(stub)``
 등 직접 호출 패턴) 호환을 깨지 않는다. shim 은 caller-specific 상태(optimizer
 lookup, algorithm name)만 해석하여 함수로 위임한다.
 
@@ -308,7 +308,7 @@ def dump_oom_summary(
         return
 
     try:
-        free_bytes, _total_bytes = torch.cuda.mem_get_info()
+        free_bytes, _ = torch.cuda.mem_get_info()
         free_gib = free_bytes / 1024**3
     except Exception:  # noqa: BLE001 — mem_get_info 는 일부 환경에서 미지원
         free_gib = float("nan")

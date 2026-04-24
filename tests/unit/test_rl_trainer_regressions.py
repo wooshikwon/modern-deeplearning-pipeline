@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import ast
 from pathlib import Path
-
+from types import SimpleNamespace
+import torch.nn as nn
 import pytest
 
 _RL_TRAINER = Path(__file__).parents[2] / "mdp" / "training" / "rl_trainer.py"
@@ -232,3 +233,71 @@ def test_trainer_gc_before_strategy_setup() -> None:
                         f"GC 활성화(pos={gc_pos})가 strategy.setup()(pos={strategy_pos})보다 뒤에 있다. "
                         "GC는 반드시 FSDP wrap 이전에 적용해야 한다."
                     )
+
+
+# ── Bug 5: RLTrainer every_n_steps checkpoint — model weights 미저장 ──
+#
+# fix-2에서 on_batch_end의 RLTrainer 경로가 _checkpoint_state() + _save_checkpoint_state()
+# 를 경유하도록 전환됐다. 이 경로가 "models" 키를 포함하여 실제 model weight 파일을
+# ckpt_dir에 기록하는지 검증한다.
+#
+# 테스트 방식: ModelCheckpoint.on_batch_end를 직접 호출하고
+# {name}/model.pt 파일이 생성되었는지 확인한다.
+
+
+def test_on_batch_end_rl_saves_model_weights(tmp_path: Path) -> None:
+    """ModelCheckpoint.on_batch_end가 RLTrainer trainable 경로에서 model weight 파일을 저장한다.
+
+    hasattr(trainer, "trainable")로 감지된 후 _checkpoint_state() → save_checkpoint()
+    경로를 통해 {name}/model.pt 파일이 ckpt_dir에 생성되어야 한다.
+    """
+    from mdp.training.callbacks.checkpoint import ModelCheckpoint
+
+    # 최소 trainable 모델: 단순 Linear
+    policy = nn.Linear(4, 2)
+    reference = nn.Linear(4, 2)
+
+    # _checkpoint_state()가 "models" 키를 반환하는 minimal trainer stub
+    trainer_stub = SimpleNamespace(
+        trainable={"policy": policy},
+        frozen={"reference": reference},
+    )
+
+    def _checkpoint_state_fn():
+        models = {}
+        for name, model in {**trainer_stub.trainable, **trainer_stub.frozen}.items():
+            models[name] = {"state_dict_pt": model.state_dict()}
+        return {
+            "trainer_state": {"global_step": 10, "epoch_counter": 0},
+            "optimizers": {},
+            "schedulers": {},
+            "scaler": None,
+            "recipe_dict": {},
+            "models": models,
+        }
+
+    trainer_stub._checkpoint_state = _checkpoint_state_fn
+
+    cb = ModelCheckpoint(
+        dirpath=tmp_path,
+        monitor="loss",
+        every_n_steps=10,
+    )
+
+    # on_batch_end 호출 — global_step=10은 every_n_steps=10의 배수
+    cb.on_batch_end(
+        step=10,
+        metrics={"loss": 0.5},
+        global_step=10,
+        trainer=trainer_stub,
+    )
+
+    # model weight 파일 검증
+    assert (tmp_path / "checkpoint-10" / "policy" / "model.pt").exists(), (
+        "RLTrainer every_n_steps checkpoint에 policy/model.pt가 없다. "
+        "_checkpoint_state()의 'models' 키가 누락되었거나 save_checkpoint가 파일을 쓰지 않았다."
+    )
+    assert (tmp_path / "checkpoint-10" / "reference" / "model.pt").exists(), (
+        "RLTrainer every_n_steps checkpoint에 reference/model.pt가 없다. "
+        "frozen 모델도 'models' 키에 포함되어야 한다."
+    )

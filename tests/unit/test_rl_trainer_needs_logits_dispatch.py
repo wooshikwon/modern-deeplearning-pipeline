@@ -43,6 +43,7 @@ class _CallCounter:
 
 def _make_trainer_stub(
     algorithm: Any,
+    monkeypatch: pytest.MonkeyPatch,
     *,
     trainable: dict[str, Any] | None = None,
     frozen: dict[str, Any] | None = None,
@@ -51,7 +52,12 @@ def _make_trainer_stub(
     head_shape: tuple[int, int] = (16, 8),
 ) -> tuple[SimpleNamespace, _CallCounter]:
     """RLTrainer stub을 만든다. `_train_step_offline` / `_train_step_generation`
-    메서드를 바인딩할 수 있는 최소 속성만 포함."""
+    메서드를 바인딩할 수 있는 최소 속성만 포함.
+
+    shim 제거(fix-c1) 이후 `_features_forward_model` / `extract_hidden_states_and_head`
+    는 모듈 레벨 함수로 직접 호출되므로, monkeypatch를 통해 rl_trainer 모듈 네임스페이스에서
+    해당 함수를 spy로 교체한다.
+    """
     counter = _CallCounter()
     trainable = trainable if trainable is not None else {"policy": object()}
     frozen = frozen if frozen is not None else {}
@@ -59,7 +65,7 @@ def _make_trainer_stub(
         "logits": torch.zeros(2, 4, 16)
     }
 
-    def _stub_forward_model(model, batch, role="policy"):
+    def _spy_forward_model(model, batch, role="policy"):
         counter.forward_model_calls.append({"role": role, "model_id": id(model)})
         return dict(forward_model_out)
 
@@ -73,9 +79,12 @@ def _make_trainer_stub(
             for name in models
         }
 
-    def _stub_extract_hidden(model, batch, layer_idx=-1):
+    def _spy_extract_hidden(model, batch, layer_idx=-1):
         counter.extract_hidden_calls.append({"model_id": id(model)})
         return torch.zeros(*hidden_shape), torch.zeros(*head_shape)
+
+    monkeypatch.setattr(rl_trainer_module, "_features_forward_model", _spy_forward_model)
+    monkeypatch.setattr(rl_trainer_module, "extract_hidden_states_and_head", _spy_extract_hidden)
 
     stub = SimpleNamespace(
         algorithm=algorithm,
@@ -92,9 +101,7 @@ def _make_trainer_stub(
         global_step=0,
         policy=trainable.get("policy"),
         _generation_kwargs={},
-        _forward_model=_stub_forward_model,
         _forward_preference=_stub_forward_preference,
-        _extract_hidden_states_and_head=_stub_extract_hidden,
     )
     return stub, counter
 
@@ -182,7 +189,7 @@ class TestOfflineNeedsLogitsTrue:
     ) -> None:
         """needs_logits=True + non-preference 배치 → policy `_forward_model` 1회 호출."""
         algo = _MockDefaultAlgorithm()
-        stub, counter = _make_trainer_stub(algo)
+        stub, counter = _make_trainer_stub(algo, monkeypatch)
         batch = {"input_ids": torch.arange(8).view(2, 4)}
 
         with _stub_backward_and_step(monkeypatch):
@@ -201,7 +208,7 @@ class TestOfflineNeedsLogitsTrue:
     ) -> None:
         """needs_logits=True → policy_out["logits"]가 step_logits로 반환된다."""
         algo = _MockDefaultAlgorithm()
-        stub, counter = _make_trainer_stub(algo)
+        stub, counter = _make_trainer_stub(algo, monkeypatch)
         batch = {"input_ids": torch.arange(8).view(2, 4)}
 
         with _stub_backward_and_step(monkeypatch):
@@ -219,7 +226,7 @@ class TestOfflineNeedsLogitsFalse:
     ) -> None:
         """needs_logits=False + needs_hidden=True → policy `_forward_model`는 호출 안 됨."""
         algo = _MockFusedLossAlgorithm()
-        stub, counter = _make_trainer_stub(algo)
+        stub, counter = _make_trainer_stub(algo, monkeypatch)
         batch = {"input_ids": torch.arange(8).view(2, 4)}
 
         with _stub_backward_and_step(monkeypatch):
@@ -238,7 +245,7 @@ class TestOfflineNeedsLogitsFalse:
     ) -> None:
         """needs_logits=False 경로에서도 trainable_out["policy"]에 hidden + head 주입."""
         algo = _MockFusedLossAlgorithm()
-        stub, counter = _make_trainer_stub(algo)
+        stub, counter = _make_trainer_stub(algo, monkeypatch)
         batch = {"input_ids": torch.arange(8).view(2, 4)}
 
         # compute_loss 내부의 assert가 hidden/head 주입을 이미 검증한다.
@@ -260,6 +267,7 @@ class TestOfflineNeedsLogitsFalse:
         frozen_model = object()
         stub, counter = _make_trainer_stub(
             algo,
+            monkeypatch,
             frozen={"value": frozen_model},
             forward_model_out={"values": torch.zeros(2, 4)},
         )
@@ -281,7 +289,7 @@ class TestOfflinePreferencePath:
     ) -> None:
         """is_preference=True 경로는 needs_logits=False 선언을 무시한다."""
         algo = _MockPreferenceAlgorithm()
-        stub, counter = _make_trainer_stub(algo)
+        stub, counter = _make_trainer_stub(algo, monkeypatch)
         batch = {
             "chosen_input_ids": torch.arange(8).view(2, 4),
             "rejected_input_ids": torch.arange(8, 16).view(2, 4),
@@ -316,7 +324,7 @@ class TestOfflinePreferencePath:
                 return {"policy": loss}
 
         algo = _DPOLike()
-        stub, counter = _make_trainer_stub(algo)
+        stub, counter = _make_trainer_stub(algo, monkeypatch)
         batch = {
             "chosen_input_ids": torch.arange(8).view(2, 4),
             "rejected_input_ids": torch.arange(8, 16).view(2, 4),
@@ -360,9 +368,14 @@ class _GenerateStubModel:
 
 
 def _make_generation_stub(
-    algorithm: Any, mini_epochs: int = 1
+    algorithm: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    mini_epochs: int = 1,
 ) -> tuple[SimpleNamespace, _CallCounter]:
-    """generation 경로용 stub. policy가 `generate` 가능해야 함."""
+    """generation 경로용 stub. policy가 `generate` 가능해야 함.
+
+    shim 제거(fix-c1) 이후 모듈 레벨 함수를 monkeypatch로 교체한다.
+    """
     policy = _GenerateStubModel()
     counter = _CallCounter()
 
@@ -370,12 +383,12 @@ def _make_generation_stub(
     if not hasattr(algorithm, "mini_epochs"):
         algorithm.mini_epochs = mini_epochs
 
-    def _stub_forward_model(model, batch, role="policy"):
+    def _spy_forward_model(model, batch, role="policy"):
         counter.forward_model_calls.append({"role": role, "model_id": id(model)})
         B, S = batch["input_ids"].shape
         return {"logits": torch.zeros(B, S, 16)}
 
-    def _stub_extract_hidden(model, batch, layer_idx=-1):
+    def _spy_extract_hidden(model, batch, layer_idx=-1):
         counter.extract_hidden_calls.append({"model_id": id(model)})
         B, S = batch["input_ids"].shape
         return torch.zeros(B, S, 8), torch.zeros(16, 8)
@@ -383,6 +396,9 @@ def _make_generation_stub(
     def _stub_compute_rewards(frozen_out, generated_ids, gen_mask):
         B = generated_ids.shape[0]
         return torch.zeros(B)
+
+    monkeypatch.setattr(rl_trainer_module, "_features_forward_model", _spy_forward_model)
+    monkeypatch.setattr(rl_trainer_module, "extract_hidden_states_and_head", _spy_extract_hidden)
 
     stub = SimpleNamespace(
         algorithm=algorithm,
@@ -399,8 +415,6 @@ def _make_generation_stub(
         global_step=0,
         policy=policy,
         _generation_kwargs={},
-        _forward_model=_stub_forward_model,
-        _extract_hidden_states_and_head=_stub_extract_hidden,
         _compute_rewards=_stub_compute_rewards,
     )
     return stub, counter
@@ -444,7 +458,7 @@ class TestGenerationNeedsLogitsTrue:
     ) -> None:
         """needs_logits=True 기본: rollout old_logits 1회 + mini-epoch trainable 1회 = 2회."""
         algo = _GenerationAlgorithmDefault()
-        stub, counter = _make_generation_stub(algo)
+        stub, counter = _make_generation_stub(algo, monkeypatch)
         batch = {
             "input_ids": torch.arange(8).view(2, 4),
             "attention_mask": torch.ones(2, 4, dtype=torch.long),
@@ -470,7 +484,7 @@ class TestGenerationNeedsLogitsFalse:
     ) -> None:
         """needs_logits=False: rollout old_logits 1회만 남고 mini-epoch trainable 스킵."""
         algo = _GenerationAlgorithmFused()
-        stub, counter = _make_generation_stub(algo)
+        stub, counter = _make_generation_stub(algo, monkeypatch)
         batch = {
             "input_ids": torch.arange(8).view(2, 4),
             "attention_mask": torch.ones(2, 4, dtype=torch.long),

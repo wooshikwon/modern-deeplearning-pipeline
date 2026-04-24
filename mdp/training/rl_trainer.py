@@ -32,19 +32,21 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
-from mdp.training._logging_helpers import (
-    dump_oom_summary,
-    fmt_eta,
-    log_run_banner,
-    log_step_progress,
-    maybe_dump_memory_snapshot,
-    maybe_start_memory_history,
+from mdp.training._base import BaseTrainer
+from mdp.training._checkpoint import (
+    export_model_artifact,
+    gather_fsdp_state_dict,
+    load_checkpoint,
 )
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
     log_static_params,
     log_step_metrics,
     log_summary,
+)
+from mdp.training._features import (
+    extract_hidden_states_and_head,
+    forward_model as _features_forward_model,
 )
 from mdp.training._schedulers import (
     create_scheduler_with_warmup,
@@ -60,7 +62,7 @@ logger = logging.getLogger(__name__)
 _probe_extract_fired = False
 
 
-class RLTrainer:
+class RLTrainer(BaseTrainer):
     """RL alignment 학습 루프."""
 
     def __init__(
@@ -154,18 +156,150 @@ class RLTrainer:
         self._stop_requested: bool = False
         self._stop_signal_name: str | None = None
 
-    def _estimate_total_steps(self) -> int:
-        if self.max_steps:
-            return self.max_steps
-        steps_per_epoch = len(self.train_loader) // self.grad_accum_steps
-        return int(steps_per_epoch * (self.epochs or 1))
+    # ── BaseTrainer abstract method 구현 ──
+
+    def _optimizer_for_progress_log(self) -> "torch.optim.Optimizer | None":
+        """RLTrainer 는 policy optimizer 의 첫 param_group 에서 LR 을 읽는다."""
+        return self.optimizers.get("policy")
+
+    def _algorithm_label(self) -> str:
+        """RLTrainer 는 algorithm 클래스명을 label 로 사용한다."""
+        return type(self.algorithm).__name__
+
+    def _collect_mlflow_params(self) -> None:
+        """Run 시작 시 static param 로깅을 공용 헬퍼에 위임한다.
+
+        `_mlflow_logging.log_static_params`가 원칙 2(optimizer 인스턴스 상태는 param으로
+        내보내지 않음)·원칙 3(multi-group slash 네이밍)를 일괄 책임진다. 본 래퍼는
+        호출 타이밍과 rank 가드(caller 쪽 `_is_main_process`) 외에는 어떤 결정도
+        내리지 않는다 — Trainer와 동일한 대칭 계약.
+        """
+        log_static_params(self.settings.recipe, self.settings)
+
+    def _checkpoint_state(self) -> dict:
+        """현재 학습 상태를 dict로 직렬화한다.
+
+        RLTrainer는 trainable + frozen 모델 전체를 ``"models"`` 키로 포함한다.
+        per-model 서브디렉토리 (``{name}/model.pt``, ``{name}/optimizer.pt``,
+        ``{name}/scheduler.pt``) 구조로 저장된다.
+
+        FSDP 환경에서는 ``gather_fsdp_state_dict`` 를 경유한다 — 반드시 모든 rank에서
+        호출해야 하는 NCCL collective 이며, rank 0 에만 실제 weights 가 채워진다.
+        non-rank-0 FSDP 에서는 해당 모델 항목이 ``"models"`` 에 포함되지 않는다.
+
+        반환 dict는 ``save_checkpoint``로 전달되어 I/O를 담당한다.
+        """
+        trainer_state: dict[str, Any] = {
+            "global_step": self.global_step,
+            "epoch_counter": self.epoch_counter,
+        }
+        optimizers = {
+            name: opt.state_dict()
+            for name, opt in self.optimizers.items()
+        }
+        schedulers = {
+            name: sched.state_dict()
+            for name, sched in self.schedulers.items()
+        }
+
+        # Model weights — trainable + frozen 전부. FSDP 환경: gather_fsdp_state_dict는
+        # NCCL collective이므로 모든 rank에서 호출. rank-0에서만 non-None을 반환.
+        # non-FSDP 또는 FSDP rank-0 이외에서 None을 반환하면 "models" 항목에 추가하지 않음.
+        models: dict[str, Any] = {}
+        for name, model in {**self.trainable, **self.frozen}.items():
+            fsdp_sd = gather_fsdp_state_dict(model, self._is_main_process)
+            if fsdp_sd is not None:
+                # FSDP rank-0: full state dict already gathered
+                models[name] = {"state_dict_pt": fsdp_sd}
+            else:
+                # non-FSDP (or FSDP non-rank-0 → skip to avoid writing empty weights)
+                try:
+                    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+                    if isinstance(model, FSDP):
+                        # non-rank-0 FSDP: fsdp_sd=None means we're not rank-0; skip
+                        continue
+                except Exception:
+                    pass
+                unwrapped = getattr(model, "module", model)
+                models[name] = {"state_dict_pt": unwrapped.state_dict()}
+
+        return {
+            "trainer_state": trainer_state,
+            "optimizers": optimizers,
+            "schedulers": schedulers,
+            "scaler": self.scaler.state_dict() if self.scaler.is_enabled() else None,
+            "recipe_dict": self._recipe_dict,
+            "models": models,
+        }
+
+    def _load_checkpoint_state(self, state: dict) -> None:
+        """``load_checkpoint``가 반환한 state dict로 학습 상태를 복원한다.
+
+        복원 순서 (순서 민감):
+        1. 모델 weights (adapter → safetensors → pt 우선순위, trainable + frozen 전부)
+        2. optimizer state_dict (per-model, trainable only)
+        3. scheduler state_dict (per-model, trainable only)
+        4. GradScaler state_dict
+        5. trainer scalar state (global_step, epoch_counter)
+
+        :param state: ``load_checkpoint(ckpt_dir)``가 반환한 dict.
+        """
+        ckpt_dir: Path = state["ckpt_dir"]
+        logger.info(f"Resumed from {ckpt_dir}")
+
+        # 1. Model weights — trainable + frozen 전부 복원
+        for name, model in {**self.trainable, **self.frozen}.items():
+            model_dir = ckpt_dir / name
+            if not model_dir.exists():
+                logger.warning(f"Resume: {name} 체크포인트 없음, 건너뜀")
+                continue
+
+            unwrapped = getattr(model, "module", model)
+            adapter_path = model_dir / "adapter_model.safetensors"
+            if adapter_path.exists() and hasattr(unwrapped, "load_adapter"):
+                unwrapped.load_adapter(model_dir, adapter_name="default")
+            elif (model_dir / "model.safetensors").exists():
+                from safetensors.torch import load_file
+                unwrapped.load_state_dict(
+                    load_file(model_dir / "model.safetensors"), strict=False
+                )
+            elif (model_dir / "model.pt").exists():
+                unwrapped.load_state_dict(
+                    torch.load(model_dir / "model.pt", map_location="cpu", weights_only=True)
+                )
+
+            # 2. Optimizer
+            if name in self.optimizers and (model_dir / "optimizer.pt").exists():
+                self.optimizers[name].load_state_dict(
+                    torch.load(model_dir / "optimizer.pt", map_location="cpu", weights_only=True)
+                )
+
+            # 3. Scheduler
+            if name in self.schedulers and (model_dir / "scheduler.pt").exists():
+                self.schedulers[name].load_state_dict(
+                    torch.load(model_dir / "scheduler.pt", map_location="cpu", weights_only=True)
+                )
+
+        # 4. GradScaler
+        scaler_sd = state.get("scaler")
+        if scaler_sd is not None and self.scaler.is_enabled():
+            self.scaler.load_state_dict(scaler_sd)
+
+        # 5. Trainer scalar state
+        trainer_state = state.get("trainer_state")
+        if trainer_state is not None:
+            self.global_step = trainer_state.get("global_step", 0)
+            self.epoch_counter = trainer_state.get("epoch_counter", 0)
+
+        logger.info(f"Resumed from {ckpt_dir} (step={self.global_step})")
 
     def _fire(self, hook_name: str, **kwargs: Any) -> None:
-        needs_ep_gather = (
+        _do_ep_gather = (
             self.expert_parallel is not None
             and hook_name in ("on_validation_end", "on_batch_end")
         )
-        if needs_ep_gather:
+        if _do_ep_gather:
+            assert self.expert_parallel is not None  # guaranteed by _do_ep_gather
             self.expert_parallel.gather_experts(self.policy)
 
         kwargs["trainer"] = self
@@ -186,24 +320,15 @@ class RLTrainer:
                         raise
                     logger.warning(f"콜백 {type(cb).__name__}.{hook_name} 실패: {e}")
 
-        if needs_ep_gather:
+        if _do_ep_gather:
+            assert self.expert_parallel is not None  # guaranteed by _do_ep_gather
             self.expert_parallel.scatter_experts(self.policy, self.device)
-
-    def _move_to_device(self, batch: dict[str, Any]) -> dict[str, Any]:
-        return {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-            for k, v in batch.items()
-        }
-
-    def _should_stop(self) -> bool:
-        if self._stop_requested:
-            return True
-        return any(getattr(cb, "should_stop", False) for cb in self.callbacks)
 
     def _run_rl_validation(self) -> dict[str, float]:
         """validation: generation+reward (GRPO/PPO) 또는 preference accuracy (DPO)."""
         if self.val_loader is None:
             return {}
+        assert self.val_loader is not None  # Pyright instance-attr narrowing helper
 
         needs_gen = getattr(self.algorithm, "needs_generation", False)
         if not needs_gen:
@@ -229,7 +354,7 @@ class RLTrainer:
                     **self._generation_kwargs,
                 )
 
-                reward_out = self._forward_model(
+                reward_out = _features_forward_model(
                     self.frozen["reward"],
                     {"input_ids": generated_ids},
                     role="reward",
@@ -247,6 +372,7 @@ class RLTrainer:
 
     def _run_dpo_validation(self) -> dict[str, float]:
         """DPO validation: preference accuracy (chosen log-prob > rejected log-prob)."""
+        assert self.val_loader is not None  # callers always guard with val_loader is not None
         from mdp.training.losses.rl import compute_log_probs
 
         self.policy.eval()
@@ -267,12 +393,12 @@ class RLTrainer:
                 rejected_labels = batch.get("rejected_labels", rejected_ids)
 
                 # 각각 forward
-                chosen_out = self._forward_model(
+                chosen_out = _features_forward_model(
                     self.policy,
                     {"input_ids": chosen_ids, "attention_mask": batch.get("chosen_attention_mask")},
                     role="policy",
                 )
-                rejected_out = self._forward_model(
+                rejected_out = _features_forward_model(
                     self.policy,
                     {"input_ids": rejected_ids, "attention_mask": batch.get("rejected_attention_mask")},
                     role="policy",
@@ -303,33 +429,6 @@ class RLTrainer:
 
     # ── MLflow ──
 
-    def _start_mlflow_run(self) -> Any:
-        try:
-            import mlflow
-
-            mlflow_cfg = self.settings.config.mlflow
-            if mlflow_cfg is None:
-                return nullcontext()
-            if hasattr(mlflow_cfg, "tracking_uri") and mlflow_cfg.tracking_uri:
-                mlflow.set_tracking_uri(mlflow_cfg.tracking_uri)
-            experiment_name = getattr(mlflow_cfg, "experiment_name", None) or getattr(mlflow_cfg, "experiment", None)
-            if experiment_name:
-                mlflow.set_experiment(experiment_name)
-            return mlflow.start_run()
-        except Exception as e:
-            logger.warning(f"MLflow run 시작 실패: {e}")
-            return nullcontext()
-
-    def _log_mlflow_params(self) -> None:
-        """Run 시작 시 static param 로깅을 공용 헬퍼에 위임한다.
-
-        `_mlflow_logging.log_static_params`가 원칙 2(optimizer 인스턴스 상태는 param으로
-        내보내지 않음)·원칙 3(multi-group slash 네이밍)를 일괄 책임진다. 본 래퍼는
-        호출 타이밍과 rank 가드(caller 쪽 `_is_main_process`) 외에는 어떤 결정도
-        내리지 않는다 — Trainer와 동일한 대칭 계약.
-        """
-        log_static_params(self.settings.recipe, self.settings)
-
     def _log_mlflow_summary(
         self,
         training_duration: float,
@@ -338,11 +437,11 @@ class RLTrainer:
     ) -> None:
         """Run 종료 시 summary 로깅을 공용 헬퍼에 위임한다.
 
-        Trainer와의 대칭을 위해 `final_metrics=self.last_metrics`를 포함한다(U3의
-        핵심 변경). `last_metrics`가 비어 있으면 `log_summary` 내부가 guard로 skip
+        Trainer와의 대칭을 위해 `final_metrics=self.last_metrics`를 포함한다.
+        `last_metrics`가 비어 있으면 `log_summary` 내부가 guard로 skip
         하므로 caller는 그대로 넘기면 된다. Checkpoint 집계 결과는 기존대로
         `self._checkpoints_saved`에 보존해 `train()` 반환 dict가 그대로 쓸 수 있도록
-        한다(spec-trainer-robustness-fixes 호환).
+        한다.
 
         policy artifact export는 FSDP all-gather·tempdir 수명 관리가 있어
         `log_summary`의 범용 `artifact_dirs` 경로로 흡수하지 않고 별도로 호출한다.
@@ -352,7 +451,7 @@ class RLTrainer:
         # ModelCheckpoint를 붙일 수 있어 여러 콜백이 공존해도 `saved_checkpoints`
         # 속성을 가진 콜백만 누적된다. `monitor_hint`는 아래 zero-warning에서 사용.
         checkpoint_stats = aggregate_checkpoint_stats(self.callbacks)
-        total_checkpoints, _best_path, monitor_hint = checkpoint_stats
+        total_checkpoints, _, monitor_hint = checkpoint_stats
         self._checkpoints_saved = total_checkpoints
 
         # sanitized_config — Trainer와 동일 출처·동일 파일 경로.
@@ -363,10 +462,9 @@ class RLTrainer:
             logger.warning(f"sanitize_config 실패: {e}")
             sanitized_config = None
 
-        # Peak memory metric — review 2-2 대체 구현. rank 0의
+        # Peak memory metric — rank 0의
         # `torch.cuda.max_memory_allocated()`를 GiB 단위로 summary에 기록한다.
-        # spec-system-logging-cleanup §U5의 `memory_history` 정식 기능이 들어오기
-        # 전까지의 최소 관측 지점으로, CUDA 미사용 / 예외 발생 시 조용히 skip한다.
+        # CUDA 미사용 / 예외 발생 시 조용히 skip한다.
         extra_summary = self._peak_memory_summary_extra()
 
         log_summary(
@@ -381,12 +479,13 @@ class RLTrainer:
         )
 
         # policy adapter를 MLflow artifact로 저장 — FSDP cooperative gather 결과를 사용.
-        # `log_summary`의 artifact_dirs 경로로 넘기지 않는 이유는 tempfile 디렉토리의
-        # 수명을 `_export_policy_artifact` 안에서 `with` 문으로 닫기 때문(밖으로
-        # 노출하면 수명 관리가 복잡해짐).
         if self._is_main_process:
             try:
-                self._export_policy_artifact(policy_state_dict=policy_state_dict)
+                export_model_artifact(
+                    self.policy,
+                    self.settings,
+                    policy_state_dict=policy_state_dict,
+                )
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Policy artifact 등록 실패: {e}")
 
@@ -396,232 +495,6 @@ class RLTrainer:
                 "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
                 monitor_hint,
             )
-
-    def _peak_memory_summary_extra(self) -> dict[str, float] | None:
-        """Run 종료 시 rank 0의 CUDA peak memory를 GiB로 반환한다.
-
-        spec-algorithm-hidden-states-support U6의 peak memory observation
-        요구에 대한 최소 구현. CUDA가 없거나 예외가 나면 ``None``을 반환하여
-        summary 로깅에 아무 영향도 주지 않는다. rank 1~3에서도 그대로 호출하되
-        집계 자체는 rank 0 숫자에 의존 — rank 간 차이가 궁금하면 별도 feature
-        (spec-system-logging-cleanup U5의 OOM rank summary)로 구현 예정.
-        """
-        try:
-            if not torch.cuda.is_available():
-                return None
-            # 현재 프로세스가 보는 device에 대해 집계. DDP/torchrun에서는 rank별
-            # device를 잡아주지만 caller가 rank 0만 호출하므로 결과적으로 rank 0
-            # device의 peak가 기록된다.
-            peak_bytes = torch.cuda.max_memory_allocated()
-            if peak_bytes <= 0:
-                return None
-            return {"peak_memory_gb": peak_bytes / (1024**3)}
-        except Exception as e:  # noqa: BLE001
-            logger.debug("peak_memory_gb 집계 실패(무시): %s", e)
-            return None
-
-    # ── OOM / memory_history helpers (spec-system-logging-cleanup §U5) ──
-    #
-    # 실제 구현은 ``mdp.training._logging_helpers`` 의 free function 에 있다.
-    # 아래 bound method 들은 trainer-specific 상태(LR 조회·algorithm 이름 등)를
-    # 해석해 helper 로 위임하는 얇은 shim. Trainer(SFT) 도 동일 패턴이며, cycle 1
-    # review 2-1 의 문자 단위 대칭 중복을 단일 helper 로 해소한다.
-
-    def _dump_oom_summary(self) -> None:
-        """OOM 발생 시 모든 rank 의 memory 상태를 rank-0 에 집계한다.
-
-        ``_all_gather_with_timeout`` 가 5초 타임아웃을 걸어 다른 rank 가 이미
-        죽은 상황에서 NCCL collective 가 hang 하지 않도록 방어한다
-        (cycle 1 review 2-2). Trainer 쪽 shim 과 대칭.
-        """
-        dump_oom_summary(logger=logger)
-
-    def _maybe_start_memory_history(self) -> bool:
-        """``monitoring.memory_history=True`` 면 tensor-level snapshot 을 켠다.
-
-        rank-0 만 켠다. Trainer 쪽 shim 과 대칭.
-        """
-        return maybe_start_memory_history(
-            recipe_dict=self._recipe_dict, logger=logger,
-        )
-
-    def _maybe_dump_memory_snapshot(self, active: bool) -> None:
-        """``_maybe_start_memory_history`` 가 성공했을 때에만 snapshot 을 파일로 dump."""
-        maybe_dump_memory_snapshot(active=active, logger=logger)
-
-    # ── System logging helpers (spec-system-logging-cleanup §U4) ──
-
-    @staticmethod
-    def _fmt_eta(seconds: float) -> str:
-        """Format an ETA duration as ``HH:MM:SS`` (or ``MM:SS`` when < 1h).
-
-        음수·inf·NaN 은 ``"--:--"``. ``_logging_helpers.fmt_eta`` 로 위임.
-        """
-        return fmt_eta(seconds)
-
-    def _log_step_progress(
-        self,
-        loss: float,
-        grad_norm: float | None,
-        *,
-        start_time: float,
-        max_steps: int,
-    ) -> None:
-        """rank-0 text step-progress 한 줄을 로거로 흘린다.
-
-        file-redirect 환경(tqdm 비활성)에서도 step/loss/lr/grad_norm/throughput/ETA
-        가 stdout 에 남도록 하는 경로. caller 는 (a) rank-0 guard, (b) log_every_n
-        타이밍을 모두 처리했다는 전제로 호출한다.
-
-        RL 은 policy optimizer 의 첫 param_group 에서 LR 을 읽는다 — multi-group
-        (LoRA+head) 도 첫 group 값을 대표로 사용 (step-progress 한 줄에 모든
-        group LR 을 나열하면 가독성이 떨어지므로).
-        """
-        try:
-            policy_opt = self.optimizers.get("policy")
-            current_lr = (
-                policy_opt.param_groups[0]["lr"]
-                if policy_opt is not None and policy_opt.param_groups
-                else 0.0
-            )
-        except Exception:  # noqa: BLE001 — LR 조회 실패는 progress log 를 깨뜨려선 안 된다
-            current_lr = 0.0
-
-        log_step_progress(
-            logger=logger,
-            global_step=self.global_step,
-            max_steps=max_steps,
-            loss=loss,
-            current_lr=current_lr,
-            grad_norm=grad_norm,
-            start_time=start_time,
-        )
-
-    def _log_run_banner(
-        self,
-        kind: "str",
-        *,
-        extra: dict[str, Any] | None = None,
-    ) -> None:
-        """Start / End 배너를 rank-0 에서 한 번만 출력한다.
-
-        ``kind`` 는 ``"start"`` 또는 ``"end"`` — start 는 train() 진입 직후,
-        end 는 summary 로깅 직전에 호출된다. ``is_json_mode()`` 이면 출력을
-        건너뛴다 (spec §U4 제약). 배너는 의미상 rank-0 only 이므로
-        ``extra={"all_ranks": True}`` 를 쓰지 않는다.
-
-        RL 은 ``type(self.algorithm).__name__`` 을 algorithm label 로 사용.
-        """
-        strategy_name = (
-            type(self.strategy).__name__ if self.strategy is not None else "NoStrategy"
-        )
-        algorithm_label = type(self.algorithm).__name__
-
-        peak_memory_gib = None
-        if kind == "end":
-            peak_summary = self._peak_memory_summary_extra() or {}
-            peak_memory_gib = peak_summary.get("peak_memory_gb")
-
-        log_run_banner(
-            logger=logger,
-            kind=kind,
-            is_main_process=self._is_main_process,
-            settings=self.settings,
-            algorithm_label=algorithm_label,
-            strategy_name=strategy_name,
-            max_steps=self.max_steps,
-            epochs=self.epochs,
-            global_step=self.global_step,
-            peak_memory_gib=peak_memory_gib,
-            extra=extra,
-        )
-
-    def _gather_fsdp_policy_state_dict(self) -> "dict | None":
-        """FSDP 모델의 full state dict를 all-rank 협력으로 수집한다.
-
-        모든 랭크가 반드시 호출해야 한다 (NCCL all-gather가 내부에서 실행됨).
-        rank0_only=True이므로 실제 weight는 rank 0에만 채워지고, 나머지는 빈 dict.
-        FSDP가 아닌 경우 None을 반환한다.
-        """
-        try:
-            from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-            if not isinstance(self.policy, FSDP):
-                return None
-            from torch.distributed.fsdp import FullStateDictConfig, StateDictType
-        except Exception as e:
-            logger.warning("FSDP state dict cooperative gather failed: %s", e)
-            return None
-
-        # NCCL collective — outside try/except so a raise here propagates to all ranks
-        # instead of one rank silently returning None while others block in all-gather.
-        cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        with FSDP.state_dict_type(self.policy, StateDictType.FULL_STATE_DICT, cfg):
-            # All ranks participate in NCCL all-gather here.
-            # rank0_only=True → result populated on rank 0 only; others get {}.
-            state_dict = self.policy.state_dict()
-        return state_dict if self._is_main_process else None
-
-    def _export_policy_artifact(self, policy_state_dict: "dict | None" = None) -> None:
-        """Policy 모델을 MLflow artifact로 저장한다. LoRA면 adapter만.
-
-        policy_state_dict가 제공된 경우 FSDP cooperative gather로 수집한 full state dict를
-        사용한다 (FSDP 모델에서 직접 save_pretrained를 호출하면 모든 랭크가 필요하므로).
-        """
-        import tempfile
-
-        import mlflow
-
-        try:
-            target = getattr(self.policy, "module", self.policy)
-            has_adapter = hasattr(target, "peft_config")
-
-            with tempfile.TemporaryDirectory() as tmp:
-                output_dir = Path(tmp)
-
-                if policy_state_dict is not None:
-                    # FSDP path: use pre-gathered full state dict to avoid NCCL on rank 0 only.
-                    if has_adapter:
-                        # Extract adapter-only weights via PEFT helper (respects state_dict arg).
-                        from peft import get_peft_model_state_dict
-                        adapter_names = list(target.peft_config.keys())
-                        adapter_name = adapter_names[0] if adapter_names else "default"
-                        adapter_sd = get_peft_model_state_dict(target, state_dict=policy_state_dict, adapter_name=adapter_name)
-                        from safetensors.torch import save_file
-                        save_file(adapter_sd, str(output_dir / "adapter_model.safetensors"))
-                        # Save adapter config for each adapter name.
-                        peft_config = target.peft_config  # dict[adapter_name, PeftConfigMixin]
-                        for adapter_name, cfg in peft_config.items():
-                            cfg.save_pretrained(str(output_dir))
-                    else:
-                        from safetensors.torch import save_file
-                        save_file(policy_state_dict, str(output_dir / "model.safetensors"))
-                elif has_adapter:
-                    target.save_pretrained(output_dir)
-                elif hasattr(target, "save_pretrained"):
-                    target.save_pretrained(output_dir)
-                else:
-                    from safetensors.torch import save_file
-                    save_file(target.state_dict(), str(output_dir / "model.safetensors"))
-
-                # tokenizer — collator _component_의 init_args에서 추출
-                recipe = self.settings.recipe
-                tokenizer_name = recipe.data.collator.get("tokenizer") if isinstance(recipe.data.collator, dict) else None
-                if tokenizer_name:
-                    try:
-                        from transformers import AutoTokenizer
-                        AutoTokenizer.from_pretrained(tokenizer_name).save_pretrained(output_dir)
-                    except Exception:
-                        pass
-
-                # recipe.yaml
-                import yaml
-                recipe_dict = recipe.model_dump(mode="json")
-                (output_dir / "recipe.yaml").write_text(yaml.dump(recipe_dict, allow_unicode=True))
-
-                mlflow.log_artifacts(tmp, "model")
-                logger.info("Policy 모델을 MLflow artifact로 등록: model/")
-        except Exception as e:
-            logger.warning(f"Policy artifact 저장 실패: {e}")
 
     def _maybe_compute_baseline(self) -> dict[str, Any] | None:
         """Compute monitoring baseline after training using policy model."""
@@ -657,105 +530,8 @@ class RLTrainer:
 
     # ── Checkpoint (Resume) ──
 
-    def _save_checkpoint(self, ckpt_dir: Path) -> None:
-        """모든 모델의 상태를 저장한다."""
-        import json
-
-        # Only save trainable models — frozen models don't change during training and
-        # are always reloaded from their original pretrained path on resume.
-        # Saving frozen replicas wastes disk (e.g. ~14 GB for Llama backbone) and
-        # causes strategy.save_checkpoint to fail if the model is not DDP/FSDP-wrapped.
-        for name, model in self.trainable.items():
-            model_dir = ckpt_dir / name
-            model_dir.mkdir(parents=True, exist_ok=True)
-
-            if self.strategy is not None and hasattr(self.strategy, "save_checkpoint"):
-                # FSDP + PeftModel(LoRA): adapter만 저장한다.
-                # strategy.save_checkpoint는 rank0_only=True 방식으로 full state dict를 rank 0에 수집한다.
-                # rank 0에서 수집된 전체 state dict 중 LoRA + modules_to_save 키만 필터링해
-                # adapter_model.safetensors + adapter_config.json으로 저장한다.
-                _saved_as_peft = False
-                try:
-                    from peft import PeftModel as _PeftModel
-                    _inner = getattr(model, "module", None)
-
-                    # DDP + PeftModel: rank 0이 full model을 보유하므로 직접 adapter 저장
-                    from torch.nn.parallel import DistributedDataParallel as _DDP
-                    if isinstance(model, _DDP) and isinstance(_inner, _PeftModel):
-                        import torch.distributed as _dist
-                        if not _dist.is_initialized() or _dist.get_rank() == 0:
-                            _inner.save_pretrained(str(model_dir))
-                            logger.info("Saved PEFT adapter only (DDP+LoRA): %s", model_dir)
-                        _saved_as_peft = True
-
-                    # FSDP + PeftModel: full state dict를 gather 후 LoRA 키만 필터링
-                    if not _saved_as_peft:
-                        from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-                        if isinstance(model, FSDP) and isinstance(_inner, _PeftModel):
-                            import tempfile as _tempfile
-                            from safetensors import safe_open as _safe_open
-                            from safetensors.torch import save_file as _save_file
-
-                            with _tempfile.TemporaryDirectory() as _tmp:
-                                _full_path = Path(_tmp) / "full.safetensors"
-                                self.strategy.save_checkpoint(model, str(_full_path))
-
-                                # rank0_only=True: rank-0에서만 파일이 생성된다
-                                if _full_path.exists():
-                                    with _safe_open(str(_full_path), framework="pt", device="cpu") as _f:
-                                        _full_sd = {k: _f.get_tensor(k) for k in _f.keys()}
-
-                                    # LoRA 가중치 + modules_to_save(value_head 등)만 필터
-                                    _adapter_tokens = {
-                                        "lora_A", "lora_B",
-                                        "lora_embedding_A", "lora_embedding_B",
-                                        "modules_to_save",
-                                    }
-                                    _adapter_sd = {
-                                        k: v for k, v in _full_sd.items()
-                                        if any(tok in k for tok in _adapter_tokens)
-                                    }
-                                    _save_file(_adapter_sd, model_dir / "adapter_model.safetensors")
-
-                                    # adapter_config.json: PEFT 자체 직렬화 사용 (set → list 자동 변환)
-                                    _peft_cfg = next(iter(_inner.peft_config.values()))
-                                    _peft_cfg.save_pretrained(str(model_dir))
-                                    logger.info(
-                                        "Saved PEFT adapter only (FSDP+LoRA, %d keys): %s",
-                                        len(_adapter_sd),
-                                        model_dir,
-                                    )
-                            _saved_as_peft = True
-                except ImportError:
-                    pass
-
-                if not _saved_as_peft:
-                    self.strategy.save_checkpoint(model, model_dir / "model.safetensors")
-            else:
-                unwrapped = getattr(model, "module", model)
-                if hasattr(unwrapped, "save_pretrained"):
-                    unwrapped.save_pretrained(model_dir)
-                else:
-                    torch.save(unwrapped.state_dict(), model_dir / "model.pt")
-
-            if name in self.optimizers:
-                torch.save(self.optimizers[name].state_dict(), model_dir / "optimizer.pt")
-            if name in self.schedulers:
-                torch.save(self.schedulers[name].state_dict(), model_dir / "scheduler.pt")
-
-        (ckpt_dir / "trainer_state.json").write_text(json.dumps({
-            "global_step": self.global_step,
-            "epoch_counter": self.epoch_counter,
-        }))
-        if self.scaler.is_enabled():
-            torch.save(self.scaler.state_dict(), ckpt_dir / "scaler.pt")
-        import yaml
-        (ckpt_dir / "recipe.yaml").write_text(yaml.dump(self._recipe_dict, allow_unicode=True))
-
     def _maybe_resume(self) -> None:
         """체크포인트에서 모든 모델 상태를 복원한다."""
-        import json
-
         job_config = getattr(self.settings.config, "job", None)
         if job_config is None:
             return
@@ -765,7 +541,11 @@ class RLTrainer:
 
         # checkpoint 경로 해석
         storage = getattr(self.settings.config, "storage", None)
-        ckpt_root = Path(storage.checkpoint_dir) if storage and hasattr(storage, "checkpoint_dir") and storage.checkpoint_dir else None
+        ckpt_root = (
+            Path(storage.checkpoint_dir)
+            if storage and hasattr(storage, "checkpoint_dir") and storage.checkpoint_dir
+            else None
+        )
         if resume_cfg == "auto":
             if ckpt_root is None:
                 return
@@ -780,40 +560,8 @@ class RLTrainer:
             logger.warning(f"Resume 체크포인트 없음: {ckpt_dir}")
             return
 
-        for name, model in {**self.trainable, **self.frozen}.items():
-            model_dir = ckpt_dir / name
-            if not model_dir.exists():
-                logger.warning(f"Resume: {name} 체크포인트 없음, 건너뜀")
-                continue
-
-            unwrapped = getattr(model, "module", model)
-            adapter_path = model_dir / "adapter_model.safetensors"
-            if adapter_path.exists() and hasattr(unwrapped, "load_adapter"):
-                unwrapped.load_adapter(model_dir, adapter_name="default")
-            elif (model_dir / "model.safetensors").exists():
-                from safetensors.torch import load_file
-                unwrapped.load_state_dict(load_file(model_dir / "model.safetensors"), strict=False)
-            elif (model_dir / "model.pt").exists():
-                unwrapped.load_state_dict(torch.load(model_dir / "model.pt", map_location="cpu", weights_only=True))
-
-            if name in self.optimizers and (model_dir / "optimizer.pt").exists():
-                self.optimizers[name].load_state_dict(
-                    torch.load(model_dir / "optimizer.pt", map_location="cpu", weights_only=True))
-            if name in self.schedulers and (model_dir / "scheduler.pt").exists():
-                self.schedulers[name].load_state_dict(
-                    torch.load(model_dir / "scheduler.pt", map_location="cpu", weights_only=True))
-
-        state_path = ckpt_dir / "trainer_state.json"
-        if state_path.exists():
-            state = json.loads(state_path.read_text())
-            self.global_step = state.get("global_step", 0)
-            self.epoch_counter = state.get("epoch_counter", 0)
-
-        scaler_path = ckpt_dir / "scaler.pt"
-        if scaler_path.exists() and self.scaler.is_enabled():
-            self.scaler.load_state_dict(torch.load(scaler_path, map_location="cpu", weights_only=True))
-
-        logger.info(f"Resumed from {ckpt_dir} (step={self.global_step})")
+        state = load_checkpoint(ckpt_dir)
+        self._load_checkpoint_state(state)
 
     # ── 학습 루프 ──
 
@@ -828,13 +576,12 @@ class RLTrainer:
         original_sigterm = signal.getsignal(signal.SIGTERM)
         original_sigint = signal.getsignal(signal.SIGINT)
 
-        def _signal_handler(signum: int, frame: Any) -> None:
+        def _signal_handler(signum: int, _frame: Any) -> None:
             sig_name = signal.Signals(signum).name
             # 첫 시그널만 기록한다. SIGTERM 수신 후 사용자가 Ctrl+C를 누르거나
             # 외부가 이중 신호를 보내도 `_stop_signal_name`이 덮어쓰이지 않게 하여
             # stopped_reason tag가 실제 종료 원인을 정확히 반영하도록 보장한다.
             # Trainer._signal_handler와 대칭.
-            # (spec-trainer-robustness-fixes cycle 1 — 1-3 race 방어)
             if not self._stop_requested:
                 logger.warning(
                     "Signal %s received, requesting graceful stop at next step boundary.",
@@ -943,7 +690,7 @@ class RLTrainer:
         #   FSDPStrategy      : policy는 FULL_SHARD → GPU당 param 조각, frozen은 NO_SHARD → GPU당 복제본
         #                       예: 8B bf16 policy 4 GiB/GPU + reference 16 GiB = ~20 GiB baseline
         #
-        # 로그 level 규칙 (spec-system-logging-cleanup §U3):
+        # 로그 level 규칙:
         #   DDP               : debug (운영 기본 조용, 설계상 shard 미적용이 정상)
         #   FSDP + ratio > 3  : warning (shard 미적용 의심)
         #   FSDP + ratio <= 3 : info (정상 baseline)
@@ -1044,8 +791,9 @@ class RLTrainer:
             _ckpt_dir = _rec_storage and getattr(_rec_storage, "checkpoint_dir", None)
         if _ckpt_dir:
             for _cb in self.callbacks:
-                if hasattr(_cb, "set_dirpath"):
-                    _cb.set_dirpath(_ckpt_dir)
+                _set = getattr(_cb, "set_dirpath", None)
+                if callable(_set):
+                    _set(_ckpt_dir)
 
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
@@ -1077,12 +825,14 @@ class RLTrainer:
             self._generation_kwargs = gen_config.model_dump(exclude_none=True) if hasattr(gen_config, "model_dump") else dict(gen_config)
 
         batch_idx = 0
+        step_loss: float | None = None
         step_logits = None  # on_batch_end 콜백용 마지막 스텝 logits
+        batch: dict = {}
 
         # OOM 관측 플래그 — train loop 이 torch.cuda.OutOfMemoryError 를 던지면
         # 내부 except 블록에서 True 로 세팅한 뒤 re-raise 한다. 기존 finally 블록
         # 안 stopped_reason 계산이 이 플래그를 최우선으로 확인하여 배너·summary
-        # 양쪽에 "oom" 라벨을 전파한다. (spec-system-logging-cleanup §U5)
+        # 양쪽에 "oom" 라벨을 전파한다.
         self._oom_observed = False
 
         # memory_history 시작 — recipe 의 monitoring.memory_history=True 에서만
@@ -1096,8 +846,7 @@ class RLTrainer:
                     mlflow_run_id = mlflow_run.info.run_id
                 self._log_mlflow_params()
 
-            # Run start banner (spec-system-logging-cleanup §U4).
-            # rank-0 only · is_json_mode 이면 자동 skip.
+            # Run start banner — rank-0 only · is_json_mode 이면 자동 skip.
             # max_steps 는 local 변수를 extra 로 힌트 — banner 포맷은 self.max_steps 를 쓰지만
             # epoch-only run 에서는 self.max_steps=None 이라 "-"으로 출력된다.
             self._log_run_banner("start", extra={"run_id": mlflow_run_id})
@@ -1264,7 +1013,7 @@ class RLTrainer:
                                 extra=extra_metrics,
                             )
 
-                            # Text step-progress (spec-system-logging-cleanup §U4).
+                            # Text step-progress.
                             # stdout은 policy/total만 — LoRA 세분값은 MLflow UI에서 확인.
                             _mon_cfg = self._recipe_dict.get("monitoring", {}) if isinstance(self._recipe_dict, dict) else {}
                             _every_n = int(_mon_cfg.get("log_every_n_steps", 10) or 10)
@@ -1308,7 +1057,6 @@ class RLTrainer:
                 # 재전파하여 torchrun 이 종료 상태를 정확히 인지하게 한다. 이 except
                 # 는 아래 finally 보다 먼저 실행되며, finally 블록은 여전히
                 # on_train_end / cleanup / end banner / summary 를 정상 처리한다.
-                # (spec-system-logging-cleanup §U5)
                 self._oom_observed = True
                 try:
                     self._dump_oom_summary()
@@ -1323,7 +1071,6 @@ class RLTrainer:
                 # 독립적으로 실행되어 MLflow run이 zombie 상태로 남지 않도록,
                 # on_train_end 호출을 별도 try/except로 감싼다.
                 # Trainer.train()과 동일 패턴.
-                # (spec-trainer-robustness-fixes cycle 1 — 1-1, 1-2 방어)
                 try:
                     avg_loss = total_loss / max(num_steps, 1)
                     try:
@@ -1332,9 +1079,8 @@ class RLTrainer:
                         logger.warning("on_train_end 콜백 실패: %s", e)
 
                     # stopped_reason 결정. OOM 관측이 최우선, 그 다음 signal > early_stop >
-                    # max_steps > completed. spec-system-logging-cleanup §U5 — OOM 관측
-                    # 시 "oom" 라벨을 end banner 및 MLflow summary 에 그대로 반영해
-                    # grep 으로 장애 원인을 파악할 수 있게 한다.
+                    # max_steps > completed. OOM 관측 시 "oom" 라벨을 end banner 및 MLflow
+                    # summary 에 그대로 반영해 grep 으로 장애 원인을 파악할 수 있게 한다.
                     if self._oom_observed:
                         stopped_reason = "oom"
                     elif self._stop_requested:
@@ -1365,7 +1111,7 @@ class RLTrainer:
                         )
                         fsdp_policy_sd = None
                     else:
-                        fsdp_policy_sd = self._gather_fsdp_policy_state_dict()
+                        fsdp_policy_sd = gather_fsdp_state_dict(self.policy, self._is_main_process)
 
                     if self.strategy is not None:
                         try:
@@ -1373,10 +1119,9 @@ class RLTrainer:
                         except Exception as e:
                             logger.warning(f"Strategy cleanup 실패: {e}")
 
-                    # End banner (spec-system-logging-cleanup §U4) —
-                    # summary 로깅 바로 전에 rank-0 한 줄 요약. grep 으로 run 의
-                    # 종료 상태를 파악 가능하게 한다. checkpoints_saved 는 rank-0
-                    # 쪽에서 log_mlflow_summary 가 집계하므로 여기에서는 최소
+                    # End banner — summary 로깅 바로 전에 rank-0 한 줄 요약.
+                    # grep 으로 run 의 종료 상태를 파악 가능하게 한다. checkpoints_saved
+                    # 는 rank-0 쪽에서 log_mlflow_summary 가 집계하므로 여기에서는 최소
                     # 정보만 보낸다(배너는 별도 집계 하지 않고 사후 단계의 값을
                     # 사용한다 — 순서상 callbacks 누적은 on_train_end 완료 시점에
                     # 이미 최종 상태다).
@@ -1398,7 +1143,7 @@ class RLTrainer:
                     # memory_history snapshot — 정상 종료·OOM·signal 모두에서 실행되어야
                     # 프로파일링 파일이 확실히 남는다. 내부적으로 active=False 일 때는
                     # no-op. _log_mlflow_summary 의 임의 예외가 snapshot 을 못 남기게
-                    # 하지 않도록 별도 try/except 로 방어한다. (§U5)
+                    # 하지 않도록 별도 try/except 로 방어한다.
                     try:
                         self._maybe_dump_memory_snapshot(_mem_history_active)
                     except Exception as snap_err:  # noqa: BLE001
@@ -1445,13 +1190,13 @@ class RLTrainer:
         """Preference 배치를 chosen/rejected로 분리하여 causal forward 2회 호출."""
         out = {}
         for name, m in models.items():
-            chosen_out = self._forward_model(
+            chosen_out = _features_forward_model(
                 m,
                 {"input_ids": batch["chosen_input_ids"],
                  "attention_mask": batch.get("chosen_attention_mask")},
                 role=name,
             )
-            rejected_out = self._forward_model(
+            rejected_out = _features_forward_model(
                 m,
                 {"input_ids": batch["rejected_input_ids"],
                  "attention_mask": batch.get("rejected_attention_mask")},
@@ -1488,17 +1233,17 @@ class RLTrainer:
                 trainable_out = self._forward_preference(self.trainable, batch)
             else:
                 with torch.no_grad():
-                    frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
+                    frozen_out = {name: _features_forward_model(m, batch, role=name) for name, m in self.frozen.items()}
                 # needs_logits=False + needs_hidden_states=True인 fused-loss 알고리즘
                 # (예: WeightedNTPLoss)은 trainable forward를 스킵하여 logits tensor와
                 # LlamaForCausalLM backbone activation 중복을 제거한다. 빈 dict로 초기화하여
                 # downstream hidden/head 주입 경로(setdefault)와 호환성을 유지한다.
                 if needs_logits:
-                    trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
+                    trainable_out = {name: _features_forward_model(m, batch, role=name) for name, m in self.trainable.items()}
                 else:
                     trainable_out = {name: {} for name in self.trainable}
                 if needs_hidden and "policy" in self.trainable:
-                    hidden, head_weight = self._extract_hidden_states_and_head(
+                    hidden, head_weight = extract_hidden_states_and_head(
                         self.trainable["policy"], batch
                     )
                     trainable_out.setdefault("policy", {})["hidden_states"] = hidden
@@ -1574,7 +1319,7 @@ class RLTrainer:
 
         # 2. Old log_probs (update 전 policy 상태)
         with torch.no_grad():
-            old_out = self._forward_model(self.policy, {"input_ids": generated_ids, "attention_mask": gen_mask}, role="policy")
+            old_out = _features_forward_model(self.policy, {"input_ids": generated_ids, "attention_mask": gen_mask}, role="policy")
             old_logits = old_out["logits"]
             old_log_probs = compute_log_probs(old_logits, generated_ids)
 
@@ -1582,7 +1327,7 @@ class RLTrainer:
         gen_input = {"input_ids": generated_ids, "attention_mask": gen_mask}
         with torch.no_grad():
             frozen_out = {
-                name: self._forward_model(m, gen_input, role=name)
+                name: _features_forward_model(m, gen_input, role=name)
                 for name, m in self.frozen.items()
             }
 
@@ -1610,16 +1355,16 @@ class RLTrainer:
                 gen_forward_batch = {"input_ids": generated_ids, "attention_mask": gen_mask}
                 # needs_logits=False 알고리즘은 trainable forward를 스킵 (offline 경로와 동일 패턴).
                 # rollout 단계의 old_logits forward(위 L1544)는 PPO/GRPO의 KL penalty 계산에 필수이므로
-                # 플래그와 무관하게 유지된다 (spec §Out of scope).
+                # 플래그와 무관하게 유지된다.
                 if needs_logits:
                     trainable_out = {
-                        name: self._forward_model(m, gen_forward_batch, role=name)
+                        name: _features_forward_model(m, gen_forward_batch, role=name)
                         for name, m in self.trainable.items()
                     }
                 else:
                     trainable_out = {name: {} for name in self.trainable}
                 if needs_hidden and "policy" in self.trainable:
-                    hidden, head_weight = self._extract_hidden_states_and_head(
+                    hidden, head_weight = extract_hidden_states_and_head(
                         self.trainable["policy"], gen_forward_batch
                     )
                     trainable_out.setdefault("policy", {})["hidden_states"] = hidden
@@ -1693,304 +1438,4 @@ class RLTrainer:
         else:
             return logits.squeeze()
 
-    @staticmethod
-    def _extract_logits(out):
-        if hasattr(out, "logits"):
-            return out.logits
-        if isinstance(out, dict):
-            return out.get("logits", out.get("output"))
-        return out
 
-    # ------------------------------------------------------------------ #
-    #  Framework-agnostic hidden-states + head-weight dispatcher         #
-    #  Algorithm이 ``needs_hidden_states=True``를 선언하면 train loop이    #
-    #  ``_extract_hidden_states_and_head(policy, batch)``를 호출하여       #
-    #  fused linear cross-entropy 같은 memory-efficient 경로를 활성화.    #
-    # ------------------------------------------------------------------ #
-
-    def _extract_hidden_states_and_head(
-        self,
-        model: nn.Module,
-        batch: dict,
-        layer_idx: int = -1,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Framework-agnostic dispatcher for (hidden, head_weight) extraction.
-
-        Priority:
-            1. Model의 ``extract_features_and_head`` override (BaseModel subclass 등).
-            2. HF ``PreTrainedModel`` 기본 — ``output_hidden_states=True`` 경유
-               (PEFT 래핑 ``base_model.model`` 체인 투과 포함).
-            3. timm 모델 기본 — ``forward_features`` + ``get_classifier``.
-            4. torchvision ``ResNet`` 계열 기본 — manual layer forward + ``model.fc``.
-            5. 그 외 — ``NotImplementedError`` with guidance.
-
-        Returns:
-            (hidden, head_weight):
-              - hidden: framework-dependent shape. NLP causal LM은 ``(B, S, H)``.
-              - head_weight: output projection weight. ``(V, H)`` 또는 ``(C, H)``.
-        """
-        # DDP/FSDP wrapper 언래핑 — 래핑된 모델은 .module으로 실제 모델에 접근
-        unwrapped = getattr(model, "module", model)
-
-        # Priority 1: 모델의 override (BaseModel subclass 또는 framework wrapper)
-        if hasattr(unwrapped, "extract_features_and_head"):
-            try:
-                return unwrapped.extract_features_and_head(batch, layer_idx=layer_idx)
-            except NotImplementedError:
-                # BaseModel의 기본 구현이 NotImplementedError이므로 dispatcher로 위임
-                pass
-
-        # Priority 2: HF PreTrainedModel (직접 또는 PEFT 래핑 투과).
-        # PeftModel은 HF PreTrainedModel을 상속하지 않으므로 isinstance 직접 체크에
-        # 걸리지 않는다. PeftModel.base_model(LoraModel).model(PreTrainedModel) 경로로
-        # 내려가면 LM head가 살아있는 진짜 PreTrainedModel이 나온다.
-        # 비-PEFT HF 모델(LlamaForCausalLM 등)은 먼저 isinstance에 걸려 언래핑 skip.
-        try:
-            from transformers import PreTrainedModel
-
-            if isinstance(unwrapped, PreTrainedModel):
-                return self._extract_hf_pretrained(unwrapped, batch, layer_idx)
-            peft_base = getattr(unwrapped, "base_model", None)
-            peft_inner = getattr(peft_base, "model", None) if peft_base is not None else None
-            if peft_inner is not None and isinstance(peft_inner, PreTrainedModel):
-                # [2026-04-23] peft_inner(벗겨진 LlamaForCausalLM) 직접 호출은
-                # PeftModel.forward의 adapter state 관리를 우회해 LoRA delta가
-                # computation graph에서 누락된다 (grad_norm=0.00 재현 확인).
-                # unwrapped(PeftModel)를 그대로 전달하면 base_model.__call__이
-                # LoraModel → LlamaForCausalLM 체인을 타고 LoRA forward가 보존된다.
-                # PeftModel은 __getattr__로 .base_model·.get_output_embeddings()를
-                # 모두 위임하므로 _extract_hf_pretrained 내부 로직과 호환된다.
-                return self._extract_hf_pretrained(unwrapped, batch, layer_idx)
-        except ImportError:
-            pass
-
-        # Priority 3: timm 모델
-        try:
-            import timm.models
-
-            # timm 모델은 일반적으로 `default_cfg` 속성을 가지며,
-            # `forward_features`/`get_classifier` 메서드를 보유한다.
-            is_timm = (
-                hasattr(unwrapped, "default_cfg")
-                and hasattr(unwrapped, "forward_features")
-                and hasattr(unwrapped, "get_classifier")
-            )
-            # timm.models 모듈 import가 성공한 경우에만 timm 경로 진입
-            _ = timm.models  # 린터 무시 + 명시적 import 의존
-            if is_timm:
-                return self._extract_timm(unwrapped, batch)
-        except ImportError:
-            pass
-
-        # Priority 4: torchvision ResNet 계열
-        try:
-            from torchvision.models.resnet import ResNet
-
-            if isinstance(unwrapped, ResNet):
-                return self._extract_torchvision_resnet(unwrapped, batch)
-        except ImportError:
-            pass
-
-        # Priority 5: 미지원 모델 — 명확한 안내 메시지
-        raise NotImplementedError(
-            f"Model {type(unwrapped).__name__}의 extract_features_and_head "
-            "기본 구현이 없습니다. BaseModel을 상속하고 override하거나, "
-            "지원되는 framework(HF PreTrainedModel / timm / torchvision ResNet)로 "
-            "감싸세요."
-        )
-
-    def _extract_hf_pretrained(
-        self,
-        model: nn.Module,
-        batch: dict,
-        layer_idx: int = -1,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """HF ``PreTrainedModel`` 기본 구현.
-
-        ``hidden_states[layer_idx]``와 ``get_output_embeddings().weight``을 반환한다.
-        기본(``layer_idx=-1``)에서는 ``output_hidden_states=True``로 32 layer tuple을
-        받는 대신 ``base_model`` property로 inner encoder를 직접 호출해
-        ``last_hidden_state``만 꺼내는 효율 경로를 사용한다 (메모리 절감, 본 함수
-        docstring 아래 주석 참조).
-        """
-        # 효율 경로 vs full-tuple 경로 분기.
-        #
-        # ``output_hidden_states=True``는 HF가 **모든 layer의 hidden state**를
-        # tuple로 저장하여 forward 중 activation graph에 상주시킨다. Llama-3-8B
-        # (32 layer) + bs=32 + seq=1879 + bf16 기준 약 14.5 GiB 오버헤드
-        # (2026-04-19 U6 sanity snapshot 실측: rl_trainer.py:1579 at 14.56 GiB).
-        # 현재 첫 consumer(weighted_ntp)는 항상 layer_idx=-1만 사용하므로 이
-        # 전부를 저장할 이유가 없다.
-        #
-        # PreTrainedModel의 ``base_model`` property는 ``base_model_prefix``에
-        # 해당하는 inner encoder(LlamaForCausalLM.model → LlamaModel,
-        # GPT2LMHeadModel.transformer → GPT2Model 등)를 반환. 이 base encoder를
-        # 직접 호출하면 ``last_hidden_state``만 받고 중간 layer tuple은 생성되지
-        # 않는다. LoRA 는 linear module in-place swap이므로 base encoder forward
-        # 에도 LoRA delta가 정상 반영된다.
-        #
-        # layer_idx != -1 (드문 케이스)이거나 base_model이 self를 가리키는 희귀
-        # 모델에서는 full-tuple fallback.
-        base_encoder = getattr(model, "base_model", None)
-        use_efficient_path = (
-            layer_idx == -1
-            and base_encoder is not None
-            and base_encoder is not model
-        )
-        # [A/B 테스트 2026-04-23] efficient path가 peft LoRA computation graph를
-        # 끊는지 확인하기 위해 강제 비활성화. sincere-gnat-917 재현(grad_norm=0.00
-        # 4-step 연속)의 원인이 이 경로인지 판정. fallback path(아래 else)는
-        # LlamaForCausalLM 전체를 output_hidden_states=True로 통과시킨다.
-        use_efficient_path = False
-        hidden: torch.Tensor | None = None
-        if use_efficient_path:
-            base_out = base_encoder(
-                input_ids=batch["input_ids"],
-                attention_mask=batch.get("attention_mask"),
-            )
-            hidden = getattr(base_out, "last_hidden_state", None)
-            if hidden is None:
-                # base encoder가 last_hidden_state를 안 내는 edge case → fallback
-                use_efficient_path = False
-        if not use_efficient_path:
-            out = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch.get("attention_mask"),
-                output_hidden_states=True,
-            )
-            hidden_states = getattr(out, "hidden_states", None)
-            if hidden_states is None:
-                raise NotImplementedError(
-                    f"HF 모델 {type(model).__name__}이 hidden_states를 반환하지 않습니다. "
-                    "extract_features_and_head를 override하세요."
-                )
-            hidden = hidden_states[layer_idx]
-
-        output_embeddings = model.get_output_embeddings()
-        if output_embeddings is None or getattr(output_embeddings, "weight", None) is None:
-            raise NotImplementedError(
-                f"HF 모델 {type(model).__name__}에는 output embedding이 없습니다 "
-                "(encoder-only 모델 등). extract_features_and_head를 override하세요."
-            )
-        head_weight = output_embeddings.weight
-        # [PROBE 2026-04-23] 첫 호출에서 hidden/head의 그래프 연결 + dtype 상태 출력.
-        # grad_norm=0.00 원인 진단: extract 단계에서 dtype mismatch가 있는가 확인.
-        global _probe_extract_fired
-        if not _probe_extract_fired:
-            _probe_extract_fired = True
-            logger.info(
-                "PROBE[extract] model_type=%s use_efficient=%s "
-                "hidden.dtype=%s hidden.requires_grad=%s hidden.grad_fn=%s hidden.shape=%s "
-                "head.dtype=%s head.requires_grad=%s head.shape=%s",
-                type(model).__name__, use_efficient_path,
-                hidden.dtype, hidden.requires_grad,
-                type(hidden.grad_fn).__name__ if hidden.grad_fn is not None else None,
-                tuple(hidden.shape),
-                head_weight.dtype, head_weight.requires_grad, tuple(head_weight.shape),
-            )
-        return hidden, head_weight
-
-    def _extract_timm(
-        self,
-        model: nn.Module,
-        batch: dict,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """timm 모델 기본 구현.
-
-        ``forward_features`` + ``get_classifier``의 weight을 반환한다.
-        ``Identity`` classifier(num_classes=0)는 지원 불가.
-        """
-        pixel_values = batch.get("pixel_values")
-        if pixel_values is None:
-            raise NotImplementedError(
-                "timm 모델은 batch['pixel_values']를 요구합니다. "
-                "현재 batch keys: " + ", ".join(sorted(batch.keys()))
-            )
-        features = model.forward_features(pixel_values)
-        classifier = model.get_classifier()
-        if isinstance(classifier, nn.Identity):
-            raise NotImplementedError(
-                f"timm 모델 {type(model).__name__}의 classifier가 Identity입니다 "
-                "(num_classes=0). extract_features_and_head를 override하세요."
-            )
-        weight = getattr(classifier, "weight", None)
-        if weight is None:
-            raise NotImplementedError(
-                f"timm 모델 {type(model).__name__}의 classifier에 weight 속성이 "
-                "없습니다. extract_features_and_head를 override하세요."
-            )
-        return features, weight
-
-    def _extract_torchvision_resnet(
-        self,
-        model: nn.Module,
-        batch: dict,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """torchvision ``ResNet`` 기본 구현.
-
-        ``conv1``~``avgpool``까지 수동 forward 후 ``flatten`` 결과를 hidden으로,
-        ``model.fc.weight``을 head로 반환한다. Custom ResNet variant는
-        ``extract_features_and_head`` override 필요.
-        """
-        x = batch.get("pixel_values")
-        if x is None:
-            raise NotImplementedError(
-                "torchvision ResNet은 batch['pixel_values']를 요구합니다. "
-                "현재 batch keys: " + ", ".join(sorted(batch.keys()))
-            )
-        x = model.conv1(x)
-        x = model.bn1(x)
-        x = model.relu(x)
-        x = model.maxpool(x)
-        x = model.layer1(x)
-        x = model.layer2(x)
-        x = model.layer3(x)
-        x = model.layer4(x)
-        x = model.avgpool(x)
-        hidden = torch.flatten(x, 1)
-
-        fc = getattr(model, "fc", None)
-        if fc is None or getattr(fc, "weight", None) is None:
-            raise NotImplementedError(
-                f"torchvision 모델 {type(model).__name__}의 fc가 없습니다. "
-                "extract_features_and_head를 override하세요."
-            )
-        head_weight = fc.weight
-        return hidden, head_weight
-
-    def _forward_model(self, model: nn.Module, batch: dict, role: str = "policy") -> dict:
-        """Causal forward를 수행한다.
-
-        role에 따라 출력 키가 달라진다:
-        - "policy", "reference" → {"logits": (batch, seq, vocab)}
-        - "value" → {"values": (batch, seq)} — scalar head 또는 LM head[:, :, 0]
-        - "reward" → {"reward": (batch,)} 우선, fallback으로 {"logits": tensor}
-
-        Preference 배치(chosen/rejected)는 caller에서 분리하여 2회 호출한다.
-        """
-        result = {}
-
-        if "input_ids" in batch:
-            out = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch.get("attention_mask"),
-            )
-            logits = self._extract_logits(out)
-
-            if role == "value":
-                # value model: logits → (batch, seq) scalar values
-                if logits.dim() == 3 and logits.shape[-1] == 1:
-                    result["values"] = logits.squeeze(-1)
-                elif logits.dim() == 3:
-                    result["values"] = logits[:, :, 0]
-                else:
-                    result["values"] = logits
-            elif role == "reward":
-                # reward model: 명시적 "reward" 키 우선, 없으면 logits 반환
-                if isinstance(out, dict) and "reward" in out:
-                    result["reward"] = out["reward"]
-                result["logits"] = logits
-            else:
-                result["logits"] = logits
-
-        return result

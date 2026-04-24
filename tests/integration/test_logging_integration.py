@@ -262,10 +262,12 @@ class TestMonitoringSpecFlowsToStepProgress:
         # stub: helper 시그니처가 요구하는 최소 attribute 만 제공.
         # ``_fmt_eta`` 는 ``self._fmt_eta(...)`` 로 호출되므로 stub 에 staticmethod 를
         # 위임으로 붙여 둔다.
+        _mock_optimizer = SimpleNamespace(param_groups=[{"lr": 1e-4}])
         stub = SimpleNamespace(
-            optimizers={"policy": SimpleNamespace(param_groups=[{"lr": 1e-4}])},
+            optimizers={"policy": _mock_optimizer},
             global_step=50,
             _fmt_eta=RLTrainer._fmt_eta,
+            _optimizer_for_progress_log=lambda self=None: _mock_optimizer,
         )
 
         import time as _time

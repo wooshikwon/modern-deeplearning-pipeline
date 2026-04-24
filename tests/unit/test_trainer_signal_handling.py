@@ -37,6 +37,7 @@ from torch import nn
 
 _TRAINER = Path(__file__).parents[2] / "mdp" / "training" / "trainer.py"
 _RL_TRAINER = Path(__file__).parents[2] / "mdp" / "training" / "rl_trainer.py"
+_BASE_TRAINER = Path(__file__).parents[2] / "mdp" / "training" / "_base.py"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -98,10 +99,13 @@ class TestTrainerSignalHandlerStructure:
         )
 
     def test_should_stop_honors_stop_requested_flag(self) -> None:
-        """_should_stop()이 self._stop_requested를 OR하는 형태로 확장되어야 한다."""
-        src = _get_method_source(_TRAINER, "Trainer", "_should_stop")
+        """_should_stop()이 self._stop_requested를 OR하는 형태로 확장되어야 한다.
+
+        spec-training-restructure U2 이후 _should_stop 은 BaseTrainer 로 이동됨.
+        """
+        src = _get_method_source(_BASE_TRAINER, "BaseTrainer", "_should_stop")
         assert "self._stop_requested" in src, (
-            "Trainer._should_stop()이 self._stop_requested를 확인하지 않는다. "
+            "BaseTrainer._should_stop()이 self._stop_requested를 확인하지 않는다. "
             "signal handler가 flag를 세워도 루프가 break되지 않는다."
         )
 
@@ -157,9 +161,10 @@ class TestRLTrainerSignalHandlerStructure:
         )
 
     def test_should_stop_honors_stop_requested_flag(self) -> None:
-        src = _get_method_source(_RL_TRAINER, "RLTrainer", "_should_stop")
+        """spec-training-restructure U2 이후 _should_stop 은 BaseTrainer 로 이동됨."""
+        src = _get_method_source(_BASE_TRAINER, "BaseTrainer", "_should_stop")
         assert "self._stop_requested" in src, (
-            "RLTrainer._should_stop()이 self._stop_requested를 확인하지 않는다."
+            "BaseTrainer._should_stop()이 self._stop_requested를 확인하지 않는다."
         )
 
     def test_signal_handler_preserves_first_signal_guard(self) -> None:

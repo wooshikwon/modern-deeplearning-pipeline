@@ -26,7 +26,7 @@ import torch
 from torch import Tensor, nn
 
 from mdp.models.base import BaseModel
-from mdp.training.rl_trainer import RLTrainer
+from mdp.training._features import extract_hidden_states_and_head
 
 
 # ────────────────────────────────────────────────────────────── #
@@ -92,22 +92,8 @@ class _CustomModelWithOverride(BaseModel):
 
 
 def _call_dispatcher(model: nn.Module, batch: dict, layer_idx: int = -1) -> tuple[Tensor, Tensor]:
-    """RLTrainer.__init__을 우회해 dispatcher만 호출.
-
-    공통 `trainer_stub`을 하나 만들어 3 헬퍼(`_extract_hf_pretrained`,
-    `_extract_timm`, `_extract_torchvision_resnet`)를 bind한다.
-    """
-    trainer_stub = SimpleNamespace()
-    trainer_stub._extract_hf_pretrained = RLTrainer._extract_hf_pretrained.__get__(
-        trainer_stub
-    )
-    trainer_stub._extract_timm = RLTrainer._extract_timm.__get__(trainer_stub)
-    trainer_stub._extract_torchvision_resnet = (
-        RLTrainer._extract_torchvision_resnet.__get__(trainer_stub)
-    )
-    return RLTrainer._extract_hidden_states_and_head(
-        trainer_stub, model, batch, layer_idx=layer_idx
-    )
+    """_features.extract_hidden_states_and_head 직접 호출."""
+    return extract_hidden_states_and_head(model, batch, layer_idx=layer_idx)
 
 
 def test_dispatcher_priority_1_custom_override() -> None:
