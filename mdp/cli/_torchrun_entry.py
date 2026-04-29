@@ -48,6 +48,13 @@ def run_training(settings) -> dict:
 
     RL recipe(settings.recipe.rl이 존재)이면 RLTrainer로, 아니면 SFT Trainer로 디스패치한다.
     """
+    # Liger-Kernel monkey-patch는 HF `from_pretrained`(Factory.create_model 내부)
+    # 이전에 수행되어야 효과가 있다. 단일 GPU 실행 경로와 torchrun worker subprocess
+    # 양쪽에서 이 함수를 공통으로 거치므로 여기에 배치한다. Idempotent.
+    # 상세: mdp/_liger_patch.py, spec-algorithm-hidden-states-support §U2.
+    from mdp._liger_patch import apply_liger_patches
+    apply_liger_patches()
+
     if getattr(settings.recipe, "rl", None) is not None:
         return run_rl_training(settings)
 
@@ -117,6 +124,8 @@ def main() -> None:
     # create_dataloaders 이전에 process group을 초기화한다.
     _init_distributed_if_torchrun(settings)
 
+    # Liger monkey-patch는 run_training() 내부에서 수행된다 (Factory.create_model
+    # 호출 이전). 여기서는 dist init만 보장.
     result = run_training(settings)
 
     # rank-0만 결과를 저장한다

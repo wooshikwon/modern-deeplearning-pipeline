@@ -1,0 +1,55 @@
+name: gpt2-warmup-custom-factors
+task: text_generation
+
+# spec-lr-warmup-configurable 결과 도입된 `warmup_start_factor` / `warmup_end_factor`
+# Recipe 필드가 fixture 레벨에서도 파싱·resolve된다는 것을 보장하는 최소 fixture.
+# 기존 baseline fixture(gpt2-finetune-text, qwen25-qlora-instruct, vit-lora-cifar10)는
+# 두 필드 없이 MDP 기본값(1e-8 / 1.0)으로 동작해야 하므로 손대지 않는다 — 이 파일은
+# 비표준 factor 값(0.01)을 일부러 사용하여 "필드가 전달된다"는 사실을 회귀 고정한다.
+
+model:
+  _component_: AutoModelForCausalLM
+  pretrained: hf://gpt2
+
+data:
+  dataset:
+    _component_: HuggingFaceDataset
+    source: wikitext
+    subset: wikitext-103-v1
+    split: train
+    fields: {text: text}
+    tokenizer: gpt2
+    max_length: 1024
+  collator:
+    _component_: CausalLMCollator
+    tokenizer: gpt2
+  dataloader:
+    batch_size: 8
+    num_workers: 4
+    pin_memory: true
+    persistent_workers: true
+    prefetch_factor: 2
+    drop_last: true
+
+training:
+  epochs: 1
+  precision: bf16
+  gradient_accumulation_steps: 1
+  gradient_clip_max_norm: 1.0
+
+optimizer:
+  _component_: AdamW
+  lr: 5e-5
+  weight_decay: 0.1
+
+scheduler:
+  _component_: CosineAnnealingLR
+  T_max: 1
+  eta_min: 1e-6
+  warmup_ratio: 0.03
+  warmup_start_factor: 0.01   # 비표준 테스트값 — Recipe → LinearLR 전달 회귀 방지
+  warmup_end_factor: 1.0
+
+metadata:
+  author: wesley
+  description: "GPT-2 fine-tune fixture with custom warmup_start_factor/warmup_end_factor (spec-lr-warmup-configurable)."

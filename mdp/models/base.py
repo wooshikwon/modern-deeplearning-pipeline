@@ -106,6 +106,46 @@ class BaseModel(nn.Module, ABC):
         """자기회귀 생성. 지원하지 않는 모델은 NotImplementedError를 발생시킨다."""
         raise NotImplementedError("이 모델은 generate()를 지원하지 않습니다")
 
+    def extract_features_and_head(
+        self,
+        batch: dict[str, Tensor],
+        layer_idx: int = -1,
+    ) -> tuple[Tensor, Tensor]:
+        """Algorithm이 ``needs_hidden_states=True``일 때 Trainer가 호출.
+
+        Fused Linear Cross-Entropy 같은 memory-efficient loss 경로를 위해
+        logits을 materialize하지 않고 hidden representation과 output head weight을
+        반환한다.
+
+        Returns:
+            (hidden_states, output_head_weight) 튜플.
+            - hidden_states: 지정된 representation layer의 출력.
+              NLP causal LM: ``(B, S, H)``.
+              Vision transformer: ``(B, N_patch [+CLS], H)``.
+              Vision CNN: flatten된 feature ``(B, H)``.
+            - output_head_weight: output projection의 weight matrix.
+              NLP: ``lm_head.weight`` ``(V, H)``.
+              Vision: classifier ``weight`` ``(C, H)``.
+
+        기본 구현은 ``NotImplementedError``. BaseModel 서브클래스가
+        이 메서드를 override하거나, HF/timm/torchvision 모델은
+        RLTrainer의 framework dispatcher가 기본 구현을 제공한다.
+
+        Args:
+            batch: forward가 받는 것과 동일 형식의 입력 dict.
+            layer_idx: 어느 layer의 hidden을 뽑을지. -1은 마지막 representation
+                layer. HF 계열은 embedding layer가 index 0, 마지막 transformer
+                block이 index -1이다.
+
+        Raises:
+            NotImplementedError: 서브클래스가 override하지 않은 경우.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__}은 extract_features_and_head를 "
+            "override하지 않았습니다. algorithm.needs_hidden_states=True와 "
+            "함께 사용하려면 이 메서드를 구현하세요."
+        )
+
     @abstractmethod
     def training_step(self, batch: dict[str, Tensor]) -> Tensor:
         """학습 스텝. 스칼라 loss를 반환한다."""

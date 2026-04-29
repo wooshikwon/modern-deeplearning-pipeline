@@ -33,6 +33,16 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
+from mdp.training._mlflow_logging import (
+    log_epoch_metrics,
+    log_static_params,
+    log_step_metrics,
+    log_summary,
+)
+from mdp.training._schedulers import (
+    create_scheduler_with_warmup,
+    parse_warmup_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,31 +96,15 @@ class RLTrainer:
                 self.optimizers[name] = klass(model.parameters(), **kwargs)
                 if spec.get("scheduler") is not None:
                     sched_config = dict(spec["scheduler"])
-                    interval = sched_config.pop("interval", "step")
-                    warmup_steps = sched_config.pop("warmup_steps", 0)
-                    warmup_ratio = sched_config.pop("warmup_ratio", 0.0)
+                    warmup = parse_warmup_config(
+                        sched_config, self._estimate_total_steps()
+                    )
                     s_klass, s_kwargs = self.resolver.resolve_partial(sched_config)
-                    scheduler = s_klass(self.optimizers[name], **s_kwargs)
-                    if warmup_steps > 0 and warmup_ratio > 0:
-                        raise ValueError(
-                            "warmup_steps와 warmup_ratio를 동시에 지정할 수 없습니다. "
-                            f"warmup_steps={warmup_steps}, warmup_ratio={warmup_ratio}"
-                        )
-                    if warmup_ratio > 0:
-                        total_steps = self._estimate_total_steps()
-                        warmup_steps = int(total_steps * warmup_ratio)
-                    if warmup_steps > 0:
-                        warmup = torch.optim.lr_scheduler.LinearLR(
-                            self.optimizers[name], start_factor=1e-8, end_factor=1.0,
-                            total_iters=warmup_steps,
-                        )
-                        scheduler = torch.optim.lr_scheduler.SequentialLR(
-                            self.optimizers[name],
-                            schedulers=[warmup, scheduler],
-                            milestones=[warmup_steps],
-                        )
-                    self.schedulers[name] = scheduler
-                    self.scheduler_intervals[name] = interval
+                    base_scheduler = s_klass(self.optimizers[name], **s_kwargs)
+                    self.schedulers[name] = create_scheduler_with_warmup(
+                        self.optimizers[name], base_scheduler, warmup
+                    )
+                    self.scheduler_intervals[name] = warmup.interval
             else:
                 model.eval()
                 for p in model.parameters():
@@ -310,78 +304,70 @@ class RLTrainer:
             logger.warning(f"MLflow run 시작 실패: {e}")
             return nullcontext()
 
-    def _mlflow_log_metric(self, key: str, value: float, step: int) -> None:
-        if not self._is_main_process:
-            return
-        try:
-            import mlflow
-            mlflow.log_metric(key, value, step=step)
-        except Exception as e:
-            logger.debug("MLflow metric 로깅 실패 (key=%s): %s", key, e)
-
     def _log_mlflow_params(self) -> None:
-        try:
-            import mlflow
+        """Run 시작 시 static param 로깅을 공용 헬퍼에 위임한다.
 
-            recipe = self.settings.recipe
-            policy_spec = recipe.rl.models["policy"]
-            params = {
-                "task": recipe.task,
-                "algorithm": type(self.algorithm).__name__,
-                "policy_class": policy_spec.get("_component_", "unknown"),
-                "policy_pretrained": policy_spec.get("pretrained", "none"),
-                "dataset_source": recipe.data.dataset.get("source", "unknown"),
-                "batch_size": recipe.data.dataloader.batch_size,
-                "max_steps": self.max_steps or 0,
-                "precision": recipe.training.precision,
-                "policy_lr": self.optimizers["policy"].param_groups[0]["lr"],
-            }
-            policy_adapter = policy_spec.get("adapter")
-            if policy_adapter is not None:
-                params["adapter_component"] = policy_adapter.get("_component_", "unknown")
-                if policy_adapter.get("r") is not None:
-                    params["adapter_r"] = policy_adapter["r"]
-            # Strategy — Config.compute.distributed
-            dist = self.settings.config.compute.distributed
-            if isinstance(dist, dict) and dist.get("strategy"):
-                s = dist["strategy"]
-                params["strategy"] = s.get("_component_", s) if isinstance(s, dict) else s
-            mlflow.log_params(params)
-        except Exception as e:
-            logger.warning(f"MLflow params 로깅 실패: {e}")
+        `_mlflow_logging.log_static_params`가 원칙 2(optimizer 인스턴스 상태는 param으로
+        내보내지 않음)·원칙 3(multi-group slash 네이밍)를 일괄 책임진다. 본 래퍼는
+        호출 타이밍과 rank 가드(caller 쪽 `_is_main_process`) 외에는 어떤 결정도
+        내리지 않는다 — Trainer와 동일한 대칭 계약.
+        """
+        log_static_params(self.settings.recipe, self.settings)
 
-    def _log_mlflow_summary(self, training_duration: float, stopped_reason: str = "completed", policy_state_dict: "dict | None" = None) -> None:
+    def _log_mlflow_summary(
+        self,
+        training_duration: float,
+        stopped_reason: str = "completed",
+        policy_state_dict: "dict | None" = None,
+    ) -> None:
+        """Run 종료 시 summary 로깅을 공용 헬퍼에 위임한다.
+
+        Trainer와의 대칭을 위해 `final_metrics=self.last_metrics`를 포함한다(U3의
+        핵심 변경). `last_metrics`가 비어 있으면 `log_summary` 내부가 guard로 skip
+        하므로 caller는 그대로 넘기면 된다. Checkpoint 집계 결과는 기존대로
+        `self._checkpoints_saved`에 보존해 `train()` 반환 dict가 그대로 쓸 수 있도록
+        한다(spec-trainer-robustness-fixes 호환).
+
+        policy artifact export는 FSDP all-gather·tempdir 수명 관리가 있어
+        `log_summary`의 범용 `artifact_dirs` 경로로 흡수하지 않고 별도로 호출한다.
+        """
         # Checkpoint 집계 — `_common.aggregate_checkpoint_stats`가 Trainer와 동일한
         # duck typing 규칙을 단일 구현으로 제공한다. RL 구성은 Critic + Policy 각각에
         # ModelCheckpoint를 붙일 수 있어 여러 콜백이 공존해도 `saved_checkpoints`
         # 속성을 가진 콜백만 누적된다. `monitor_hint`는 아래 zero-warning에서 사용.
-        total_checkpoints, best_path, monitor_hint = aggregate_checkpoint_stats(
-            self.callbacks,
-        )
+        checkpoint_stats = aggregate_checkpoint_stats(self.callbacks)
+        total_checkpoints, _best_path, monitor_hint = checkpoint_stats
         self._checkpoints_saved = total_checkpoints
 
+        # sanitized_config — Trainer와 동일 출처·동일 파일 경로.
         try:
-            import mlflow
             from mdp.utils.sanitize import sanitize_config
+            sanitized_config = sanitize_config(self.settings.model_dump())
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"sanitize_config 실패: {e}")
+            sanitized_config = None
 
-            mlflow.log_metrics({
-                "training_duration_seconds": training_duration,
-                "total_steps": self.global_step,
-            })
-            mlflow.set_tag("stopped_reason", stopped_reason)
-            mlflow.set_tag("checkpoints_saved", str(total_checkpoints))
-            if best_path is not None:
-                mlflow.set_tag("best_checkpoint", str(best_path))
-            config_dict = sanitize_config(self.settings.model_dump())
-            mlflow.log_dict(config_dict, "config/settings.json")
+        log_summary(
+            training_duration_seconds=training_duration,
+            total_steps=self.global_step,
+            stopped_reason=stopped_reason,
+            final_metrics=self.last_metrics,
+            checkpoint_stats=checkpoint_stats,
+            sanitized_config=sanitized_config,
+            artifact_dirs=(),
+        )
 
-            # policy adapter를 MLflow artifact로 저장
-            self._export_policy_artifact(policy_state_dict=policy_state_dict)
-        except Exception as e:
-            logger.warning(f"MLflow summary 로깅 실패: {e}")
+        # policy adapter를 MLflow artifact로 저장 — FSDP cooperative gather 결과를 사용.
+        # `log_summary`의 artifact_dirs 경로로 넘기지 않는 이유는 tempfile 디렉토리의
+        # 수명을 `_export_policy_artifact` 안에서 `with` 문으로 닫기 때문(밖으로
+        # 노출하면 수명 관리가 복잡해짐).
+        if self._is_main_process:
+            try:
+                self._export_policy_artifact(policy_state_dict=policy_state_dict)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Policy artifact 등록 실패: {e}")
 
         # zero-checkpoint warning — 산출물 0인 run을 사용자가 놓치지 않도록.
-        # `monitor_hint`는 위의 `aggregate_checkpoint_stats` 호출에서 이미 준비됨.
         if total_checkpoints == 0:
             logger.warning(
                 "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
@@ -954,7 +940,21 @@ class RLTrainer:
                                     logits=step_logits,
                                 )
 
-                        self._fire("on_epoch_end", epoch=self.epoch_counter, metrics={"loss": total_loss / max(num_steps, 1)})
+                        _epoch_train_loss = total_loss / max(num_steps, 1)
+                        self._fire(
+                            "on_epoch_end",
+                            epoch=self.epoch_counter,
+                            metrics={"loss": _epoch_train_loss},
+                        )
+                        # Epoch-level MLflow logging — Trainer와 대칭. `step=epoch`으로
+                        # LR snapshot + epoch_train_loss를 1회 기록한다. step-level과는
+                        # 축이 분리되어 있으며 MLflow UI에서 독립 시계열로 표시된다.
+                        if self._is_main_process:
+                            log_epoch_metrics(
+                                self.optimizers,
+                                self.epoch_counter,
+                                extra={"epoch_train_loss": _epoch_train_loss},
+                            )
                         self.epoch_counter += 1
 
                         # Epoch-level scheduler stepping
@@ -974,6 +974,19 @@ class RLTrainer:
                             val_metrics = self._run_rl_validation()
                             self._fire("on_validation_end", epoch=self.epoch_counter, metrics=val_metrics)
                             self.last_metrics.update(val_metrics)
+                            # Trainer와 대칭으로, validation metric을 학습 중 MLflow에 즉시
+                            # 기록한다(`trainer.py` _validate의 log_epoch_metrics 대칭).
+                            # 키는 `val_*` prefix를 붙여 epoch 축으로 흘린다. 없으면
+                            # 사용자가 학습 중 validation 추이를 UI에서 볼 수 없다.
+                            if self._is_main_process and val_metrics:
+                                log_epoch_metrics(
+                                    self.optimizers,
+                                    self.epoch_counter,
+                                    extra={
+                                        (k if k.startswith("val_") else f"val_{k}"): v
+                                        for k, v in val_metrics.items()
+                                    },
+                                )
 
                         self._fire("on_epoch_start", epoch=self.epoch_counter)
 
@@ -999,9 +1012,6 @@ class RLTrainer:
                     total_loss += step_loss
                     num_steps += 1
 
-                    # step-level logging
-                    self._mlflow_log_metric("loss", step_loss, self.global_step)
-
                     if batch_idx % self.grad_accum_steps == 0:
                         self._fire(
                             "on_batch_end", step=self.global_step,
@@ -1015,6 +1025,26 @@ class RLTrainer:
                             logits=step_logits,
                         )
 
+                        # step-level logging — grad_accum 경계에서만 발화하여 Trainer와
+                        # 대칭(`trainer.py` L556 내부의 `log_step_metrics` 호출과 동일한
+                        # 시점). 공용 헬퍼가 (a) `self.optimizers`의 param_group별
+                        # `learning_rate[/{group_name_or_idx}]` metric + (b) `extra`의
+                        # loss를 같은 step 인덱스로 1회 `mlflow.log_metrics` 호출에
+                        # 흡수한다. CriticValueModel처럼 policy optimizer가 2-group
+                        # (LoRA + head)인 경우 `learning_rate/group_0`·
+                        # `learning_rate/group_1`(또는 name이 있으면 `learning_rate/lora`·
+                        # `learning_rate/head`)이 매 step 기록된다. 과거 이 호출이
+                        # grad_accum 경계 밖에 있어 `grad_accum_steps > 1`에서 같은
+                        # `self.global_step` 값으로 여러 entry가 누적되며 MLflow UI
+                        # 곡선이 왜곡되던 결함을 해소한다(원칙 4 "같은 시점·같은 API").
+                        # rank 가드는 `_is_main_process`에서 일괄 처리한다.
+                        if self._is_main_process:
+                            log_step_metrics(
+                                self.optimizers,
+                                self.global_step,
+                                extra={"loss": step_loss},
+                            )
+
                     # RL step-based validation
                     if (
                         self.val_loader is not None
@@ -1027,6 +1057,17 @@ class RLTrainer:
                         val_metrics = self._run_rl_validation()
                         self._fire("on_validation_end", epoch=self.epoch_counter, metrics=val_metrics)
                         self.last_metrics.update(val_metrics)
+                        # Trainer와 대칭으로, step-based validation metric을 학습 중
+                        # MLflow에 즉시 기록(`val_*` prefix, step 축).
+                        if self._is_main_process and val_metrics:
+                            log_step_metrics(
+                                self.optimizers,
+                                self.global_step,
+                                extra={
+                                    (k if k.startswith("val_") else f"val_{k}"): v
+                                    for k, v in val_metrics.items()
+                                },
+                            )
 
             finally:
                 # Nested try/finally 구조: on_train_end / FSDP gather / cleanup /
@@ -1153,6 +1194,7 @@ class RLTrainer:
             preference 배치는 logits가 chosen/rejected로 분리되어 있으므로 None을 반환한다.
         """
         is_preference = "chosen_input_ids" in batch
+        needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
             if is_preference:
                 with torch.no_grad():
@@ -1162,6 +1204,12 @@ class RLTrainer:
                 with torch.no_grad():
                     frozen_out = {name: self._forward_model(m, batch, role=name) for name, m in self.frozen.items()}
                 trainable_out = {name: self._forward_model(m, batch, role=name) for name, m in self.trainable.items()}
+                if needs_hidden and "policy" in self.trainable:
+                    hidden, head_weight = self._extract_hidden_states_and_head(
+                        self.trainable["policy"], batch
+                    )
+                    trainable_out.setdefault("policy", {})["hidden_states"] = hidden
+                    trainable_out["policy"]["output_head_weight"] = head_weight
             losses = self.algorithm.compute_loss(trainable_out, frozen_out, batch)
 
         # policy 로짓 추출 — pointwise 배치에서만 available
@@ -1246,14 +1294,22 @@ class RLTrainer:
 
         # 4. Mini-epoch update
         mini_epochs = getattr(self.algorithm, "mini_epochs", 1)
+        needs_hidden = getattr(self.algorithm, "needs_hidden_states", False)
         last_loss = 0.0
         all_nan = True
         for _ in range(mini_epochs):
             with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
+                gen_forward_batch = {"input_ids": generated_ids, "attention_mask": gen_mask}
                 trainable_out = {
-                    name: self._forward_model(m, {"input_ids": generated_ids, "attention_mask": gen_mask}, role=name)
+                    name: self._forward_model(m, gen_forward_batch, role=name)
                     for name, m in self.trainable.items()
                 }
+                if needs_hidden and "policy" in self.trainable:
+                    hidden, head_weight = self._extract_hidden_states_and_head(
+                        self.trainable["policy"], gen_forward_batch
+                    )
+                    trainable_out.setdefault("policy", {})["hidden_states"] = hidden
+                    trainable_out["policy"]["output_head_weight"] = head_weight
                 losses = self.algorithm.compute_loss(trainable_out, frozen_out, gen_batch)
 
             step_schedulers = {
@@ -1329,6 +1385,187 @@ class RLTrainer:
         if isinstance(out, dict):
             return out.get("logits", out.get("output"))
         return out
+
+    # ------------------------------------------------------------------ #
+    #  Framework-agnostic hidden-states + head-weight dispatcher         #
+    #  Algorithm이 ``needs_hidden_states=True``를 선언하면 train loop이    #
+    #  ``_extract_hidden_states_and_head(policy, batch)``를 호출하여       #
+    #  fused linear cross-entropy 같은 memory-efficient 경로를 활성화.    #
+    # ------------------------------------------------------------------ #
+
+    def _extract_hidden_states_and_head(
+        self,
+        model: nn.Module,
+        batch: dict,
+        layer_idx: int = -1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Framework-agnostic dispatcher for (hidden, head_weight) extraction.
+
+        Priority:
+            1. Model의 ``extract_features_and_head`` override (BaseModel subclass 등).
+            2. HF ``PreTrainedModel`` 기본 — ``output_hidden_states=True`` 경유.
+            3. timm 모델 기본 — ``forward_features`` + ``get_classifier``.
+            4. torchvision ``ResNet`` 계열 기본 — manual layer forward + ``model.fc``.
+            5. 그 외 — ``NotImplementedError`` with guidance.
+
+        Returns:
+            (hidden, head_weight):
+              - hidden: framework-dependent shape. NLP causal LM은 ``(B, S, H)``.
+              - head_weight: output projection weight. ``(V, H)`` 또는 ``(C, H)``.
+        """
+        # DDP/FSDP wrapper 언래핑 — 래핑된 모델은 .module으로 실제 모델에 접근
+        unwrapped = getattr(model, "module", model)
+
+        # Priority 1: 모델의 override (BaseModel subclass 또는 framework wrapper)
+        if hasattr(unwrapped, "extract_features_and_head"):
+            try:
+                return unwrapped.extract_features_and_head(batch, layer_idx=layer_idx)
+            except NotImplementedError:
+                # BaseModel의 기본 구현이 NotImplementedError이므로 dispatcher로 위임
+                pass
+
+        # Priority 2: HF PreTrainedModel
+        try:
+            from transformers import PreTrainedModel
+
+            if isinstance(unwrapped, PreTrainedModel):
+                return self._extract_hf_pretrained(unwrapped, batch, layer_idx)
+        except ImportError:
+            pass
+
+        # Priority 3: timm 모델
+        try:
+            import timm.models
+
+            # timm 모델은 일반적으로 `default_cfg` 속성을 가지며,
+            # `forward_features`/`get_classifier` 메서드를 보유한다.
+            is_timm = (
+                hasattr(unwrapped, "default_cfg")
+                and hasattr(unwrapped, "forward_features")
+                and hasattr(unwrapped, "get_classifier")
+            )
+            # timm.models 모듈 import가 성공한 경우에만 timm 경로 진입
+            _ = timm.models  # 린터 무시 + 명시적 import 의존
+            if is_timm:
+                return self._extract_timm(unwrapped, batch)
+        except ImportError:
+            pass
+
+        # Priority 4: torchvision ResNet 계열
+        try:
+            from torchvision.models.resnet import ResNet
+
+            if isinstance(unwrapped, ResNet):
+                return self._extract_torchvision_resnet(unwrapped, batch)
+        except ImportError:
+            pass
+
+        # Priority 5: 미지원 모델 — 명확한 안내 메시지
+        raise NotImplementedError(
+            f"Model {type(unwrapped).__name__}의 extract_features_and_head "
+            "기본 구현이 없습니다. BaseModel을 상속하고 override하거나, "
+            "지원되는 framework(HF PreTrainedModel / timm / torchvision ResNet)로 "
+            "감싸세요."
+        )
+
+    def _extract_hf_pretrained(
+        self,
+        model: nn.Module,
+        batch: dict,
+        layer_idx: int = -1,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """HF ``PreTrainedModel`` 기본 구현.
+
+        ``output_hidden_states=True``로 forward 호출하여
+        ``hidden_states[layer_idx]``와 ``get_output_embeddings().weight``을 반환한다.
+        """
+        out = model(
+            input_ids=batch["input_ids"],
+            attention_mask=batch.get("attention_mask"),
+            output_hidden_states=True,
+        )
+        hidden_states = getattr(out, "hidden_states", None)
+        if hidden_states is None:
+            raise NotImplementedError(
+                f"HF 모델 {type(model).__name__}이 hidden_states를 반환하지 않습니다. "
+                "extract_features_and_head를 override하세요."
+            )
+        hidden = hidden_states[layer_idx]
+
+        output_embeddings = model.get_output_embeddings()
+        if output_embeddings is None or getattr(output_embeddings, "weight", None) is None:
+            raise NotImplementedError(
+                f"HF 모델 {type(model).__name__}에는 output embedding이 없습니다 "
+                "(encoder-only 모델 등). extract_features_and_head를 override하세요."
+            )
+        return hidden, output_embeddings.weight
+
+    def _extract_timm(
+        self,
+        model: nn.Module,
+        batch: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """timm 모델 기본 구현.
+
+        ``forward_features`` + ``get_classifier``의 weight을 반환한다.
+        ``Identity`` classifier(num_classes=0)는 지원 불가.
+        """
+        pixel_values = batch.get("pixel_values")
+        if pixel_values is None:
+            raise NotImplementedError(
+                "timm 모델은 batch['pixel_values']를 요구합니다. "
+                "현재 batch keys: " + ", ".join(sorted(batch.keys()))
+            )
+        features = model.forward_features(pixel_values)
+        classifier = model.get_classifier()
+        if isinstance(classifier, nn.Identity):
+            raise NotImplementedError(
+                f"timm 모델 {type(model).__name__}의 classifier가 Identity입니다 "
+                "(num_classes=0). extract_features_and_head를 override하세요."
+            )
+        weight = getattr(classifier, "weight", None)
+        if weight is None:
+            raise NotImplementedError(
+                f"timm 모델 {type(model).__name__}의 classifier에 weight 속성이 "
+                "없습니다. extract_features_and_head를 override하세요."
+            )
+        return features, weight
+
+    def _extract_torchvision_resnet(
+        self,
+        model: nn.Module,
+        batch: dict,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """torchvision ``ResNet`` 기본 구현.
+
+        ``conv1``~``avgpool``까지 수동 forward 후 ``flatten`` 결과를 hidden으로,
+        ``model.fc.weight``을 head로 반환한다. Custom ResNet variant는
+        ``extract_features_and_head`` override 필요.
+        """
+        x = batch.get("pixel_values")
+        if x is None:
+            raise NotImplementedError(
+                "torchvision ResNet은 batch['pixel_values']를 요구합니다. "
+                "현재 batch keys: " + ", ".join(sorted(batch.keys()))
+            )
+        x = model.conv1(x)
+        x = model.bn1(x)
+        x = model.relu(x)
+        x = model.maxpool(x)
+        x = model.layer1(x)
+        x = model.layer2(x)
+        x = model.layer3(x)
+        x = model.layer4(x)
+        x = model.avgpool(x)
+        hidden = torch.flatten(x, 1)
+
+        fc = getattr(model, "fc", None)
+        if fc is None or getattr(fc, "weight", None) is None:
+            raise NotImplementedError(
+                f"torchvision 모델 {type(model).__name__}의 fc가 없습니다. "
+                "extract_features_and_head를 override하세요."
+            )
+        return hidden, fc.weight
 
     def _forward_model(self, model: nn.Module, batch: dict, role: str = "policy") -> dict:
         """Causal forward를 수행한다.

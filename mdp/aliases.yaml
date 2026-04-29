@@ -22,7 +22,6 @@ head:
 callback:
   EarlyStopping: mdp.training.callbacks.early_stopping.EarlyStopping
   ModelCheckpoint: mdp.training.callbacks.checkpoint.ModelCheckpoint
-  LRMonitor: mdp.training.callbacks.lr_monitor.LearningRateMonitor
   ProgressBar: mdp.training.callbacks.progress.ProgressBar
   EMACallback: mdp.training.callbacks.ema.EMACallback
   DefaultOutputCallback: mdp.callbacks.inference.DefaultOutputCallback

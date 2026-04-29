@@ -34,7 +34,14 @@ serving = [
     "fastapi>=0.104",
     "uvicorn>=0.24",
 ]
-all = ["mdp[vision,language,serving]"]
+# Liger-Kernel: Fused Linear Cross-Entropy 등 memory-efficient kernel을 HF 모델에
+# monkey-patch로 주입. CUDA 전용이라 CPU/macOS 환경에서는 미설치 상태로 동작하며
+# mdp/_liger_patch.py의 try/except로 graceful skip.
+# 상세: spec-algorithm-hidden-states-support §원칙 7.
+liger = [
+    "liger-kernel>=0.4.0",
+]
+all = ["mdp[vision,language,serving,liger]"]
 
 [project.scripts]
 mdp = "mdp.__main__:app"

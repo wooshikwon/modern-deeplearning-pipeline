@@ -33,6 +33,16 @@ from mdp.training._common import (
     detect_device,
     setup_amp,
 )
+from mdp.training._mlflow_logging import (
+    log_epoch_metrics,
+    log_static_params,
+    log_step_metrics,
+    log_summary,
+)
+from mdp.training._schedulers import (
+    create_scheduler_with_warmup,
+    parse_warmup_config,
+)
 from mdp.training.callbacks.base import BaseCallback
 
 logger = logging.getLogger(__name__)
@@ -137,44 +147,15 @@ class Trainer:
         if config is None:
             return None, "step"
 
-        config = dict(config)  # don't mutate original
-        interval = config.pop("interval", "step")
-        warmup_steps = config.pop("warmup_steps", 0)
-        warmup_ratio = config.pop("warmup_ratio", 0.0)
-
-        if warmup_steps > 0 and warmup_ratio > 0:
-            raise ValueError(
-                "warmup_steps와 warmup_ratio를 동시에 지정할 수 없습니다. "
-                f"warmup_steps={warmup_steps}, warmup_ratio={warmup_ratio}"
-            )
-
-        if warmup_steps == 0 and warmup_ratio > 0:
-            total_steps = self._estimate_total_steps()
-            warmup_steps = int(total_steps * warmup_ratio)
-
+        config = dict(config)  # copy — parse_warmup_config는 in-place pop 수행
+        total_steps = self._estimate_total_steps()
+        warmup = parse_warmup_config(config, total_steps)
         klass, kwargs = self.resolver.resolve_partial(config)
         base_scheduler = klass(self.optimizer, **kwargs)
-
-        if warmup_steps > 0:
-            base_scheduler = self._wrap_with_warmup(
-                base_scheduler, warmup_steps
-            )
-
-        return base_scheduler, interval
-
-    def _wrap_with_warmup(self, scheduler: Any, warmup_steps: int) -> Any:
-        """LinearLR warmup → base scheduler via SequentialLR."""
-        warmup = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer,
-            start_factor=1e-8,
-            end_factor=1.0,
-            total_iters=warmup_steps,
+        scheduler = create_scheduler_with_warmup(
+            self.optimizer, base_scheduler, warmup
         )
-        return torch.optim.lr_scheduler.SequentialLR(
-            self.optimizer,
-            schedulers=[warmup, scheduler],
-            milestones=[warmup_steps],
-        )
+        return scheduler, warmup.interval
 
     def _create_loss(self, config: dict[str, Any] | None) -> nn.Module | None:
         if config is None:
@@ -186,6 +167,17 @@ class Trainer:
             return self.max_steps
         steps_per_epoch = len(self.train_loader) // self.grad_accum_steps
         return int(steps_per_epoch * (self.epochs or 1))
+
+    def _optimizer_dict(self) -> dict[str, torch.optim.Optimizer]:
+        """공용 로깅 헬퍼(``_mlflow_logging``)용 optimizer dict 시그니처.
+
+        RLTrainer(``self.optimizers``는 이미 dict)와의 대칭을 위해 Trainer에서도
+        단일 ``self.optimizer``를 ``{"policy": ...}`` dict로 포장해 동일 함수
+        (``log_step_metrics``·``log_epoch_metrics``·``collect_optimizer_state``)에
+        전달한다. 키 이름은 RLTrainer의 policy optimizer와 일치하도록 ``"policy"``
+        로 통일.
+        """
+        return {"policy": self.optimizer}
 
     # ── Callback dispatch ──
 
@@ -400,12 +392,16 @@ class Trainer:
                         "on_epoch_end", epoch=epoch, metrics={"train_loss": train_loss}
                     )
 
-                    # Epoch-level metrics
-                    self._mlflow_log_metric("epoch_train_loss", train_loss, epoch)
-                    self._mlflow_log_metric(
-                        "learning_rate",
-                        self.optimizer.param_groups[0]["lr"],
+                    # Epoch-level metrics — spec-logging-consistency §원칙 3/4:
+                    # ``log_epoch_metrics``가 optimizer param_groups 전체를 순회해
+                    # ``learning_rate``(single-group) 또는 ``learning_rate/group_*``
+                    # (multi-group)을 epoch 축에 기록한다. 과거 ``param_groups[0]``
+                    # 하드코딩 경로를 대체하며, 추가로 ``epoch_train_loss``를
+                    # ``extra``로 같이 내보낸다.
+                    log_epoch_metrics(
+                        self._optimizer_dict(),
                         epoch,
+                        extra={"epoch_train_loss": train_loss},
                     )
 
                     # Epoch-end validation (step/fractional은 _train_one_epoch 내부에서 처리)
@@ -565,8 +561,17 @@ class Trainer:
                     metrics={"loss": actual_loss},
                 )
 
-                # MLflow step logging (non-blocking)
-                self._mlflow_log_metric("train_loss", actual_loss, self.global_step)
+                # MLflow step logging (non-blocking) — spec-logging-consistency §U2.
+                # ``log_step_metrics``는 optimizer param_groups의 scheduler-adjusted
+                # LR을 slash 네이밍으로 흘리며, ``extra``의 train_loss를 같은 step 축에
+                # 병합한다. 과거 ``_mlflow_log_metric("train_loss", ...)`` 단독 호출을
+                # 대체(단일 MLflow round-trip).
+                if self._is_main_process:
+                    log_step_metrics(
+                        self._optimizer_dict(),
+                        self.global_step,
+                        extra={"train_loss": actual_loss},
+                    )
 
             # Mid-epoch validation (step 단위 또는 소수 에폭)
             if (
@@ -613,6 +618,15 @@ class Trainer:
                     step_in_epoch=num_batches,
                     metrics={"loss": actual_loss},
                 )
+
+                # Residual flush 경계에서도 step-level LR·loss 로깅을 일관되게 보낸다
+                # (루프 내부 grad_accum 경계와 동일한 경로).
+                if self._is_main_process:
+                    log_step_metrics(
+                        self._optimizer_dict(),
+                        self.global_step,
+                        extra={"train_loss": actual_loss},
+                    )
 
         # mid-epoch 모드: 에폭 끝에서도 1회 검증 (마지막 구간 커버)
         if val_every_n > 0 and self.val_loader is not None:
@@ -671,9 +685,21 @@ class Trainer:
 
         avg_metrics = {k: sum(v) / len(v) for k, v in all_metrics.items()}
 
-        # MLflow epoch logging
-        for k, v in avg_metrics.items():
-            self._mlflow_log_metric(f"val_{k}" if not k.startswith("val_") else k, v, epoch)
+        # MLflow epoch logging — spec-logging-consistency §원칙 4 대칭. 공용 헬퍼
+        # ``log_epoch_metrics``의 ``extra`` 인자로 ``val_*`` prefix를 흘려 보내
+        # RLTrainer 쪽과 동일한 경로로 수렴한다(`rl_trainer.py`의 validation
+        # 블록 참조). LR 축이 같은 epoch 인덱스로 함께 기록되지만 값이 동일하므로
+        # 의미 왜곡 없음. rank 가드는 caller ``_run_validation``이 ``_validate``
+        # 호출 전 보증하지 않으므로 여기서 명시.
+        if self._is_main_process and avg_metrics:
+            log_epoch_metrics(
+                self._optimizer_dict(),
+                epoch,
+                extra={
+                    (k if k.startswith("val_") else f"val_{k}"): v
+                    for k, v in avg_metrics.items()
+                },
+            )
 
         self.model.train()
         return avg_metrics
@@ -926,100 +952,79 @@ class Trainer:
             logger.warning(f"MLflow run 시작 실패: {e}")
             return nullcontext()
 
-    def _mlflow_log_metric(self, key: str, value: float, step: int) -> None:
-        if not self._is_main_process:
-            return
-        try:
-            import mlflow
-
-            mlflow.log_metric(key, value, step=step)
-        except Exception as e:
-            logger.debug("MLflow metric 로깅 실패 (key=%s): %s", key, e)
-
     def _log_mlflow_params(self) -> None:
-        """Run 시작 시 실험 재현에 필요한 하이퍼파라미터를 기록한다."""
-        try:
-            import mlflow
+        """Run 시작 시 실험 재현에 필요한 하이퍼파라미터를 기록한다.
 
-            recipe = self.settings.recipe
-            params: dict[str, Any] = {
-                "task": recipe.task,
-                "model_class": recipe.model.get("_component_", "unknown"),
-                "pretrained": recipe.model.get("pretrained", "none"),
-                "dataset_source": recipe.data.dataset.get("source", "unknown"),
-                "batch_size": recipe.data.dataloader.batch_size,
-                "epochs": self.epochs or 0,
-                "max_steps": self.max_steps or 0,
-                "precision": recipe.training.precision,
-                "gradient_accumulation_steps": self.grad_accum_steps,
-                "learning_rate": self.optimizer.param_groups[0]["lr"],
-            }
-
-            # Adapter
-            if recipe.adapter is not None:
-                params["adapter_component"] = recipe.adapter.get("_component_", "unknown")
-                if recipe.adapter.get("r") is not None:
-                    params["adapter_r"] = recipe.adapter["r"]
-
-            # Strategy — Config.compute.distributed
-            dist = self.settings.config.compute.distributed
-            if isinstance(dist, dict) and dist.get("strategy"):
-                s = dist["strategy"]
-                params["strategy"] = s.get("_component_", s) if isinstance(s, dict) else s
-
-            mlflow.log_params(params)
-        except Exception as e:
-            logger.warning(f"MLflow params 로깅 실패: {e}")
+        spec-logging-consistency §U2 이후 공용 헬퍼 ``log_static_params``에 위임한다.
+        과거에 ``learning_rate = optimizer.param_groups[0]['lr']`` 스냅샷을 param으로
+        기록하던 경로는 **완전 제거**됐다 — warmup step 0 값을 recipe 선언값으로
+        오인하게 만들던 weighted-ntp Phase 3 재현 사례(원칙 2 위반)를 해소한다.
+        대신 recipe의 선언 lr이 ``learning_rate_init`` 키로 기록된다.
+        """
+        log_static_params(self.settings.recipe, self.settings)
 
     def _log_mlflow_summary(
         self, training_duration: float, stopped_reason: str,
     ) -> None:
-        """Run 종료 시 최종 메트릭과 config snapshot을 기록한다."""
+        """Run 종료 시 최종 메트릭과 config snapshot을 기록한다.
+
+        spec-logging-consistency §U2 이후 MLflow 쓰기 경로는 공용 헬퍼
+        ``log_summary``에 위임된다. 본 래퍼는 **여전히 필요**하다:
+
+        1. ``self._checkpoints_saved`` 속성을 세팅해 ``train()`` 반환 dict가 조회할
+           수 있게 한다 (test_checkpoint_monitor 계약).
+        2. 0 체크포인트 시 경고 로그를 MLflow 쓰기 성공/실패와 무관하게 항상 발화.
+        3. ``_export_and_log_model``은 tempdir·tokenizer·adapter 처리가 엮인 특수 경로라
+           ``log_summary``의 일반 ``artifact_dirs`` 시그니처만으로는 수용되지 않아
+           별도 호출을 유지한다.
+        """
         # Checkpoint 집계 — `_common.aggregate_checkpoint_stats`가 duck typing 규칙을
-        # 단일 구현으로 담는다(Trainer/RLTrainer 대칭). `monitor_hint`는 아래 zero-
-        # warning 블록에서 사용하므로 여기서 함께 받아 둔다.
+        # 단일 구현으로 담는다(Trainer/RLTrainer 대칭).
         total_checkpoints, best_path, monitor_hint = aggregate_checkpoint_stats(
             self.callbacks,
         )
         self._checkpoints_saved = total_checkpoints
 
+        # sanitize_config·_find_best_checkpoint 둘 다 self.settings.config에 의존한다.
+        # ``test_log_mlflow_summary_aggregates_multi_checkpoint_callbacks`` 같은 테스트는
+        # self.settings=None으로 Trainer를 조립해 집계 경로만 고립 검증하므로, 인자
+        # 준비 단계 전체를 try로 감싸서 AttributeError를 통째로 흡수한다.
+        sanitized_config: dict[str, Any] | None = None
+        best_ckpt: Path | None = None
+        artifact_dirs: list[tuple[Path, str]] = []
         try:
-            import mlflow
             from mdp.utils.sanitize import sanitize_config
 
-            mlflow.log_metrics(
-                {
-                    "training_duration_seconds": training_duration,
-                    "total_steps": self.global_step,
-                    **{f"final_{k}": v for k, v in self.last_metrics.items()},
-                }
-            )
-            mlflow.set_tag("stopped_reason", stopped_reason)
-            # Checkpoint 집계 태그 — 상위 오케스트레이터(auto-research 등)가 run 종료 후
-            # artifact 개수를 별도 조회하지 않고도 "산출물이 있는 run인가"를 판정할 수
-            # 있도록 MLflow tag에 고정한다.
-            mlflow.set_tag("checkpoints_saved", str(total_checkpoints))
-            if best_path is not None:
-                mlflow.set_tag("best_checkpoint", str(best_path))
+            sanitized_config = sanitize_config(self.settings.model_dump())
 
-            config_dict = sanitize_config(self.settings.model_dump())
-            mlflow.log_dict(config_dict, "config/settings.json")
-
-            # Best 체크포인트를 artifact로 등록
             best_ckpt = self._find_best_checkpoint()
             if best_ckpt:
-                mlflow.log_artifacts(str(best_ckpt), "checkpoint")
-
-                # 서빙 가능 모델 생성 + artifact 등록
-                self._export_and_log_model(best_ckpt)
-
+                artifact_dirs.append((best_ckpt, "checkpoint"))
         except Exception as e:
-            logger.warning(f"MLflow summary 로깅 실패 (학습 결과는 유효합니다): {e}")
+            logger.warning(f"MLflow summary 인자 준비 실패 (학습 결과는 유효합니다): {e}")
+
+        log_summary(
+            training_duration_seconds=training_duration,
+            total_steps=self.global_step,
+            stopped_reason=stopped_reason,
+            final_metrics=self.last_metrics,
+            checkpoint_stats=(total_checkpoints, best_path, monitor_hint),
+            sanitized_config=sanitized_config,
+            artifact_dirs=artifact_dirs,
+        )
+
+        # 서빙 가능 모델 생성 + artifact 등록 — 공용 헬퍼와 별도 경로.
+        # (tempdir + tokenizer + recipe.yaml 복사 + adapter/전체 분기 로직이 있어
+        # ``artifact_dirs``로 일반화하기 부적합하다.)
+        if best_ckpt:
+            try:
+                self._export_and_log_model(best_ckpt)
+            except Exception as e:
+                logger.warning(f"모델 export 실패 (학습 결과는 유효합니다): {e}")
 
         # zero-checkpoint warning — MLflow 기록 성공/실패와 무관하게 항상 발화한다.
         # 학습은 돌았는데 산출물이 0개인 상황(monitor 오타 등)을 사용자가 놓치지
-        # 않도록 로그 경로에서 한 번 더 알린다. `monitor_hint`는 위의
-        # `aggregate_checkpoint_stats` 호출에서 이미 준비되어 있다.
+        # 않도록 로그 경로에서 한 번 더 알린다.
         if total_checkpoints == 0:
             logger.warning(
                 "체크포인트가 하나도 저장되지 않았습니다. monitor=[%s] 설정을 확인하세요.",
