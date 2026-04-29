@@ -232,6 +232,16 @@ data:                           # 데이터 파이프라인
                                 #   ClassificationCollator | TokenClassificationCollator | VisionCollator
     tokenizer: str              # 언어 Collator는 tokenizer 필수
     max_length: int
+  sampler:                      # _component_ 패턴 — train BatchSampler (선택; 미지정 시 기존 동작 보존)
+    _component_: str            # LengthGroupedBatchSampler | DistributedLengthGroupedBatchSampler
+                                #   또는 풀 경로 (커스텀 Sampler — docs/extending.md 참조)
+    bucket_size: int            # 기본 batch_size*8. distributed sampler에서는 무시
+    shuffle_buckets: bool       # 기본 true (epoch 내부 batch 순서 추가 셔플)
+    length_fn: callable | null  # __getlength__ 미구현 dataset의 fallback (보통 null)
+    seed: int                   # 기본 0. epoch별 결정적 셔플 base seed
+    drop_last: bool             # 기본 false
+    # sampler 지정 시 dataloader.batch_size/shuffle/drop_last는 sampler 책임으로
+    # 위임됨 — DataLoader(batch_sampler=...) 표준 계약. val에는 적용되지 않음.
   dataloader:                   # 순수 설정값 (DataLoader kwargs)
     batch_size: int             # 기본 32
     num_workers: int            # 기본 4

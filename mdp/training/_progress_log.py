@@ -98,7 +98,7 @@ def log_step_progress(
     current_lr: float,
     grad_norm: float | None,
     start_time: float,
-) -> None:
+) -> float:
     """Rank-0 한 줄 step-progress.
 
     caller 는 (a) rank-0 guard, (b) log_every_n_steps 타이밍을 모두 처리했다는
@@ -119,6 +119,7 @@ def log_step_progress(
         global_step, max_steps, percent,
         loss, current_lr, grad_str, throughput, fmt_eta(eta_sec),
     )
+    return throughput
 
 
 # ---------------------------------------------------------------------------

@@ -363,6 +363,135 @@ data:
 
 ---
 
+## 커스텀 Sampler
+
+`data.sampler`는 dataset/collator와 같은 `_component_` 슬롯이다. 사용자가 길이 기반(`LengthGroupedBatchSampler` 외) 외에 weighted, importance, curriculum 등 다른 sampling 전략을 작성해 주입할 수 있다.
+
+### 시그니처 요건
+
+`dataloader.py`가 sampler를 인스턴스화할 때 다음 형태로 호출한다:
+
+```python
+sampler = MySampler(dataset, batch_size=batch_size, **recipe_kwargs)
+```
+
+따라서 사용자 클래스 시그니처는:
+
+- **위치 인자 1개**: `dataset` — train Dataset 인스턴스
+- **키워드 인자**: `batch_size: int` (필수) + Recipe `data.sampler`의 나머지 키들
+
+```python
+# my_data/samplers.py
+from typing import Iterator
+from torch.utils.data import BatchSampler
+
+class MyWeightedSampler(BatchSampler):
+    def __init__(
+        self,
+        dataset,
+        batch_size: int,
+        weights: list[float] | None = None,
+        seed: int = 0,
+    ):
+        self._dataset = dataset
+        self.batch_size = batch_size
+        self.weights = weights
+        self.seed = seed
+        self.epoch = 0
+        # 부모 BatchSampler.__init__는 호출하지 않아도 됨 — DataLoader는
+        # batch_sampler를 Iterable[list[int]]로만 소비한다
+
+    def __iter__(self) -> Iterator[list[int]]:
+        # weighted random sampling 후 batch_size로 yield
+        ...
+
+    def __len__(self) -> int:
+        # epoch당 batch 수 — DataLoader가 진행률 계산에 사용
+        return len(self._dataset) // self.batch_size
+
+    def set_epoch(self, epoch: int) -> None:
+        # 선택 — DistributedSampler 인터페이스 일관성. trainer가 epoch 시작 시
+        # hasattr 검사 후 호출한다 (있으면)
+        self.epoch = int(epoch)
+```
+
+```yaml
+data:
+  sampler:
+    _component_: my_data.samplers.MyWeightedSampler
+    weights: [1.0, 2.0, 1.0, ...]
+    seed: 42
+  dataloader:
+    batch_size: 32
+```
+
+### `BatchSampler` vs `Sampler`
+
+PyTorch `DataLoader`는 두 가지 sampler slot을 갖는다 — `sampler` (개별 index iterator)와 `batch_sampler` (batch index list iterator). MDP는 후자(`batch_sampler=...`)에 사용자 sampler를 주입한다. 길이 기반 sampling처럼 batch 경계를 직접 결정하는 전략은 반드시 `batch_sampler`여야 한다 (개별 index는 DataLoader가 batch_size로 자르면서 정렬이 깨진다).
+
+상속 자체는 `BatchSampler` 또는 plain class 중 자유. DataLoader는 `Iterable[list[int]]`이면 충분하므로 `__iter__`/`__len__` 두 메서드만 구현해도 동작한다.
+
+### 길이 기반 sampler — `BaseLengthSampler` 상속
+
+길이 정보를 활용하는 sampler를 작성한다면 `mdp.data.samplers.BaseLengthSampler`를 상속하면 길이 수집(`Lengthed` protocol + `length_fn` fallback)·캐싱·`set_epoch` 인터페이스를 자동으로 얻는다. `__iter__`만 구현하면 된다.
+
+```python
+from typing import Iterator
+import torch
+from mdp.data.samplers import BaseLengthSampler
+
+class MyCurriculumSampler(BaseLengthSampler):
+    """짧은 sample부터 학습 → 점진적으로 긴 sample로 진행."""
+
+    def __iter__(self) -> Iterator[list[int]]:
+        # self._lengths가 base 클래스에서 cache되어 있다
+        sorted_indices = sorted(range(len(self._lengths)), key=lambda i: self._lengths[i])
+
+        # epoch 진행에 따라 점차 긴 sample을 포함시키는 curriculum
+        epoch_fraction = (self.epoch + 1) / 10  # 10 epoch에 걸쳐 전체 진입
+        cutoff = int(len(sorted_indices) * min(epoch_fraction, 1.0))
+        usable = sorted_indices[:cutoff]
+
+        for start in range(0, len(usable), self.batch_size):
+            batch = usable[start : start + self.batch_size]
+            if self.drop_last and len(batch) < self.batch_size:
+                continue
+            yield batch
+```
+
+### Dataset에 `__getlength__` 구현
+
+길이 기반 sampler를 쓰는 커스텀 Dataset이라면 `Lengthed` protocol을 구현하는 편이 좋다 — sampler 초기화가 `O(N)` length_fn 호출 없이 즉시 완료된다.
+
+```python
+class MyTokenizedDataset(Dataset):
+    def __getitem__(self, idx):
+        return {"input_ids": self._token_ids[idx], "labels": self._labels[idx]}
+
+    def __getlength__(self, idx: int) -> int:
+        # 토큰화된 length를 trivial하게 노출
+        return len(self._token_ids[idx])
+```
+
+protocol을 구현하지 않은 dataset에는 sampler config에 `length_fn`을 명시한다:
+
+```yaml
+data:
+  sampler:
+    _component_: LengthGroupedBatchSampler
+    length_fn: my_data.utils.estimate_length    # Callable[[sample], int]
+```
+
+이 경로는 sampler `__init__`에서 sample마다 1회 호출하여 cache하므로 cold path 비용이 한 번만 발생하지만, dataset 측 `__getlength__` 구현이 있으면 그쪽이 항상 더 빠르다.
+
+### Distributed sampler
+
+multi-rank 환경에서 사용자 sampler가 rank 간 disjoint partition을 책임지려면 `__init__`에서 `torch.distributed.get_world_size()`/`get_rank()`를 조회하거나 명시 인자(`num_replicas`/`rank`)를 받는다. MDP 내장 `DistributedLengthGroupedBatchSampler`의 megabatch 패턴이 참고 구현이다 — 모든 rank가 같은 `seed + epoch`로 결정적 partition을 계산하여 동기화 메시지 없이 disjoint 보장.
+
+`distributed=True` + non-distributed sampler 조합은 `dataloader.py`가 warning 로그를 남기지만 학습은 진행한다 (rank별 partition이 부재하여 효과는 보장되지 않음).
+
+---
+
 ## 커스텀 Loss 함수
 
 ```python

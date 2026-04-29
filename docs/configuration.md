@@ -87,6 +87,10 @@ data:                                   # 데이터 파이프라인
     _component_: CausalLMCollator
     tokenizer: model-name
     max_length: 2048
+  sampler:                              # Sampler (선택 — length-bucketed sampling 활성)
+    _component_: LengthGroupedBatchSampler
+    bucket_size: 256                    # 기본값: batch_size * 8
+    shuffle_buckets: true
   dataloader:                           # DataLoader 설정 (순수 설정값)
     batch_size: 4
     num_workers: 4
@@ -198,6 +202,59 @@ callbacks:
 | `ClassificationCollator` | 텍스트 분류 | `input_ids, labels` |
 | `TokenClassificationCollator` | 토큰 분류 (NER 등) | `input_ids, labels` |
 | `VisionCollator` | 비전 태스크 | `pixel_values, labels` |
+
+### 내장 Sampler 클래스 (선택)
+
+`data.sampler`는 optional. 미지정 시 기존 동작(`distributed=True` → `DistributedSampler` 자동, 아니면 `shuffle=True`)을 100% 보존한다. 지정 시 train DataLoader에 `batch_sampler=...`로 주입되며, `data.dataloader`의 `batch_size`/`shuffle`/`drop_last`는 sampler 책임으로 위임된다 (DataLoader 표준 계약).
+
+| 클래스 | 용도 | 적용 환경 |
+|--------|------|----------|
+| `LengthGroupedBatchSampler` | Length-bucketed batching (padding 토큰 절감) | Single-GPU |
+| `DistributedLengthGroupedBatchSampler` | Length-bucketed + DDP rank partition (megabatch) | DDP/FSDP |
+
+**주요 인자 (single-GPU `LengthGroupedBatchSampler`)**:
+
+| 인자 | 기본값 | 설명 |
+|---|---|---|
+| `bucket_size` | `batch_size * 8` | bucket 한 단위 크기. 작을수록 randomness 보존, 클수록 padding 절감 |
+| `shuffle_buckets` | `true` | epoch 내부에서 batch 순서를 한 번 더 셔플 (학습 안정성) |
+| `length_fn` | `null` | dataset이 `__getlength__`를 구현하지 않을 때만 명시. `Callable[[sample], int]` |
+| `seed` | `0` | 결정적 셔플의 base seed. 실제 generator seed는 `seed + epoch` |
+| `drop_last` | `false` | 마지막 미완성 batch 처리 |
+
+**Distributed 환경에서는 `DistributedLengthGroupedBatchSampler`를 명시한다**. 단일 클래스로 distributed 분기를 캡슐화하므로 `DistributedSampler`로 외부 wrapping은 권장하지 않는다 — wrapping 시 rank 간 길이 정렬이 깨진다. `num_replicas`/`rank`는 명시하지 않으면 `torch.distributed`에서 자동 조회한다. distributed sampler에서 `bucket_size`는 인자로 받지만 실제 동작에는 사용되지 않으며 분할 단위는 megabatch(`num_replicas * batch_size`)로 고정된다.
+
+**Recipe YAML 예시 — Single-GPU**:
+
+```yaml
+data:
+  dataset:
+    _component_: HuggingFaceDataset
+    source: my-dataset
+    tokenizer: meta-llama/Llama-3-8B
+    max_length: 2048
+  collator:
+    _component_: CausalLMCollator
+    tokenizer: meta-llama/Llama-3-8B
+  sampler:
+    _component_: LengthGroupedBatchSampler
+    bucket_size: 256
+  dataloader:
+    batch_size: 32
+```
+
+**Recipe YAML 예시 — DDP/FSDP**:
+
+```yaml
+data:
+  sampler:
+    _component_: DistributedLengthGroupedBatchSampler
+    # bucket_size는 distributed에서 사용되지 않음 — 생략 권장
+    # num_replicas, rank는 torch.distributed에서 자동 조회
+  # 그 외 dataset/collator/dataloader는 single-GPU와 동일
+```
+
+`__getlength__` Protocol을 구현하지 않은 커스텀 dataset에 length-bucketed sampler를 적용하려면 `length_fn`을 명시한다 — 자세한 구현 패턴은 [Extending MDP](extending.md)의 "커스텀 Sampler" 섹션 참조.
 
 ### 어댑터 설정
 

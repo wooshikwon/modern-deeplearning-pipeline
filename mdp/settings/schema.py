@@ -57,6 +57,7 @@ class DataSpec(BaseModel):
     dataset: dict[str, Any]                          # _component_ 필수
     collator: dict[str, Any]                         # _component_ 필수
     val_dataset: dict[str, Any] | None = None        # _component_, None이면 validation 비활성
+    sampler: dict[str, Any] | None = None            # _component_, None이면 기존 동작 보존
     dataloader: DataloaderSpec = Field(default_factory=DataloaderSpec)
 
 

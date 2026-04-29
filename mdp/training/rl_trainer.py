@@ -1003,7 +1003,11 @@ class RLTrainer(BaseTrainer):
                         if self._is_main_process:
                             # grad_norm/{name}/{total|lora_A|lora_B}: backward_and_step가
                             # 측정한 pre-clip gradient norm (LoRA 없으면 키 생략).
-                            extra_metrics: dict[str, float] = {"loss": step_loss}
+                            _throughput = self.global_step / max(time.time() - start_time, 1e-9)
+                            extra_metrics: dict[str, float] = {
+                                "loss": step_loss,
+                                "throughput": _throughput,
+                            }
                             extra_metrics.update(
                                 {f"grad_norm/{k}": v for k, v in step_grad_norms.items()}
                             )

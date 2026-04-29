@@ -367,6 +367,7 @@ class Factory:
                 collator_config=data.collator,
                 dataloader_config=data.dataloader.model_dump(),
                 val_dataset_config=data.val_dataset,
+                sampler_config=data.sampler,
                 distributed=distributed,
             )
 

@@ -68,7 +68,8 @@ mdp serve --run-id <id> --port 8000
 
 ## Key Features
 
-- **`_component_` 패턴**: 모든 컴포넌트(모델, 어댑터, 옵티마이저, 콜백 등)를 YAML에서 Python import path로 지정. 레지스트리 없이 커스텀 컴포넌트 즉시 사용
+- **`_component_` 패턴**: 모든 컴포넌트(모델, 어댑터, 옵티마이저, 콜백, sampler 등)를 YAML에서 Python import path로 지정. 레지스트리 없이 커스텀 컴포넌트 즉시 사용
+- **Length-bucketed sampling**: 가변 길이 LM 학습에서 `data.sampler`로 `LengthGroupedBatchSampler`(single-GPU) 또는 `DistributedLengthGroupedBatchSampler`(DDP/FSDP)를 선택하면 batch 내 padding 토큰을 거의 제거 (LLaMA-3 측정 53%→0.2%). 미지정 시 기존 동작 100% 보존
 - **Recipe/Config 분리**: 실험 정의와 인프라 설정을 분리하여 동일 실험을 다른 환경에서 재현
 - **분산 학습**: DDP, FSDP, DeepSpeed ZeRO-2/3 자동 감지 및 설정
 - **RL Alignment**: DPO, GRPO, PPO를 멀티 모델(policy, reference, value, reward)로 지원

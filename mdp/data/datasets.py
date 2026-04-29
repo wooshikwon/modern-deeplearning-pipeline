@@ -110,6 +110,20 @@ class HuggingFaceDataset:
     def __getitem__(self, idx: int) -> dict[str, Any]:
         return self._ds[idx]
 
+    def __getlength__(self, idx: int) -> int:
+        """i번째 sample의 토큰 길이를 반환한다 (Lengthed protocol).
+
+        tokenizer가 적용되어 ``input_ids``가 존재할 때만 의미가 있다. 미적용
+        dataset에 대해 호출하면 dict-style 접근에서 ``KeyError``가 발생한다 —
+        이것이 의도된 동작으로, length-bucketed sampler가 부적절한 dataset에
+        대해 명시적 실패를 내도록 한다.
+
+        streaming dataset의 경우 ``self._ds[idx]`` 자체가 random access를 지원하지
+        않아 자연스럽게 실패한다 (length-bucketed + streaming 조합은 spec 비범위).
+        """
+        sample = self._ds[idx]
+        return len(sample["input_ids"])
+
     @staticmethod
     def _detect_format(source: str, fmt: str) -> str:
         if fmt != "auto":

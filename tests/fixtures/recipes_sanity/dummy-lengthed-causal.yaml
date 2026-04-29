@@ -1,0 +1,43 @@
+name: dummy-lengthed-causal
+task: text_generation
+
+# 본 fixture는 sanity script (scripts/measure_padding_ratio.py) 동작 검증 전용.
+# 실제 학습용이 아니라, length-bucketed sampler의 padding ratio 측정 경로가
+# end-to-end로 동작함을 빠르게 보이기 위한 합성 fixture.
+#
+# dataset/collator는 tests.fixtures.dummy_lengthed의 in-memory 클래스를
+# _component_로 주입한다. 외부 다운로드/토크나이저 비용 없이 100~500 길이
+# 분포의 sample을 즉시 생성한다.
+
+model:
+  _component_: mdp.models.language.CausalLM
+  pretrained: hf://gpt2
+
+data:
+  dataset:
+    _component_: tests.fixtures.dummy_lengthed.SyntheticLengthedDataset
+    num_samples: 256
+    min_length: 100
+    max_length: 500
+    seed: 42
+  collator:
+    _component_: tests.fixtures.dummy_lengthed.PaddingAttentionMaskCollator
+    pad_to: max_in_batch
+  dataloader:
+    batch_size: 16
+    num_workers: 0
+    pin_memory: false
+    persistent_workers: false
+    prefetch_factor: null
+    drop_last: false
+
+training:
+  epochs: 1
+
+optimizer:
+  _component_: AdamW
+  lr: 1.0e-5
+
+metadata:
+  author: sanity
+  description: "Synthetic fixture for measure_padding_ratio.py sanity validation"

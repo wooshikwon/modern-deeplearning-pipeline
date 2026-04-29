@@ -404,7 +404,7 @@ class TestRank0GuardForProgress:
         #  동시에 감싸기 때문에 필요한 윈도 크기).
         call_idx = src.find("self._log_step_progress(")
         assert call_idx != -1, "rl_trainer.py 에서 self._log_step_progress 호출이 없다"
-        prefix = src[max(0, call_idx - 1500):call_idx]
+        prefix = src[max(0, call_idx - 2000):call_idx]
         assert "_is_main_process" in prefix, (
             "rl_trainer.py 의 step-progress 호출이 rank-0 가드 안에 있지 않다."
         )
@@ -414,7 +414,7 @@ class TestRank0GuardForProgress:
         src = (Path(__file__).parents[2] / "mdp" / "training" / "trainer.py").read_text()
         call_idx = src.find("self._log_step_progress(")
         assert call_idx != -1, "trainer.py 에서 self._log_step_progress 호출이 없다"
-        prefix = src[max(0, call_idx - 1500):call_idx]
+        prefix = src[max(0, call_idx - 2000):call_idx]
         assert "_is_main_process" in prefix, (
             "trainer.py 의 step-progress 호출이 rank-0 가드 안에 있지 않다."
         )

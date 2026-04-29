@@ -63,3 +63,6 @@ collator:
   ClassificationCollator: mdp.data.collators.ClassificationCollator
   TokenClassificationCollator: mdp.data.collators.TokenClassificationCollator
   VisionCollator: mdp.data.collators.VisionCollator
+sampler:
+  LengthGroupedBatchSampler: mdp.data.samplers.LengthGroupedBatchSampler
+  DistributedLengthGroupedBatchSampler: mdp.data.samplers.DistributedLengthGroupedBatchSampler

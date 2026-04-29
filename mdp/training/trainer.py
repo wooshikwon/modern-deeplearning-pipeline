@@ -745,10 +745,17 @@ class Trainer(BaseTrainer):
                 # grad_norm/{name}/{total|lora_A|lora_B}는 backward_and_step에서
                 # pre-clip 측정된 pre-optimizer gradient norm을 그대로 MLflow 축에 태운다.
                 if self._is_main_process:
+                    _start = getattr(self, "_progress_start_time", None)
+                    _throughput = (
+                        self.global_step / max(time.time() - _start, 1e-9)
+                        if _start is not None else None
+                    )
                     extra_metrics: dict[str, float] = {"train_loss": actual_loss}
                     extra_metrics.update(
                         {f"grad_norm/{k}": v for k, v in grad_norms.items()}
                     )
+                    if _throughput is not None:
+                        extra_metrics["throughput"] = _throughput
                     log_step_metrics(
                         self._optimizer_dict(),
                         self.global_step,
