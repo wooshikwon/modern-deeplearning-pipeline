@@ -139,14 +139,16 @@ mdp export --run-id <id> --output ./model-production
 mdp export --checkpoint ./checkpoints/best --output ./model-production
 ```
 
-출력 구조:
+출력 구조는 모델 구현에 따라 달라진다. `mdp export`는 우선 모델의 `export()` 메서드, 그 다음 `save_pretrained()`, 마지막으로 safetensors fallback을 사용한다. tokenizer와 `recipe.yaml`은 원본 artifact에 존재할 때 함께 복사된다.
+
+일반적인 출력 예:
 ```
 model-production/
-  ├── model.safetensors       # merged 전체 모델
+  ├── model.safetensors 또는 save_pretrained() 산출물
   ├── config.json
-  ├── tokenizer.json
-  ├── special_tokens_map.json
-  └── recipe.yaml             # 서빙 메타데이터
+  ├── tokenizer.json              # tokenizer snapshot이 있을 때
+  ├── special_tokens_map.json     # tokenizer snapshot이 있을 때
+  └── recipe.yaml                 # 원본 artifact에 있을 때
 ```
 
 > MLflow에 저장되는 LoRA 아티팩트는 어댑터만(~50MB) 포함한다. `export`가 on-demand merge를 수행한다.
@@ -199,6 +201,8 @@ mdp serve --run-id <id> \
 | `auto` | accelerate가 자동 분배 |
 | `balanced` | GPU 간 균등 분배 |
 | `sequential` | GPU 0부터 순서대로 채움 |
+
+Adapter artifact reconstruction currently computes an automatic accelerate map internally; `balanced` and `sequential` are honored by direct pretrained/artifact loading paths that pass through `from_pretrained(device_map=...)`, but not by that adapter reconstruction path.
 
 > **device_map은 추론/서빙 전용.** `device_map`으로 분산 배치된 모델(`hf_device_map` 속성 존재)은 `mdp train`·`mdp rl-train`에서 명시적 guard(`mdp/training/trainer.py`, `mdp/training/rl_trainer.py`)에 의해 거부된다. 멀티 GPU 학습에는 `compute.distributed.strategy`의 DDP/FSDP를 사용한다. `deepspeed*` 전략명은 현재 fail-fast 경계로 남아 있다.
 

@@ -139,8 +139,8 @@ BaseTrainer(ABC)
 
 ```
 Tier 3 (Orchestrator)
-  TrainPipeline, InferencePipeline
-  Assembles Trainer/RLTrainer directly; manages MLflow lifecycle
+  CLI commands and _torchrun_entry
+  Load settings, callbacks, source plans, and launch Trainer/RLTrainer or serving paths
   ↓
 Tier 2 (Composite)
   Factory        — component creation facade, singleton caching
@@ -161,7 +161,7 @@ Import direction flows top-to-bottom only. `import-linter` enforces this in CI. 
 
 **BaseTrainer inheritance over mixin**: `Trainer` and `RLTrainer` share a common lifecycle (init → mlflow start → epoch/step loop → checkpoint → mlflow end). A single abstract base class captures this cleanly; mixins would add MRO complexity.
 
-**`_`-prefix = private to training namespace**: `_base.py`, `_checkpoint.py`, `_features.py`, `_progress_log.py`, `_mlflow_logging.py`, `_schedulers.py`, `_common.py` are all internal. External code (`cli/`, `serving/`, consumer packages) imports only `Trainer` and `RLTrainer`.
+**`_`-prefix = private to owning namespace**: `_base.py`, `_checkpoint.py`, `_features.py`, `_progress_log.py`, `_mlflow_logging.py`, `_schedulers.py`, `_common.py` are internal implementation modules. CLI entrypoints may import selected private helpers to bridge command-line YAML into runtime objects; serving and external consumer packages should not depend on training-private modules. Public trainer entrypoints remain `Trainer` and `RLTrainer`.
 
 **`_features.py` is stateless**: Feature extractor dispatcher depends only on `(model, batch, layer_idx)` — no trainer state. This enables reuse from inference callbacks without instantiating a trainer.
 

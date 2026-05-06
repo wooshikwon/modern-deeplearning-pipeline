@@ -23,21 +23,24 @@ BaseTrainer(ABC)           — mdp/training/_base.py
 - `train()` main loop (epoch/step 루프, 콜백 발화, OOM 처리)
 - Step 실행 메서드 (`_train_step_*`, `_forward_preference`, 등)
 - Validation 루프 (`_validate`, `_run_rl_validation`, 등)
-- `_checkpoint_state()` 구현 → `_checkpoint.save_checkpoint()` 호출
+- `_checkpoint_state()` / `_checkpoint_model_slots()` / `_load_checkpoint_state()` 구현
+- `_maybe_resume()` 구현
 - `_collect_mlflow_params()` 구현
 
 ### Checkpoint I/O 호출 경로
 
-체크포인트 저장·복원·export는 `mdp/training/_checkpoint.py` free function이 담당한다. Trainer/RLTrainer는 더 이상 `_save_checkpoint`, `_maybe_resume`, `_export_policy_artifact` 메서드를 소유하지 않는다.
+체크포인트 저장·복원·export의 파일 I/O는 `mdp/training/_checkpoint.py`의 `CheckpointManager`가 담당한다. Trainer/RLTrainer는 저장 시점과 resume 진입점을 소유하고, callback은 manager에 model slot과 trainer state를 넘긴다.
 
 ```
 # Save
-trainer._checkpoint_state() -> dict  # 현재 상태 수집
-_checkpoint.save_checkpoint(state, ckpt_dir)  # I/O
+ModelCheckpoint.save_checkpoint(...)
+  -> trainer._checkpoint_model_slots()
+  -> CheckpointManager.save(...)
 
 # Resume
-_checkpoint.load_checkpoint(ckpt_dir) -> dict  # I/O
-trainer._load_checkpoint_state(state)  # 상태 복원
+trainer._maybe_resume()
+  -> CheckpointManager.load(...)
+  -> trainer._load_checkpoint_state(...)
 
 # Export
 _checkpoint.export_model_artifact(model, metadata, mlflow_run, ...)
@@ -207,7 +210,7 @@ job:
   # resume: ./checkpoints/checkpoint-1000  # 특정 체크포인트
 ```
 
-Mid-epoch resume도 지원된다 — `trainer_state.json`의 `step_in_epoch` 기준으로 배치를 건너뛴다.
+SFT는 mid-epoch resume을 지원한다 — `trainer_state.json`의 `step_in_epoch` 기준으로 배치를 건너뛴다. RLTrainer는 현재 `global_step`과 epoch counter를 복원하지만 `step_in_epoch` 기반 batch skip은 수행하지 않는다.
 
 ---
 
@@ -400,7 +403,8 @@ Mixture-of-Experts 모델에서 Expert Parallelism을 활성화한다:
 compute:
   distributed:
     strategy: ddp
-    expert_parallel:
+    moe:
+      enabled: true
       ep_size: 4               # EP 그룹당 GPU 수
 ```
 

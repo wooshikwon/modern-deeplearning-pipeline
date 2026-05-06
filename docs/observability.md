@@ -53,6 +53,7 @@ SFT values:
 - `max_steps_reached`
 - `signal_term`
 - `signal_int`
+- `oom`
 
 RL values:
 
@@ -61,6 +62,7 @@ RL values:
 - `max_steps`
 - `signal_term`
 - `signal_int`
+- `oom`
 
 ## System Logging
 

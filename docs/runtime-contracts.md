@@ -7,7 +7,7 @@ serving, checkpointing, and configuration validation.
 
 | Command | Validation scope |
 |---|---|
-| `mdp train`, `mdp rl-train` | Full Recipe/Config validation: task fields, heads, adapters, data, distributed, component imports, runtime compatibility. |
+| `mdp train`, `mdp rl-train` | Recipe/Config schema validation plus business/runtime compatibility: task name, head/task compatibility, adapter constraints, distributed compatibility. Component import failures are reported as warnings unless the component is instantiated on the active path. |
 | `mdp estimate` | Model and configuration shape needed for memory estimation. |
 | `mdp inference --run-id/--model-dir` | Model-related compatibility and artifact loading. |
 | `mdp inference --pretrained`, `mdp generate --pretrained` | Recipe-less path; invalid model/runtime combinations fail at load/runtime. |
