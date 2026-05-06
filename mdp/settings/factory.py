@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -77,15 +78,17 @@ class SettingsFactory:
         self,
         artifact_dir: str,
         overrides: list[str] | None = None,
+        *,
+        use_config_snapshot: bool = True,
     ) -> Settings:
-        """artifact 디렉토리의 recipe.yaml에서 Settings를 조립한다.
+        """artifact 디렉토리의 recipe/config snapshot에서 Settings를 조립한다.
 
         model/ artifact와 checkpoint/ artifact 모두 사용 가능.
-        분산 학습 전용 검증은 수행하지 않는다. 기본 Config를 사용한다.
+        분산 학습 전용 검증은 수행하지 않는다. config snapshot이 있으면
+        base Config로 사용하고, 없거나 비활성화하면 기본 Config를 사용한다.
         """
-        from pathlib import Path
-
-        recipe_path = Path(artifact_dir) / "recipe.yaml"
+        artifact_path = Path(artifact_dir)
+        recipe_path = artifact_path / "recipe.yaml"
         if not recipe_path.exists():
             raise FileNotFoundError(
                 f"artifact에 recipe.yaml이 없습니다: {artifact_dir}\n"
@@ -95,6 +98,12 @@ class SettingsFactory:
         recipe_dict = self._substitute_env_vars(recipe_dict)
 
         config_dict: dict[str, Any] = {}
+        if use_config_snapshot:
+            config_snapshot = self._find_artifact_config_snapshot(artifact_path)
+            if config_snapshot is not None:
+                config_dict = self._load_yaml(str(config_snapshot))
+                config_dict = self._substitute_env_vars(config_dict)
+
         if overrides:
             recipe_dict, config_dict = self._split_and_apply_overrides(
                 recipe_dict, config_dict, overrides,
@@ -105,6 +114,29 @@ class SettingsFactory:
         settings = Settings(recipe=recipe, config=config)
         self._validate_recipe(settings)
         return settings
+
+    @staticmethod
+    def _find_artifact_config_snapshot(artifact_dir: Path) -> Path | None:
+        """artifact manifest 또는 표준 파일명에서 config snapshot을 찾는다."""
+        import json
+
+        manifest_path = artifact_dir / "manifest.json"
+        if manifest_path.exists():
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except json.JSONDecodeError:
+                manifest = {}
+            config_file = manifest.get("config_file")
+            if isinstance(config_file, str) and config_file:
+                candidate = artifact_dir / config_file
+                if candidate.exists():
+                    return candidate
+
+        for name in ("config.yaml", "config.yml"):
+            candidate = artifact_dir / name
+            if candidate.exists():
+                return candidate
+        return None
 
     @staticmethod
     def _split_and_apply_overrides(

@@ -7,6 +7,7 @@ FSDP + QLoRA 비호환 등 Config와 Recipe 간 호환성을 검증한다.
 from __future__ import annotations
 
 from mdp.settings.schema import Settings
+from mdp.settings.distributed import get_strategy_name, is_deepspeed_strategy
 from mdp.settings.validation import ValidationResult, is_qlora
 
 
@@ -33,6 +34,7 @@ class CompatValidator:
         result = ValidationResult()
 
         self._check_gpu_distributed(settings, result)
+        self._check_deepspeed_boundary(settings, result)
         self._check_serving_backend(settings, result)
         self._check_fsdp_qlora(settings, result)
         self._check_moe_distributed(settings, result)
@@ -40,6 +42,18 @@ class CompatValidator:
         return result
 
     # ── 개별 검증 ──
+
+    @staticmethod
+    def _check_deepspeed_boundary(settings: Settings, result: ValidationResult) -> None:
+        """DeepSpeed is currently fail-fast until engine ownership is integrated."""
+        strategy = get_strategy_name(settings)
+        if not is_deepspeed_strategy(strategy):
+            return
+        result.errors.append(
+            "DeepSpeed strategy is not supported by the current Trainer/RLTrainer "
+            "runtime contract. DeepSpeed engine backward/step/checkpoint ownership "
+            "requires a separate engine-contract spec. Use DDP/FSDP for now."
+        )
 
     @staticmethod
     def _check_gpu_distributed(settings: Settings, result: ValidationResult) -> None:
@@ -107,7 +121,7 @@ class CompatValidator:
             result.errors.append(
                 "FSDP와 QLoRA(4bit)는 호환되지 않습니다. "
                 "대안: (1) LoRA 사용, (2) DDP 전략 사용, "
-                "(3) DeepSpeed ZeRO-3 사용"
+                "(3) 별도 DeepSpeed engine-contract 구현 후 ZeRO-3 사용"
             )
 
         # RL per-model adapter
@@ -118,7 +132,7 @@ class CompatValidator:
                     result.errors.append(
                         f"FSDP와 rl.models.{name}.adapter의 QLoRA(4bit)는 호환되지 않습니다. "
                         "대안: (1) LoRA 사용, (2) DDP 전략 사용, "
-                        "(3) DeepSpeed ZeRO-3 사용"
+                        "(3) 별도 DeepSpeed engine-contract 구현 후 ZeRO-3 사용"
                     )
 
     @staticmethod

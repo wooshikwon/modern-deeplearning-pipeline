@@ -3,10 +3,21 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 from torch import nn
+
+
+@dataclass(frozen=True)
+class StrategyCheckpointCapability:
+    """Checkpoint behavior advertised by a distributed strategy."""
+
+    supports_managed_checkpoint: bool = False
+    requires_all_ranks_for_save: bool = False
+    weight_format: str = "unsupported"
+    unsupported_reason: str | None = None
 
 
 class BaseStrategy(ABC):
@@ -16,6 +27,13 @@ class BaseStrategy(ABC):
     :meth:`save_checkpoint`, and :meth:`load_checkpoint`.  The optional
     :meth:`cleanup` hook is called when the training loop finishes and
     should release any distributed-process-group resources.
+
+    ``checkpoint_capability`` is consumed by ``CheckpointManager`` before it
+    calls strategy-owned weight I/O.  The default is deliberately unsupported:
+    new strategies must opt in once their checkpoint semantics are compatible
+    with the manifest-based manager.  This keeps DeepSpeed ZeRO checkpoints out
+    of the DDP/FSDP restore path until a separate engine-contract spec owns
+    engine state, optimizer shards, and resume semantics.
 
     ``unwrap`` and ``invoke_custom`` bridge the gap between MDP's
     declarative contract ("a model may define ``training_step`` /
@@ -49,6 +67,16 @@ class BaseStrategy(ABC):
     @abstractmethod
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
         """Restore a checkpoint from *path* into *model* and return it."""
+
+    @property
+    def checkpoint_capability(self) -> StrategyCheckpointCapability:
+        """Return this strategy's checkpoint-manager compatibility contract."""
+        return StrategyCheckpointCapability(
+            unsupported_reason=(
+                f"{type(self).__name__} does not declare manifest checkpoint "
+                "compatibility"
+            )
+        )
 
     # ------------------------------------------------------------------
     # Declarative-contract bridges

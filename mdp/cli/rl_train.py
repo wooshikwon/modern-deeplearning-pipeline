@@ -143,7 +143,9 @@ def run_rl_train(
         typer.echo(f"GPU count: {nproc}")
 
     try:
-        if nproc > 1:
+        from mdp.settings.distributed import should_launch_distributed
+
+        if should_launch_distributed(settings, nproc):
             if not is_json_mode():
                 typer.echo(f"분산 RL 학습 시작 (nproc={nproc})...")
             train_result = _run_distributed(settings, nproc, cb_configs=cb_configs or None)

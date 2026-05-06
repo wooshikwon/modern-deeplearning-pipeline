@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
-from mdp.training._checkpoint import save_checkpoint as _save_checkpoint_state
+from mdp.training._checkpoint import (
+    CheckpointContext,
+    CheckpointManager,
+    ModelSlot,
+)
 from mdp.training.callbacks.base import BaseCallback
 
 logger = logging.getLogger(__name__)
+
+_MODEL_SLOT_ROLES = {"policy", "reference", "reward", "critic", "value", "model"}
+
+
+def _role_for_slot(name: str) -> Literal["policy", "reference", "reward", "critic", "value", "model"]:
+    return name if name in _MODEL_SLOT_ROLES else "model"  # type: ignore[return-value]
 
 
 class ModelCheckpoint(BaseCallback):
@@ -88,6 +97,7 @@ class ModelCheckpoint(BaseCallback):
         # 예외 없이 반환한 직후에만 append한다 (타이밍 규칙). Trainer/RLTrainer의
         # _log_mlflow_summary가 duck typing으로 집계하여 MLflow tag·WARNING에 활용.
         self.saved_checkpoints: list[Path] = []
+        self._last_save_wrote = False
 
     def set_dirpath(self, dirpath: str | Path) -> None:
         """Trainer calls this to inject storage.checkpoint_dir when dirpath was not explicit."""
@@ -113,7 +123,7 @@ class ModelCheckpoint(BaseCallback):
     def save_checkpoint(
         self,
         model: torch.nn.Module,
-        optimizer: torch.optim.Optimizer,
+        optimizer: torch.optim.Optimizer | None,
         scheduler: Any | None,
         epoch: int,
         global_step: int,
@@ -122,132 +132,114 @@ class ModelCheckpoint(BaseCallback):
         recipe_dict: dict[str, Any] | None = None,
         scaler: Any | None = None,
         step_in_epoch: int = 0,
+        trainer: Any | None = None,
+        saved_at: Literal["step", "validation", "train_end", "manual"] = "manual",
+        kind: Literal["sft", "rl"] = "sft",
     ) -> Path:
         """Persist a checkpoint to disk and return its path."""
         ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
+        self._last_save_wrote = False
 
-        # 분산 학습 시 rank-0에서만 저장 (동시 쓰기로 인한 파일 손상 방지)
         is_main = True
+        requires_all_ranks_for_save = False
         try:
             import torch.distributed as dist
             if dist.is_initialized():
                 is_main = dist.get_rank() == 0
+            if strategy is not None:
+                capability = getattr(strategy, "checkpoint_capability", None)
+                requires_all_ranks_for_save = bool(
+                    capability is not None
+                    and capability.requires_all_ranks_for_save
+                )
         except Exception:
             pass
 
-        if not is_main:
+        if not is_main and not requires_all_ranks_for_save:
             return ckpt_dir
 
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        # Recipe를 체크포인트에 내장 (최초 1회)
-        recipe_path = ckpt_dir / "recipe.yaml"
-        if recipe_dict is not None and not recipe_path.exists():
-            import yaml
-
-            recipe_path.write_text(
-                yaml.dump(recipe_dict, allow_unicode=True, default_flow_style=False),
-            )
-
-        # Model weights: prefer strategy, then save_pretrained (HF/PEFT), then safetensors, fallback to .pt
-        if strategy is not None:
-            # FSDP + PeftModel(LoRA): adapter만 저장한다.
-            # strategy.save_checkpoint는 rank0_only=True 방식으로 full state dict를 rank 0에 수집한다.
-            # rank 0에서 수집된 전체 state dict 중 LoRA + modules_to_save 키만 필터링해
-            # adapter_model.safetensors + adapter_config.json으로 저장하면
-            # reconstruct_model / mdp export 가 adapter 분기로 진입해 merge가 정상 동작한다.
-            _saved_as_peft = False
-            try:
-                from peft import PeftModel as _PeftModel
-                _inner = getattr(model, "module", None)
-
-                # DDP + PeftModel: rank 0이 full model을 보유하므로 직접 adapter 저장
-                from torch.nn.parallel import DistributedDataParallel as _DDP
-                if isinstance(model, _DDP) and isinstance(_inner, _PeftModel):
-                    import torch.distributed as _dist
-                    if not _dist.is_initialized() or _dist.get_rank() == 0:
-                        _inner.save_pretrained(str(ckpt_dir))
-                        logger.info("Saved PEFT adapter only (DDP+LoRA): %s", ckpt_dir)
-                    _saved_as_peft = True
-
-                # FSDP + PeftModel: full state dict를 gather 후 LoRA 키만 필터링
-                if not _saved_as_peft:
-                    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-                    if isinstance(model, FSDP) and isinstance(_inner, _PeftModel):
-                        import tempfile as _tempfile
-                        from safetensors import safe_open as _safe_open
-                        from safetensors.torch import save_file as _save_file
-
-                        with _tempfile.TemporaryDirectory() as _tmp:
-                            _full_path = Path(_tmp) / "full.safetensors"
-                            strategy.save_checkpoint(model, str(_full_path))
-
-                            # rank0_only=True: rank-0에서만 파일이 생성된다
-                            if _full_path.exists():
-                                with _safe_open(str(_full_path), framework="pt", device="cpu") as _f:
-                                    _full_sd = {k: _f.get_tensor(k) for k in _f.keys()}
-
-                                # LoRA 가중치 + modules_to_save(value_head 등)만 필터
-                                _adapter_tokens = {
-                                    "lora_A", "lora_B",
-                                    "lora_embedding_A", "lora_embedding_B",
-                                    "modules_to_save",
-                                }
-                                _adapter_sd = {
-                                    k: v for k, v in _full_sd.items()
-                                    if any(tok in k for tok in _adapter_tokens)
-                                }
-                                _save_file(_adapter_sd, ckpt_dir / "adapter_model.safetensors")
-
-                                # adapter_config.json: PEFT 자체 직렬화 사용 (set → list 자동 변환)
-                                _peft_cfg = next(iter(_inner.peft_config.values()))
-                                _peft_cfg.save_pretrained(str(ckpt_dir))
-                                logger.info(
-                                    "Saved PEFT adapter only (FSDP+LoRA, %d keys): %s",
-                                    len(_adapter_sd),
-                                    ckpt_dir,
-                                )
-                        _saved_as_peft = True
-            except ImportError:
-                pass
-
-            if not _saved_as_peft:
-                strategy.save_checkpoint(model, str(ckpt_dir / "model.safetensors"))
-        elif hasattr(model, "save_pretrained"):
-            model.save_pretrained(ckpt_dir)
-        else:
-            try:
-                from safetensors.torch import save_file
-
-                target = getattr(model, "module", model)
-                save_file(target.state_dict(), ckpt_dir / "model.safetensors")
-            except ImportError:
-                logger.warning("safetensors not installed, falling back to torch.save")
-                torch.save(model.state_dict(), ckpt_dir / "model.pt")
-
-        torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
-
-        if scheduler is not None:
-            torch.save(scheduler.state_dict(), ckpt_dir / "scheduler.pt")
-
-        # GradScaler 상태 (fp16 resume 안정성)
-        if scaler is not None and hasattr(scaler, "is_enabled") and scaler.is_enabled():
-            torch.save(scaler.state_dict(), ckpt_dir / "scaler.pt")
-
-        trainer_state = {
-            "epoch": epoch,
-            "global_step": global_step,
-            "step_in_epoch": step_in_epoch,
-            "metrics": metrics or {},
-        }
-        (ckpt_dir / "trainer_state.json").write_text(
-            json.dumps(trainer_state, indent=2),
+        slots = self._model_slots_for_checkpoint(
+            model=model,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            trainer=trainer,
+        )
+        scaler_to_save = (
+            scaler
+            if scaler is not None
+            and (not hasattr(scaler, "is_enabled") or scaler.is_enabled())
+            else None
+        )
+        CheckpointManager().save(
+            CheckpointContext(
+                kind=kind,
+                ckpt_dir=ckpt_dir,
+                global_step=global_step,
+                epoch=epoch,
+                step_in_epoch=step_in_epoch,
+                saved_at=saved_at,
+                metrics=metrics or {},
+                recipe_dict=recipe_dict,
+                is_main_process=is_main,
+            ),
+            slots,
+            strategy=strategy,
+            scaler=scaler_to_save,
         )
 
-        self._update_symlink("latest", ckpt_dir)
-
-        logger.info("Saved checkpoint: %s", ckpt_dir)
+        if is_main:
+            self._update_symlink("latest", ckpt_dir)
+            logger.info("Saved checkpoint: %s", ckpt_dir)
+            self._last_save_wrote = True
         return ckpt_dir
+
+    def _model_slots_for_checkpoint(
+        self,
+        *,
+        model: torch.nn.Module,
+        optimizer: torch.optim.Optimizer | None,
+        scheduler: Any | None,
+        trainer: Any | None,
+    ) -> list[ModelSlot]:
+        if trainer is not None and hasattr(trainer, "_checkpoint_model_slots"):
+            return trainer._checkpoint_model_slots()
+
+        if trainer is not None and hasattr(trainer, "trainable"):
+            slots: list[ModelSlot] = []
+            optimizers = getattr(trainer, "optimizers", {})
+            schedulers = getattr(trainer, "schedulers", {})
+            for name, slot_model in getattr(trainer, "trainable", {}).items():
+                slots.append(
+                    ModelSlot(
+                        name=name,
+                        role=_role_for_slot(name),
+                        model=slot_model,
+                        trainable=True,
+                        optimizer=optimizers.get(name),
+                        scheduler=schedulers.get(name),
+                    )
+                )
+            for name, slot_model in getattr(trainer, "frozen", {}).items():
+                slots.append(
+                    ModelSlot(
+                        name=name,
+                        role=_role_for_slot(name),
+                        model=slot_model,
+                        trainable=False,
+                    )
+                )
+            return slots
+
+        return [
+            ModelSlot(
+                name="",
+                role="policy",
+                model=model,
+                trainable=True,
+                optimizer=optimizer,
+                scheduler=scheduler,
+            )
+        ]
 
     def _update_symlink(self, name: str, target: Path) -> None:
         link = self.dirpath / name
@@ -291,16 +283,31 @@ class ModelCheckpoint(BaseCallback):
             # RLTrainer: multi-model checkpoint 위임
             trainer = kwargs.get("trainer")
             if trainer is not None and hasattr(trainer, "trainable"):
-                ckpt_dir = self.dirpath / f"checkpoint-{global_step}"
-                ckpt_dir.mkdir(parents=True, exist_ok=True)
-                # _save_checkpoint_state(state, ckpt_dir)가 예외 없이 완료되어야만
-                # saved_checkpoints에 기록. 저장 실패 경로에서 리스트에 추가하면
-                # zero-checkpoint 경고의 신뢰성이 깨진다 ("어설픈 성공 신고" 방지).
-                state = trainer._checkpoint_state()
-                _save_checkpoint_state(state, ckpt_dir)
-                self._update_symlink("latest", ckpt_dir)
-                self.saved_checkpoints.append(ckpt_dir)
-                logger.info("Saved RL checkpoint: %s", ckpt_dir)
+                policy = getattr(trainer, "policy", None)
+                if policy is None:
+                    policy = getattr(trainer, "trainable", {}).get("policy")
+                optimizers = getattr(trainer, "optimizers", {})
+                schedulers = getattr(trainer, "schedulers", {})
+                # save_checkpoint가 예외 없이 완료되어야만 saved_checkpoints에 기록.
+                # 저장 실패 경로에서 리스트에 추가하면 zero-checkpoint 경고의 신뢰성이 깨진다.
+                ckpt_dir = self.save_checkpoint(
+                    policy,
+                    optimizers.get("policy"),
+                    schedulers.get("policy"),
+                    kwargs.get("epoch", 0),
+                    global_step,
+                    metrics,
+                    strategy=kwargs.get("strategy"),
+                    recipe_dict=kwargs.get("recipe_dict"),
+                    scaler=kwargs.get("scaler"),
+                    step_in_epoch=kwargs.get("step_in_epoch", step),
+                    trainer=trainer,
+                    saved_at="step",
+                    kind="rl",
+                )
+                if self._last_save_wrote:
+                    self.saved_checkpoints.append(ckpt_dir)
+                    logger.info("Saved RL checkpoint: %s", ckpt_dir)
             else:
                 model = kwargs.get("model")
                 optimizer = kwargs.get("optimizer")
@@ -315,8 +322,11 @@ class ModelCheckpoint(BaseCallback):
                         model, optimizer, scheduler, epoch, global_step, metrics,
                         strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
                         step_in_epoch=step_in_epoch,
+                        trainer=kwargs.get("trainer"),
+                        saved_at="step",
                     )
-                    self.saved_checkpoints.append(ckpt_path)
+                    if self._last_save_wrote:
+                        self.saved_checkpoints.append(ckpt_path)
 
     def on_validation_end(
         self,
@@ -361,8 +371,11 @@ class ModelCheckpoint(BaseCallback):
         ckpt_path = self.save_checkpoint(
             model, optimizer, scheduler, epoch, global_step, metrics,
             strategy=strategy, recipe_dict=recipe_dict, scaler=scaler,
+            trainer=kwargs.get("trainer"),
+            saved_at="validation",
         )
-        self.saved_checkpoints.append(ckpt_path)
+        if self._last_save_wrote:
+            self.saved_checkpoints.append(ckpt_path)
 
-        metric_value = metrics[self.monitor]
-        self._manage_top_k(metric_value, ckpt_path)
+            metric_value = metrics[self.monitor]
+            self._manage_top_k(metric_value, ckpt_path)

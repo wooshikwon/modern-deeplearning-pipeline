@@ -7,13 +7,13 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import torch
-from torch import Tensor, nn
 from torch.utils.data import DataLoader
+
+from mdp.models.forward import make_forward_fn
 
 logger = logging.getLogger(__name__)
 
@@ -29,51 +29,7 @@ def _detect_device(device: str | torch.device | None) -> torch.device:
     return torch.device("cpu")
 
 
-def _make_forward_fn(model: nn.Module) -> Callable[[dict[str, Tensor]], dict[str, Tensor]]:
-    """모델 유형에 따라 정규화된 forward callable을 생성한다.
-
-    BaseModel이면 기존 ``model(batch)`` 계약을 그대로 사용하고,
-    그 외(HuggingFace 모델 등)이면 ``model(**batch)`` 로 키워드 인자를 언패킹한 뒤
-    ModelOutput을 ``dict[str, Tensor]`` 로 정규화한다.
-
-    이 함수는 추론 루프 진입 전에 한 번만 호출되며, 루프 내에서는 반환된
-    callable만 사용하므로 분기 비용이 없다.
-    """
-    from mdp.models.base import BaseModel
-
-    if isinstance(model, BaseModel):
-        def _base_forward(batch: dict[str, Tensor]) -> dict[str, Tensor]:
-            return model(batch)
-        return _base_forward
-
-    # HF 모델 경로: **batch로 키워드 인자 언패킹 + 출력 정규화
-    def _hf_forward(batch: dict[str, Tensor]) -> dict[str, Tensor]:
-        outputs = model(**batch)
-
-        # 이미 dict이면 그대로 반환 (일부 커스텀 nn.Module)
-        if isinstance(outputs, dict):
-            return outputs
-
-        # 단일 Tensor → logits 키로 감싸기
-        if isinstance(outputs, Tensor):
-            return {"logits": outputs}
-
-        # HuggingFace ModelOutput → 콜백이 기대하는 키로 정규화
-        # 우선순위: logits > last_hidden_state > dict 변환 > output 폴백
-        if hasattr(outputs, "logits") and outputs.logits is not None:
-            result: dict[str, Tensor] = {"logits": outputs.logits}
-            # object detection 모델: boxes 키도 함께 전달
-            if hasattr(outputs, "pred_boxes") and outputs.pred_boxes is not None:
-                result["boxes"] = outputs.pred_boxes
-            return result
-        if hasattr(outputs, "last_hidden_state") and outputs.last_hidden_state is not None:
-            return {"last_hidden_state": outputs.last_hidden_state}
-        # 그 외 ModelOutput (to_tuple이 있으면 ModelOutput 프로토콜)
-        if hasattr(outputs, "keys"):
-            return {k: v for k, v in outputs.items() if isinstance(v, Tensor)}
-        return {"output": outputs}
-
-    return _hf_forward
+_make_forward_fn = make_forward_fn
 
 
 def run_batch_inference(
@@ -163,7 +119,7 @@ def run_batch_inference(
     from mdp.callbacks.interventions import apply_intervention_tags
     apply_intervention_tags(inference_cbs)
 
-    forward_fn = _make_forward_fn(model)
+    forward_fn = make_forward_fn(model)
     _sample_offset = 0  # metadata 슬라이싱용 누적 오프셋
     _total_samples = 0
 

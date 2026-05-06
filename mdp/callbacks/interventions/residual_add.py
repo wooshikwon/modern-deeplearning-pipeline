@@ -53,12 +53,20 @@ class ResidualAdd(BaseInterventionCallback):
 
         layers = _get_layers(model)
 
-        for rank, layer_idx in enumerate(self.target_layers):
+        if self._vector.dim() == 2 and self.target_layers:
+            max_layer_idx = max(self.target_layers)
+            if max_layer_idx >= self._vector.shape[0]:
+                raise ValueError(
+                    "ResidualAdd 2D vector must have one row per model layer index. "
+                    f"target_layers={self.target_layers}, vector rows={self._vector.shape[0]}"
+                )
+
+        for layer_idx in self.target_layers:
             layer = layers[layer_idx]
 
             if self._vector.dim() == 2:
-                # shape: (num_layers, hidden_dim) — each target gets its own slice
-                vec_slice = self._vector[rank].clone()
+                # shape: (num_layers, hidden_dim) — row index matches layer index
+                vec_slice = self._vector[layer_idx].clone()
             else:
                 # shape: (hidden_dim,) — same vector for all targets
                 vec_slice = self._vector.clone()

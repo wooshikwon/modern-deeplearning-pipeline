@@ -297,11 +297,10 @@ class PPOLoss(BaseAlgorithm):
         raw_rewards = batch["rewards"]  # (batch,) scalar from reward model
         per_token_rewards = torch.zeros_like(new_log_probs)
         # 마지막 유효 토큰에 scalar reward 배치
-        response_lengths = mask.sum(dim=-1).long()
         for i in range(per_token_rewards.shape[0]):
-            idx = response_lengths[i].item() - 1
-            if 0 <= idx < per_token_rewards.shape[1]:
-                per_token_rewards[i, idx] = raw_rewards[i]
+            valid_idx = mask[i].nonzero(as_tuple=False).flatten()
+            if valid_idx.numel() > 0:
+                per_token_rewards[i, valid_idx[-1]] = raw_rewards[i]
 
         # Value model → per-token value → GAE
         # _forward_model(role="value")가 {"values": (batch, seq)} 를 반환한다.

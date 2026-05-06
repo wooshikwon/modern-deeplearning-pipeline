@@ -704,6 +704,16 @@ class TestDeepSpeedMoE:
         )
         assert s.ds_config["moe"]["enabled"] is True  # moe 파라미터가 우선
 
+    def test_deepspeed_strategy_config_is_fail_fast(self) -> None:
+        """Current Trainer runtime rejects DeepSpeed until engine ownership is integrated."""
+        from mdp.training._common import create_strategy
+
+        settings = MagicMock()
+        settings.config.compute.distributed = {"strategy": "deepspeed_zero3"}
+
+        with pytest.raises(ValueError, match="DeepSpeed strategy is not supported"):
+            create_strategy(settings, MagicMock())
+
 
 # =====================================================================
 # Phase 2: STRATEGY_MAP 등록

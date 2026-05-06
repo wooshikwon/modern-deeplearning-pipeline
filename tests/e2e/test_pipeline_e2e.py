@@ -18,6 +18,7 @@ _FIXTURES = Path(__file__).parent.parent / "fixtures"
 def test_yaml_to_training_e2e() -> None:
     """실제 YAML → SettingsFactory → Factory → Trainer → result 전체 흐름."""
     from mdp.cli._torchrun_entry import run_training
+    from mdp.factory.factory import Factory
     from mdp.settings.factory import SettingsFactory
     from tests.e2e.datasets import ListDataLoader, make_vision_batches
 
@@ -89,6 +90,10 @@ def test_init_generates_parseable_yaml(tmp_path: Path) -> None:
     )
     assert "_component_" in settings.recipe.data.dataset
     assert "_component_" in settings.recipe.data.collator
+
+    assert "pretrained" not in settings.recipe.model, (
+        "fallback init 템플릿은 torchvision 모델에 HF pretrained URI를 섞으면 안 된다"
+    )
 
 
 def test_train_json_output_schema() -> None:

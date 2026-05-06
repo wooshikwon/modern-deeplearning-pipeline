@@ -4,13 +4,19 @@
 
 ## 모델 소스
 
-추론/생성/서빙 명령은 세 가지 모델 소스를 지원한다 (상호 배타):
+추론/생성/서빙 명령은 세 가지 모델 소스를 지원한다 (상호 배타). CLI는 먼저 `ModelSourcePlan`을 만들어 `artifact` 경로인지 `pretrained` URI인지 결정하고, 이후 로더는 이 plan을 소비한다.
 
 | 옵션 | 설명 | 용도 |
 |------|------|------|
 | `--run-id <id>` | MLflow run 아티팩트 | 학습된 모델 로드 |
 | `--model-dir <dir>` | 로컬 디렉토리 | export된 모델 또는 체크포인트 |
 | `--pretrained <uri>` | 오픈소스 모델 URI | 학습 없이 직접 사용 |
+
+Source precedence and support:
+- `--run-id`, `--model-dir`, `--pretrained` 중 정확히 하나만 지정한다.
+- `--pretrained`는 `mdp inference`와 `mdp generate`에서만 지원된다. `mdp serve`와 `mdp export`는 artifact/checkpoint source만 받는다.
+- `--run-id`는 MLflow `model/` artifact를 로컬로 내려받은 뒤 artifact plan으로 처리한다.
+- `--model-dir`는 로컬 artifact, export 결과, 또는 manifest checkpoint 디렉토리로 처리한다. DeepSpeed ZeRO engine checkpoint는 현재 일반 checkpoint source가 아니다.
 
 Pretrained URI 형식:
 - `hf://meta-llama/Llama-3-8B` — HuggingFace Hub
@@ -73,6 +79,8 @@ mdp inference --pretrained hf://Qwen/Qwen2.5-7B \
 | `--attn-impl` | None (모델 기본) | 어텐션 구현 (`flash_attention_2` / `sdpa` / `eager`) |
 | `--device-map` | None | `from_pretrained(device_map=...)`으로 전달. 설정 시 `.to(device)` 호출을 스킵한다 |
 
+Direct-pretrained loading and Recipe-based loading share the same option normalization: CLI dtype/trust-remote-code/attention/device-map values are converted once and then routed only to protocols that accept them.
+
 ### 드리프트 감지
 
 학습 시 baseline이 저장되었으면, 추론 시 자동으로 데이터 분포 변화를 감지한다.
@@ -115,6 +123,8 @@ mdp generate --run-id <id> \
 | `--do-sample` | true | 샘플링 활성화 |
 | `--num-samples` | 1 | 프롬프트당 생성 수 |
 | `--batch-size` | 1 | 배치 크기 |
+
+Generation kwargs precedence is `MDP defaults < Recipe generation < explicit CLI/serving args`. Batch `mdp generate` and REST serving share the same resolver for the common HuggingFace generation parameters; SSE formatting and request lifecycle remain serving-local.
 
 ---
 
@@ -190,7 +200,9 @@ mdp serve --run-id <id> \
 | `balanced` | GPU 간 균등 분배 |
 | `sequential` | GPU 0부터 순서대로 채움 |
 
-> **device_map은 추론/서빙 전용.** `device_map`으로 분산 배치된 모델(`hf_device_map` 속성 존재)은 `mdp train`·`mdp rl-train`에서 명시적 guard(`mdp/training/trainer.py`, `mdp/training/rl_trainer.py`)에 의해 거부된다. 멀티 GPU 학습에는 `compute.distributed.strategy`의 DDP/FSDP/DeepSpeed를 사용한다.
+> **device_map은 추론/서빙 전용.** `device_map`으로 분산 배치된 모델(`hf_device_map` 속성 존재)은 `mdp train`·`mdp rl-train`에서 명시적 guard(`mdp/training/trainer.py`, `mdp/training/rl_trainer.py`)에 의해 거부된다. 멀티 GPU 학습에는 `compute.distributed.strategy`의 DDP/FSDP를 사용한다. `deepspeed*` 전략명은 현재 fail-fast 경계로 남아 있다.
+
+Serving config precedence is `artifact config snapshot < explicit serve CLI`. `SettingsFactory.from_artifact()` uses `config_file` from the artifact manifest when present, otherwise standard config snapshot filenames, otherwise schema defaults. `mdp serve --device-map` and `--max-memory` override artifact-derived serving values at runtime.
 
 ### 서빙 아키텍처
 
@@ -303,39 +315,8 @@ mdp inference --pretrained hf://meta-llama/Meta-Llama-3-8B \
 
 ---
 
-## Graceful Shutdown (학습 전용)
+## Observability
 
-`Trainer.train()` / `RLTrainer.train()`은 SIGTERM/SIGINT를 내부에서 처리하여 `timeout` 기반 wall-clock 상한 중단 시에도 MLflow run이 정상 마감되도록 보장한다 (상세: [Training Guide](training.md)의 Graceful Shutdown 섹션).
+All commands support JSON mode; the canonical output and error schema is [Observability](observability.md).
 
-> **주의**: `mdp inference` / `mdp generate` 추론 경로에는 **현재 signal handler가 없다**. 장시간 배치 추론 중 timeout/Ctrl+C가 들어오면 출력 파일이 부분 저장 상태로 남을 수 있다. 큰 배치 추론은 `--batch-size`와 데이터셋 분할로 wall-clock을 예측 가능하게 관리한다. (후속 spec 후보)
-
----
-
-## JSON 출력
-
-모든 명령은 `--format json`을 지원한다. stdout에 JSON, stderr에 로그가 분리 출력된다.
-
-### 추론 결과 예시
-
-```json
-{
-  "status": "success",
-  "command": "inference",
-  "timestamp": "2026-04-09T12:00:00",
-  "run_id": "abc123",
-  "output_path": "./results/predictions.parquet",
-  "task": "text_generation",
-  "monitoring": {
-    "drift_detected": true,
-    "severity_level": "watch",
-    "alerts": ["entropy_drift: 0.15 > 0.1"]
-  }
-}
-```
-
-### 에러 처리
-
-| error.type | 대응 |
-|-----------|------|
-| `ValidationError` | Recipe/Config YAML 수정 |
-| `RuntimeError` | batch_size 축소, precision 변경, GPU 수 조정 |
+Training graceful shutdown is also documented there. `mdp inference` and `mdp generate` do not currently install the training signal handler, so timeout/Ctrl+C can leave partial output.

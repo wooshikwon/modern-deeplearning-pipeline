@@ -10,7 +10,7 @@ from typing import Any
 import torch
 from torch import nn
 
-from mdp.training.strategies.base import BaseStrategy
+from mdp.training.strategies.base import BaseStrategy, StrategyCheckpointCapability
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +54,14 @@ class FSDPStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     # BaseStrategy interface
     # ------------------------------------------------------------------
+
+    @property
+    def checkpoint_capability(self) -> StrategyCheckpointCapability:
+        return StrategyCheckpointCapability(
+            supports_managed_checkpoint=True,
+            requires_all_ranks_for_save=True,
+            weight_format="safetensors_full_state_dict",
+        )
 
     def setup(self, model: nn.Module, device: torch.device, optimizer: torch.optim.Optimizer | None = None) -> nn.Module:  # noqa: ARG002
         import torch.distributed as dist
@@ -188,6 +196,11 @@ class FSDPStrategy(BaseStrategy):
         )
         from safetensors.torch import save_file
 
+        if not isinstance(model, FSDP):
+            if dist.get_rank() == 0:
+                save_file(self.unwrap(model).state_dict(), path)
+            return
+
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
             state_dict = model.state_dict()
@@ -201,6 +214,10 @@ class FSDPStrategy(BaseStrategy):
             StateDictType,
         )
         from safetensors.torch import load_file
+
+        if not isinstance(model, FSDP):
+            self.unwrap(model).load_state_dict(load_file(path), strict=False)
+            return model
 
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):

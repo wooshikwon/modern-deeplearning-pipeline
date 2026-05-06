@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from enum import Enum
 from typing import Any, Callable
 
 import torch.nn as nn
@@ -11,6 +12,36 @@ from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
+
+
+class _ModelLoadRoute(Enum):
+    COMPONENT_FROM_PRETRAINED = "component_from_pretrained"
+    COMPONENT_CONSTRUCTOR = "component_constructor"
+    PRETRAINED_RESOLVER = "pretrained_resolver"
+    QLORA = "qlora"
+
+
+def _decide_model_load_route(
+    model_config: dict[str, Any],
+    adapter_config: dict[str, Any] | None,
+) -> _ModelLoadRoute:
+    component = model_config.get("_component_")
+    pretrained = model_config.get("pretrained")
+
+    if adapter_config is not None and _is_qlora_adapter_config(adapter_config):
+        return _ModelLoadRoute.QLORA
+    if component is not None and pretrained is not None:
+        return _ModelLoadRoute.COMPONENT_FROM_PRETRAINED
+    if component is not None:
+        return _ModelLoadRoute.COMPONENT_CONSTRUCTOR
+    if pretrained is not None:
+        return _ModelLoadRoute.PRETRAINED_RESOLVER
+    raise ValueError("model에 _component_ 또는 pretrained가 필요합니다")
+
+
+def _is_qlora_adapter_config(adapter_config: dict[str, Any]) -> bool:
+    component = adapter_config.get("_component_", "")
+    return component in {"QLoRA", "mdp.models.adapters.qlora.apply_qlora"}
 
 
 class Factory:
@@ -73,14 +104,16 @@ class Factory:
 
         QLoRA는 1+5를 한 번에 수행하는 특수 경로를 탄다.
         """
+        route = _decide_model_load_route(model_config, adapter_config)
+
         # QLoRA 특수 경로: 양자화 + 로딩 + 어댑터가 한 번에
-        if adapter_config is not None and self._is_qlora_adapter(adapter_config):
+        if route is _ModelLoadRoute.QLORA:
             adapter_config = self._resolve_semantic_from_config(model_config, adapter_config)
             return self._build_qlora_model(model_config, adapter_config)
 
         # 일반 경로
         # 단계 1: pretrained 로딩
-        model = self._load_pretrained(model_config)
+        model = self._load_pretrained(model_config, route)
 
         # 단계 1.5: semantic resolve (일방향 — 여기서 한 번만, 이후 raw만 흐름)
         head_config, adapter_config = self._resolve_semantic(
@@ -221,7 +254,11 @@ class Factory:
 
         return ac
 
-    def _load_pretrained(self, model_config: dict[str, Any]) -> nn.Module:
+    def _load_pretrained(
+        self,
+        model_config: dict[str, Any],
+        route: _ModelLoadRoute | None = None,
+    ) -> nn.Module:
         """_component_와 pretrained 조합에 따라 모델을 로딩한다.
 
         분기 기준은 _component_ 유무이다:
@@ -245,27 +282,34 @@ class Factory:
         if attn_impl is not None:
             kwargs["attn_implementation"] = attn_impl
 
+        route = route or _decide_model_load_route(model_config, None)
+
         # _component_ 명시: 그 클래스가 인스턴스화를 소유한다
-        if component is not None:
+        if route in {
+            _ModelLoadRoute.COMPONENT_FROM_PRETRAINED,
+            _ModelLoadRoute.COMPONENT_CONSTRUCTOR,
+        }:
             klass = self.resolver.import_class(
                 self.resolver._resolve_alias(component)
             )
-            if pretrained is not None and hasattr(klass, "from_pretrained"):
+            if (
+                route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED
+                and hasattr(klass, "from_pretrained")
+            ):
                 # HF 호환 클래스: URI에서 identifier를 추출하고 from_pretrained
                 _, identifier = PretrainedResolver._parse_uri(pretrained)
                 return klass.from_pretrained(identifier, **kwargs)
-            elif pretrained is not None:
+            elif route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED:
                 # 커스텀 클래스: pretrained는 생성자 인자
                 return klass(pretrained=pretrained, **kwargs)
             else:
                 return klass(**kwargs)
 
         # _component_ 없음: PretrainedResolver가 클래스까지 추론
-        elif pretrained is not None:
+        if route is _ModelLoadRoute.PRETRAINED_RESOLVER:
             return PretrainedResolver.load(pretrained, **kwargs)
 
-        else:
-            raise ValueError("model에 _component_ 또는 pretrained가 필요합니다")
+        raise ValueError(f"지원하지 않는 모델 로딩 경로입니다: {route.value}")
 
     def _build_qlora_model(self, model_config: dict[str, Any], adapter_config: dict[str, Any]) -> nn.Module:
         """QLoRA 특수 경로: 양자화 + 로딩 + 어댑터를 한 번에 수행한다."""
@@ -297,12 +341,6 @@ class Factory:
 
         from mdp.models.adapters.qlora import apply_qlora
         return apply_qlora(**ac)
-
-    def _is_qlora_adapter(self, adapter_config: dict[str, Any]) -> bool:
-        """adapter 설정이 QLoRA인지 판별한다."""
-        component = adapter_config.get("_component_", "")
-        resolved = self.resolver._resolve_alias(component) if component else ""
-        return resolved == "mdp.models.adapters.qlora.apply_qlora"
 
     @staticmethod
     def _attach_head(
@@ -357,10 +395,11 @@ class Factory:
         """
         def _create() -> dict:
             from mdp.data.dataloader import create_dataloaders
+            from mdp.settings.distributed import has_distributed_intent
 
             recipe = self.settings.recipe
             data = recipe.data
-            distributed = self.settings.config.compute.distributed is not None
+            distributed = has_distributed_intent(self.settings)
 
             return create_dataloaders(
                 dataset_config=data.dataset,

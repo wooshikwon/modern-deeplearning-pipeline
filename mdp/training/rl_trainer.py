@@ -30,6 +30,7 @@ from mdp.training._common import (
     create_expert_parallel,
     create_strategy,
     detect_device,
+    set_epoch_on_loader,
     setup_amp,
 )
 from mdp.training._base import BaseTrainer
@@ -37,6 +38,7 @@ from mdp.training._checkpoint import (
     export_model_artifact,
     gather_fsdp_state_dict,
     load_checkpoint,
+    ModelSlot,
 )
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
@@ -231,6 +233,34 @@ class RLTrainer(BaseTrainer):
             "recipe_dict": self._recipe_dict,
             "models": models,
         }
+
+    def _checkpoint_model_slots(self) -> list[ModelSlot]:
+        """RL checkpoint manager input for trainable and frozen model roles."""
+        slots: list[ModelSlot] = []
+        valid_roles = {"policy", "reference", "reward", "critic", "value", "model"}
+        for name, model in self.trainable.items():
+            role = name if name in valid_roles else "model"
+            slots.append(
+                ModelSlot(
+                    name=name,
+                    role=role,  # type: ignore[arg-type]
+                    model=model,
+                    trainable=True,
+                    optimizer=self.optimizers.get(name),
+                    scheduler=self.schedulers.get(name),
+                )
+            )
+        for name, model in self.frozen.items():
+            role = name if name in valid_roles else "model"
+            slots.append(
+                ModelSlot(
+                    name=name,
+                    role=role,  # type: ignore[arg-type]
+                    model=model,
+                    trainable=False,
+                )
+            )
+        return slots
 
     def _load_checkpoint_state(self, state: dict) -> None:
         """``load_checkpoint``가 반환한 state dict로 학습 상태를 복원한다.
@@ -560,7 +590,12 @@ class RLTrainer(BaseTrainer):
             logger.warning(f"Resume 체크포인트 없음: {ckpt_dir}")
             return
 
-        state = load_checkpoint(ckpt_dir)
+        state = load_checkpoint(
+            ckpt_dir,
+            self._checkpoint_model_slots(),
+            strategy=self.strategy,
+            scaler=self.scaler,
+        )
         self._load_checkpoint_state(state)
 
     # ── 학습 루프 ──
@@ -777,9 +812,7 @@ class RLTrainer(BaseTrainer):
 
         # Gap 5: Resume from checkpoint
         self._maybe_resume()
-        sampler = getattr(self.train_loader, "sampler", None)
-        if sampler is not None and hasattr(sampler, "set_epoch"):
-            sampler.set_epoch(self.epoch_counter)
+        set_epoch_on_loader(self.train_loader, self.epoch_counter)
 
         # Inject storage.checkpoint_dir into ModelCheckpoint callbacks that don't have an
         # explicit dirpath set. Config takes precedence over recipe, so
@@ -953,9 +986,7 @@ class RLTrainer(BaseTrainer):
                         self._fire("on_epoch_start", epoch=self.epoch_counter)
 
                         # 분산 학습 시 에폭 경계에서 sampler 셔플 갱신
-                        sampler = getattr(self.train_loader, "sampler", None)
-                        if sampler is not None and hasattr(sampler, "set_epoch"):
-                            sampler.set_epoch(self.epoch_counter)
+                        set_epoch_on_loader(self.train_loader, self.epoch_counter)
                         train_iter = iter(self.train_loader)
                         batch_idx = 0
                         batch = next(train_iter)
@@ -1415,7 +1446,7 @@ class RLTrainer(BaseTrainer):
 
         추출 우선순위:
         1. reward model forward 결과의 "reward" 키 (명시적 scalar)
-        2. reward model의 logits에서 마지막 유효 토큰의 첫 번째 값
+        2. reward model의 logits shape를 명시적으로 분기
         3. reward model 없으면 0 반환
         """
         if "reward" not in frozen_out:
@@ -1433,13 +1464,23 @@ class RLTrainer(BaseTrainer):
         if logits is None:
             return torch.zeros(generated_ids.shape[0], device=generated_ids.device)
 
-        last_idx = gen_mask.sum(dim=-1).long() - 1
+        if logits.dim() == 1:
+            return logits
+
+        if logits.dim() == 2 and logits.shape[1] == 1:
+            return logits.squeeze(-1)
+
+        last_idx = gen_mask.sum(dim=-1).long().clamp(min=1) - 1
         batch_arange = torch.arange(logits.shape[0], device=logits.device)
         if logits.dim() == 3:
-            return logits[batch_arange, last_idx, 0]
-        elif logits.dim() == 2:
+            token_scores = logits.squeeze(-1) if logits.shape[-1] == 1 else logits[..., 0]
+            return token_scores[batch_arange, last_idx]
+        if logits.dim() == 2 and logits.shape[1] == generated_ids.shape[1]:
             return logits[batch_arange, last_idx]
-        else:
-            return logits.squeeze()
-
-
+        if logits.dim() == 2:
+            raise ValueError(
+                "Reward model returned classification logits with shape "
+                f"{tuple(logits.shape)}. Configure an explicit reward scalar or "
+                "return token scores shaped (batch, sequence)."
+            )
+        return logits.squeeze()

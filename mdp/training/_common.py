@@ -20,6 +20,20 @@ from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
 
+
+def set_epoch_on_loader(loader: Any, epoch: int) -> None:
+    """Propagate epoch changes to DataLoader sampler and batch_sampler."""
+    seen: set[int] = set()
+    for attr in ("sampler", "batch_sampler"):
+        obj = getattr(loader, attr, None)
+        if obj is None or id(obj) in seen:
+            continue
+        seen.add(id(obj))
+        set_epoch = getattr(obj, "set_epoch", None)
+        if callable(set_epoch):
+            set_epoch(epoch)
+
+
 def aggregate_checkpoint_stats(
     callbacks: list,
 ) -> tuple[int, Path | None, str]:
@@ -98,7 +112,7 @@ def setup_amp(
 def load_callbacks_from_file(path: str) -> list[dict[str, Any]]:
     """콜백 YAML 파일을 읽어 list[dict] 설정을 반환한다.
 
-    파일 형식은 Recipe의 callbacks 섹션과 동일:
+    파일 형식은 CLI callbacks YAML 형식과 동일:
     ``[{_component_: Name, ...}, ...]``
     """
     import yaml
@@ -122,7 +136,7 @@ def load_callbacks_from_file(path: str) -> list[dict[str, Any]]:
 
 
 def create_callbacks(configs: list[dict[str, Any]], resolver: Any) -> list:
-    """Recipe의 callbacks 설정에서 콜백 리스트를 생성한다."""
+    """CLI callbacks YAML 설정에서 콜백 리스트를 생성한다."""
     callbacks = []
     for cfg in configs:
         try:
@@ -161,6 +175,8 @@ def auto_strategy(**kwargs: Any) -> Any:
 
 def create_strategy(settings: Settings, resolver: Any) -> Any:
     """Config.compute.distributed에서 분산 전략을 생성한다. None이면 전략 없음."""
+    from mdp.settings.distributed import is_deepspeed_strategy
+
     dist_config = settings.config.compute.distributed
     if dist_config is None:
         return None
@@ -170,6 +186,15 @@ def create_strategy(settings: Settings, resolver: Any) -> Any:
     strategy_name = dist_config.get("strategy", "auto")
     if strategy_name == "none":
         return None
+    if is_deepspeed_strategy(
+        strategy_name.get("_component_", "") if isinstance(strategy_name, dict) else strategy_name
+    ):
+        raise ValueError(
+            "DeepSpeed strategy is not supported by the current Trainer/RLTrainer "
+            "runtime contract. The engine owns backward/step/checkpoint semantics, "
+            "which are not yet integrated. Use DDP/FSDP, or track a separate "
+            "DeepSpeed engine-contract spec before enabling this path."
+        )
 
     # strategy 값이 이미 _component_ dict이면 직접 resolve
     if isinstance(strategy_name, dict):

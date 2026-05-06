@@ -11,7 +11,66 @@ from typing import Any, Callable
 import torch
 from starlette.responses import StreamingResponse
 
+from mdp.models.forward import make_forward_fn
+
 logger = logging.getLogger(__name__)
+
+
+_GENERATION_KEYS = (
+    "max_new_tokens",
+    "temperature",
+    "top_p",
+    "top_k",
+    "do_sample",
+    "num_beams",
+    "repetition_penalty",
+)
+
+_GENERATION_DEFAULTS: dict[str, Any] = {
+    "max_new_tokens": 256,
+    "temperature": 1.0,
+    "top_p": 1.0,
+    "top_k": 50,
+    "do_sample": True,
+    "num_beams": 1,
+    "repetition_penalty": 1.0,
+}
+
+
+def resolve_generation_kwargs(
+    recipe_generation: Any | None,
+    cli_args_or_serving_args: Any | None = None,
+) -> dict[str, Any]:
+    """Resolve generation kwargs with defaults < recipe < explicit args."""
+    resolved = dict(_GENERATION_DEFAULTS)
+
+    recipe_values = _generation_values(recipe_generation)
+    for key in _GENERATION_KEYS:
+        value = recipe_values.get(key)
+        if value is not None:
+            resolved[key] = value
+
+    explicit_values = _generation_values(cli_args_or_serving_args)
+    for key in _GENERATION_KEYS:
+        value = explicit_values.get(key)
+        if value is not None:
+            resolved[key] = value
+
+    return resolved
+
+
+def _generation_values(source: Any | None) -> dict[str, Any]:
+    if source is None:
+        return {}
+    if hasattr(source, "model_dump"):
+        return source.model_dump(exclude_none=True)
+    if isinstance(source, dict):
+        return source
+    return {
+        key: getattr(source, key)
+        for key in _GENERATION_KEYS
+        if hasattr(source, key)
+    }
 
 
 class GenerateHandler:
@@ -50,10 +109,8 @@ class GenerateHandler:
         gen_kwargs = {
             "input_ids": input_ids,
             "streamer": streamer,
-            "max_new_tokens": self.generation_config.get("max_new_tokens", 256),
-            "temperature": self.generation_config.get("temperature", 1.0),
-            "do_sample": self.generation_config.get("do_sample", True),
         }
+        gen_kwargs.update(resolve_generation_kwargs(self.generation_config, raw_input))
 
         # thread wrapper: 예외 캡처 + sentinel 주입으로 deadlock 방지
         thread_exc: list[BaseException | None] = [None]
@@ -104,6 +161,7 @@ class PredictHandler:
         self.transform = transform
         self.task = recipe.task
         self._device = next(model.parameters()).device
+        self.forward_fn = make_forward_fn(model)
         max_bs = 1
         window = 50.0
         if serving_config is not None:
@@ -111,7 +169,12 @@ class PredictHandler:
             window = getattr(serving_config, "batch_window_ms", 50.0)
         self._use_batching = max_bs > 1
         if self._use_batching:
-            self.scheduler = _BatchScheduler(model, max_batch_size=max_bs, batch_window_ms=window)
+            self.scheduler = _BatchScheduler(
+                model,
+                forward_fn=self.forward_fn,
+                max_batch_size=max_bs,
+                batch_window_ms=window,
+            )
 
     async def handle(self, raw_input: dict) -> dict:
         preprocessed = await asyncio.to_thread(self._preprocess, raw_input)
@@ -132,7 +195,7 @@ class PredictHandler:
 
     def _run_model(self, inputs: dict) -> Any:
         with torch.no_grad():
-            return self.model(inputs)
+            return self.forward_fn(inputs)
 
     def _preprocess(self, raw_input: dict) -> dict:
         """raw 입력을 모델 입력 텐서로 변환한다."""
@@ -165,10 +228,12 @@ class _BatchScheduler:
     def __init__(
         self,
         model: torch.nn.Module,
+        forward_fn: Callable[[dict], dict] | None = None,
         max_batch_size: int = 8,
         batch_window_ms: float = 50,
     ) -> None:
         self.model = model
+        self.forward_fn = forward_fn or make_forward_fn(model)
         self.max_batch_size = max_batch_size
         self.batch_window = batch_window_ms / 1000
         self.queue: asyncio.Queue = asyncio.Queue()
@@ -201,7 +266,7 @@ class _BatchScheduler:
                 batched = {k: v.to(self._device) if isinstance(v, torch.Tensor) else v for k, v in batched.items()}
 
                 with torch.no_grad():
-                    outputs = self.model(batched)
+                    outputs = self.forward_fn(batched)
 
                 if isinstance(outputs, torch.Tensor):
                     outputs = {"logits": outputs}

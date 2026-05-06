@@ -18,7 +18,7 @@ import pytest
 import torch
 from torch import Tensor, nn
 
-from mdp.factory.factory import Factory
+from mdp.factory.factory import Factory, _ModelLoadRoute, _decide_model_load_route
 from mdp.models.base import BaseModel
 from mdp.settings.schema import (
     Config,
@@ -94,6 +94,40 @@ def _make_settings(model_config: dict[str, Any]) -> Settings:
 
 
 # ── 경우 ④: 커스텀 BaseModel + pretrained → 생성자 호출 ──
+
+
+class TestModelLoadRouteDecision:
+    """Factory의 model load route pure helper 계약을 고정한다."""
+
+    def test_component_with_pretrained_uses_component_from_pretrained_route(self) -> None:
+        route = _decide_model_load_route(
+            {"_component_": "some.Model", "pretrained": "hf://org/model"},
+            None,
+        )
+
+        assert route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED
+
+    def test_component_only_uses_component_constructor_route(self) -> None:
+        route = _decide_model_load_route({"_component_": "some.Model"}, None)
+
+        assert route is _ModelLoadRoute.COMPONENT_CONSTRUCTOR
+
+    def test_pretrained_only_uses_pretrained_resolver_route(self) -> None:
+        route = _decide_model_load_route({"pretrained": "hf://org/model"}, None)
+
+        assert route is _ModelLoadRoute.PRETRAINED_RESOLVER
+
+    def test_qlora_adapter_uses_qlora_route(self) -> None:
+        route = _decide_model_load_route(
+            {"pretrained": "hf://Qwen/Qwen2.5-7B", "torch_dtype": "bfloat16"},
+            {"_component_": "QLoRA", "target": ["attn.q", "attn.v"]},
+        )
+
+        assert route is _ModelLoadRoute.QLORA
+
+    def test_missing_model_source_raises_value_error(self) -> None:
+        with pytest.raises(ValueError, match="_component_ 또는 pretrained"):
+            _decide_model_load_route({}, None)
 
 
 class TestCustomBaseModelWithPretrained:

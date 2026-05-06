@@ -36,7 +36,7 @@ _YAML_PAIRS = [
     ("yolo-detection-custom.yaml", "local-single-gpu-detection.yaml"),
     ("clip-finetune-custom.yaml", "local-single-gpu.yaml"),
     ("gpt2-finetune-text.yaml", "cloud-gcp-8gpu.yaml"),
-    ("qwen25-qlora-instruct.yaml", "multi-node-2x4gpu-deepspeed.yaml"),
+    ("qwen25-qlora-instruct.yaml", "multi-node-2x4gpu-ddp.yaml"),
 ]
 
 
@@ -138,6 +138,14 @@ def test_compat_validator_fsdp_qlora() -> None:
     assert any("FSDP" in e and "QLoRA" in e for e in result.errors)
 
 
+def test_compat_validator_deepspeed_is_currently_unsupported() -> None:
+    """DeepSpeed configs fail fast until the engine-contract spec is implemented."""
+    settings = _make_minimal_settings(distributed={"strategy": "deepspeed_zero3"})
+    result = CompatValidator().validate(settings)
+
+    assert any("DeepSpeed strategy is not supported" in e for e in result.errors)
+
+
 # ---------------------------------------------------------------------------
 # Seq2SeqLMHead alias → CausalLMHead
 # ---------------------------------------------------------------------------
@@ -206,5 +214,3 @@ def test_validate_partial_subset() -> None:
     head_result = BusinessValidator.validate_partial(settings, checks=["head_task"])
     assert len(head_result.errors) > 0
     assert any("CausalLMHead" in e for e in head_result.errors)
-
-

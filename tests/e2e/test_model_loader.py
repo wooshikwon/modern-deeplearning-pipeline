@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
 import torch
+import yaml
 
 from mdp.serving.model_loader import load_checkpoint_weights
 from tests.e2e.models import TinyVisionModel
@@ -49,6 +51,95 @@ def test_load_no_weights_warns(tmp_path: Path, caplog) -> None:
         load_checkpoint_weights(model, tmp_path)
 
     assert "가중치 파일이 없습니다" in caplog.text
+
+
+def test_artifact_load_plan_selects_manifest_policy_role(tmp_path: Path) -> None:
+    """manifest checkpoint에서 RL serving 기본 role인 policy를 선택한다."""
+    from mdp.serving.model_loader import resolve_artifact_load_plan
+
+    policy_dir = tmp_path / "policy"
+    reward_dir = tmp_path / "reward"
+    policy_dir.mkdir()
+    reward_dir.mkdir()
+    (policy_dir / "model.safetensors").touch()
+    (reward_dir / "model.safetensors").touch()
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({
+            "models": {
+                "policy": {
+                    "role": "policy",
+                    "format": "safetensors",
+                    "path": "policy/model.safetensors",
+                    "trainable": True,
+                },
+                "reward": {
+                    "role": "reward",
+                    "format": "safetensors",
+                    "path": "reward/model.safetensors",
+                    "trainable": False,
+                },
+            }
+        })
+    )
+
+    plan = resolve_artifact_load_plan(tmp_path)
+
+    assert plan.artifact_kind == "training_checkpoint"
+    assert plan.role == "policy"
+    assert plan.weight_format == "safetensors"
+    assert plan.weights_dir == policy_dir
+
+
+def test_reconstruct_model_from_manifest_checkpoint(tmp_path: Path) -> None:
+    """manifest checkpoint는 record path 기준으로 가중치를 로드한다."""
+    from safetensors.torch import save_file
+
+    from mdp.serving.model_loader import reconstruct_model
+
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    save_file(model.state_dict(), tmp_path / "model.safetensors")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({
+            "models": {
+                "model": {
+                    "role": "policy",
+                    "format": "safetensors",
+                    "path": "model.safetensors",
+                    "trainable": True,
+                }
+            }
+        })
+    )
+    recipe = {
+        "name": "manifest-checkpoint-test",
+        "task": "image_classification",
+        "model": {
+            "_component_": "tests.e2e.models.TinyVisionModel",
+            "num_classes": 2,
+            "hidden_dim": 16,
+        },
+        "data": {
+            "dataset": {
+                "_component_": "mdp.data.datasets.HuggingFaceDataset",
+                "source": "/tmp/fake",
+                "split": "train",
+            },
+            "collator": {"_component_": "mdp.data.collators.ClassificationCollator"},
+        },
+        "training": {"epochs": 1},
+        "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+        "metadata": {"author": "test", "description": "manifest checkpoint test"},
+    }
+    (tmp_path / "recipe.yaml").write_text(yaml.dump(recipe))
+
+    loaded, settings = reconstruct_model(tmp_path)
+
+    assert settings.recipe.name == "manifest-checkpoint-test"
+    for (_, expected), (_, actual) in zip(
+        model.named_parameters(),
+        loaded.named_parameters(),
+    ):
+        assert torch.equal(expected, actual)
 
 
 # ---------------------------------------------------------------------------

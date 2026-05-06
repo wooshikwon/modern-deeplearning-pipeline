@@ -4,9 +4,7 @@ environment:
 compute:
   gpus: 4
   distributed:
-    strategy: deepspeed_zero3
-    offload_optimizer: false
-    offload_params: false
+    strategy: ddp
 
 mlflow:
   tracking_uri: http://mlflow.cluster.com:5000

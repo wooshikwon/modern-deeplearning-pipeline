@@ -9,7 +9,14 @@ from typing import Any
 
 import typer
 
-from mdp.cli.output import build_error, build_result, emit_result, is_json_mode, resolve_model_source
+from mdp.cli.output import (
+    build_error,
+    build_result,
+    emit_result,
+    is_json_mode,
+    resolve_model_source,
+    resolve_model_source_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +96,9 @@ def run_generate(
     from transformers import AutoTokenizer
 
     try:
-        model_path = resolve_model_source(run_id, model_dir, "generate", pretrained=pretrained)
+        source_plan = resolve_model_source_plan(
+            run_id, model_dir, "generate", pretrained=pretrained,
+        )
     except typer.BadParameter as e:
         msg = str(e)
         if is_json_mode():
@@ -99,19 +108,23 @@ def run_generate(
         raise typer.Exit(code=1)
 
     try:
-        is_pretrained = model_path is None
+        is_pretrained = source_plan.is_pretrained
 
         if is_pretrained:
             # pretrained 분기: PretrainedResolver로 직접 로드, Recipe 없음
-            from mdp.models.pretrained import PretrainedResolver
+            from mdp.models.pretrained import PretrainedLoadSpec, PretrainedResolver
 
-            from mdp.cli.inference import _build_pretrained_kwargs
-
-            model_kwargs = _build_pretrained_kwargs(dtype, trust_remote_code, attn_impl, device_map)
-            model = PretrainedResolver.load(pretrained, **model_kwargs)
+            load_spec = PretrainedLoadSpec.from_options(
+                source_plan.uri,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                attn_implementation=attn_impl,
+                device_map=device_map,
+            )
+            model = PretrainedResolver.load(source_plan.uri, load_spec=load_spec)
             model.eval()
 
-            tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(pretrained)
+            tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(source_plan.uri)
             from mdp.serving.model_loader import _resolve_padding_side
             tokenizer = AutoTokenizer.from_pretrained(tok_name, padding_side=_resolve_padding_side(model))
         else:
@@ -119,7 +132,7 @@ def run_generate(
             from mdp.serving.model_loader import reconstruct_model, _resolve_padding_side
 
             model, settings = reconstruct_model(
-                model_path, merge=True, device_map=device_map, overrides=overrides,
+                source_plan.path, merge=True, device_map=device_map, overrides=overrides,
             )
             model.eval()
 
@@ -163,46 +176,26 @@ def run_generate(
                     "text_generation 태스크의 모델만 지원됩니다."
                 )
 
-            # Generation 파라미터: CLI defaults → recipe (artifact만) → CLI overrides
-            gen_kwargs: dict[str, Any] = {
-                "max_new_tokens": 256,
-                "temperature": 1.0,
-                "top_p": 1.0,
-                "top_k": 50,
-                "do_sample": True,
-                "num_beams": 1,
-                "repetition_penalty": 1.0,
-            }
-            if not is_pretrained:
-                gen_spec = settings.recipe.generation
-                if gen_spec is not None:
-                    gen_kwargs.update({
-                        "max_new_tokens": gen_spec.max_new_tokens,
-                        "temperature": gen_spec.temperature,
-                        "top_p": gen_spec.top_p,
-                        "top_k": gen_spec.top_k,
-                        "do_sample": gen_spec.do_sample,
-                        "num_beams": gen_spec.num_beams,
-                        "repetition_penalty": gen_spec.repetition_penalty,
-                    })
-            # CLI 값이 명시적으로 전달되었으면 override
-            if max_new_tokens is not None:
-                gen_kwargs["max_new_tokens"] = max_new_tokens
-            if temperature is not None:
-                gen_kwargs["temperature"] = temperature
-            if top_p is not None:
-                gen_kwargs["top_p"] = top_p
-            if top_k is not None:
-                gen_kwargs["top_k"] = top_k
-            if do_sample is not None:
-                gen_kwargs["do_sample"] = do_sample
+            from mdp.serving.handlers import resolve_generation_kwargs
+
+            recipe_generation = None if is_pretrained else settings.recipe.generation
+            gen_kwargs = resolve_generation_kwargs(
+                recipe_generation,
+                {
+                    "max_new_tokens": max_new_tokens,
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "top_k": top_k,
+                    "do_sample": do_sample,
+                },
+            )
 
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
 
             if not is_json_mode():
                 if is_pretrained:
-                    typer.echo(f"Pretrained: {pretrained}")
+                    typer.echo(f"Pretrained: {source_plan.uri}")
                 elif run_id:
                     typer.echo(f"MLflow run: {run_id}")
                 else:

@@ -208,12 +208,13 @@ def _default_recipe_yaml() -> str:
     """ResNet 이미지 분류 예제 Recipe YAML."""
     return dedent("""\
         # MDP Recipe -- 실험 정의서
+        # Fallback template. For a runnable catalog-backed recipe, run mdp init with
+        # explicit --task and --model values.
         name: resnet50-cifar10
         task: image_classification
 
         model:
           _component_: torchvision.models.resnet50
-          pretrained: "hf://microsoft/resnet-50"
           num_classes: 10
 
         data:

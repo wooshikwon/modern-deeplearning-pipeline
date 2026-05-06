@@ -51,6 +51,51 @@ def test_batch_inference_classification(tmp_path: Path) -> None:
     assert eval_results == {}
 
 
+def test_batch_inference_hf_style_forward(tmp_path: Path) -> None:
+    """Non-BaseModel modules are called with ``model(**batch)``."""
+
+    class _HFStyleModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed = nn.Embedding(8, 4)
+            self.proj = nn.Linear(4, 2)
+
+        def forward(self, input_ids=None, attention_mask=None):
+            hidden = self.embed(input_ids)
+            if attention_mask is not None:
+                hidden = hidden * attention_mask.unsqueeze(-1)
+            return {"logits": self.proj(hidden[:, -1])}
+
+    model = _HFStyleModel()
+    loader = ListDataLoader([
+        {
+            "input_ids": torch.tensor([[1, 2, 3], [3, 2, 1]]),
+            "attention_mask": torch.ones(2, 3, dtype=torch.long),
+        }
+    ])
+
+    class _Inspector(BaseInferenceCallback):
+        def __init__(self) -> None:
+            self.shapes: list[tuple[int, ...]] = []
+
+        def on_batch(self, batch_idx: int, batch: dict, outputs: dict, **kwargs) -> None:
+            self.shapes.append(tuple(outputs["logits"].shape))
+
+    inspector = _Inspector()
+    result_path, _ = run_batch_inference(
+        model=model,
+        dataloader=loader,
+        output_path=tmp_path / "preds",
+        output_format="jsonl",
+        task="classification",
+        device="cpu",
+        callbacks=[inspector],
+    )
+
+    assert result_path is None
+    assert inspector.shapes == [(2, 2)]
+
+
 def test_batch_inference_formats(tmp_path: Path) -> None:
     """Test csv and parquet output formats."""
     model = TinyVisionModel(num_classes=2, hidden_dim=16)

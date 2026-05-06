@@ -98,7 +98,7 @@ adapter:
 # 단일 GPU
 mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml
 
-# 멀티 GPU (자동 감지 — GPU가 2개 이상이면 torchrun 자동 실행)
+# 멀티 GPU (분산 전략 명시 시 GPU가 2개 이상이면 torchrun 자동 실행)
 mdp train -r my_project/recipes/example.yaml -c my_project/configs/local.yaml
 
 # 런타임 override

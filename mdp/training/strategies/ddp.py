@@ -7,7 +7,7 @@ import os
 import torch
 from torch import nn
 
-from mdp.training.strategies.base import BaseStrategy
+from mdp.training.strategies.base import BaseStrategy, StrategyCheckpointCapability
 
 
 class DDPStrategy(BaseStrategy):
@@ -24,6 +24,13 @@ class DDPStrategy(BaseStrategy):
     # ------------------------------------------------------------------
     # BaseStrategy interface
     # ------------------------------------------------------------------
+
+    @property
+    def checkpoint_capability(self) -> StrategyCheckpointCapability:
+        return StrategyCheckpointCapability(
+            supports_managed_checkpoint=True,
+            weight_format="safetensors",
+        )
 
     def setup(self, model: nn.Module, device: torch.device, optimizer: torch.optim.Optimizer | None = None) -> nn.Module:  # noqa: ARG002
         import torch.distributed as dist
@@ -57,13 +64,13 @@ class DDPStrategy(BaseStrategy):
         if dist.get_rank() == 0:
             from safetensors.torch import save_file
 
-            save_file(model.module.state_dict(), path)
+            save_file(self.unwrap(model).state_dict(), path)
 
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
         from safetensors.torch import load_file
 
         state_dict = load_file(path)
-        model.module.load_state_dict(state_dict)
+        self.unwrap(model).load_state_dict(state_dict, strict=False)
         return model
 
     def cleanup(self) -> None:

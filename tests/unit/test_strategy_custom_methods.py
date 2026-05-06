@@ -82,6 +82,12 @@ class _ConcreteBase(BaseStrategy):
 
 
 class TestBaseStrategyDefaults:
+    def test_checkpoint_capability_defaults_to_unsupported(self):
+        strat = _ConcreteBase()
+        capability = strat.checkpoint_capability
+        assert capability.supports_managed_checkpoint is False
+        assert "compatibility" in str(capability.unsupported_reason)
+
     def test_unwrap_is_identity_when_not_wrapped(self):
         model = _ModelWithCustom()
         strat = _ConcreteBase()
@@ -112,6 +118,27 @@ class TestBaseStrategyDefaults:
 
 
 class TestDDPStrategyCustomMethods:
+    def test_checkpoint_capability_declares_manager_support(self):
+        strat = DDPStrategy()
+        capability = strat.checkpoint_capability
+        assert capability.supports_managed_checkpoint is True
+        assert capability.requires_all_ranks_for_save is False
+        assert capability.weight_format == "safetensors"
+
+    def test_save_and_load_checkpoint_accept_plain_module(self, tmp_path, monkeypatch):
+        """Frozen RL slots may be plain modules even when DDPStrategy is active."""
+        monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+        original = _ModelWithCustom()
+        restored = _ModelWithCustom()
+        path = tmp_path / "model.safetensors"
+        strat = DDPStrategy()
+
+        strat.save_checkpoint(original, str(path))
+        restored.linear.weight.data.zero_()
+        strat.load_checkpoint(restored, str(path))
+
+        assert torch.allclose(restored.linear.weight, original.linear.weight)
+
     def test_unwrap_returns_inner_module(self):
         inner = _ModelWithCustom()
         wrapped = _FakeDDPWrapper(inner)
@@ -157,6 +184,13 @@ class TestDDPStrategyCustomMethods:
 
 
 class TestFSDPStrategyFallback:
+    def test_checkpoint_capability_declares_collective_save(self):
+        strat = FSDPStrategy(sharding_strategy="FULL_SHARD")
+        capability = strat.checkpoint_capability
+        assert capability.supports_managed_checkpoint is True
+        assert capability.requires_all_ranks_for_save is True
+        assert capability.weight_format == "safetensors_full_state_dict"
+
     def test_unwrap_returns_inner_module(self):
         inner = _ModelWithCustom()
         wrapped = _FakeDDPWrapper(inner)

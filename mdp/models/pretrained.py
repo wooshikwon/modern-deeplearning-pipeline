@@ -4,13 +4,97 @@ from __future__ import annotations
 
 import importlib
 import logging
+from dataclasses import dataclass
 from typing import Any
 
+import torch
 from torch import nn
 
 logger = logging.getLogger(__name__)
 
 _PROTOCOLS = ("hf://", "timm://", "ultralytics://", "local://")
+
+
+@dataclass(frozen=True)
+class PretrainedLoadSpec:
+    """Pretrained 모델 로딩 옵션을 정규화한 plan."""
+
+    uri: str
+    protocol: str
+    torch_dtype: torch.dtype | None = None
+    trust_remote_code: bool = False
+    attn_implementation: str | None = None
+    device_map: str | None = None
+
+    @classmethod
+    def from_options(
+        cls,
+        uri: str,
+        *,
+        dtype: str | torch.dtype | None = None,
+        torch_dtype: str | torch.dtype | None = None,
+        trust_remote_code: bool = False,
+        attn_implementation: str | None = None,
+        device_map: str | None = None,
+    ) -> "PretrainedLoadSpec":
+        """CLI/Recipe option 이름을 받아 로더용 타입으로 정규화한다."""
+        protocol, _ = PretrainedResolver._parse_uri(uri)
+        dtype_value = torch_dtype if torch_dtype is not None else dtype
+        normalized_dtype = cls._normalize_dtype(dtype_value)
+        spec = cls(
+            uri=uri,
+            protocol=protocol,
+            torch_dtype=normalized_dtype,
+            trust_remote_code=trust_remote_code,
+            attn_implementation=attn_implementation,
+            device_map=device_map,
+        )
+        spec.validate()
+        return spec
+
+    @staticmethod
+    def _normalize_dtype(dtype: str | torch.dtype | None) -> torch.dtype | None:
+        if dtype is None or isinstance(dtype, torch.dtype):
+            return dtype
+        if not isinstance(dtype, str):
+            raise TypeError(f"dtype은 str 또는 torch.dtype이어야 합니다: {type(dtype).__name__}")
+        try:
+            value = getattr(torch, dtype)
+        except AttributeError as e:
+            raise ValueError(f"지원하지 않는 torch dtype: {dtype!r}") from e
+        if not isinstance(value, torch.dtype):
+            raise ValueError(f"지원하지 않는 torch dtype: {dtype!r}")
+        return value
+
+    def validate(self) -> None:
+        if self.protocol == "hf":
+            return
+        invalid: list[str] = []
+        if self.trust_remote_code:
+            invalid.append("trust_remote_code")
+        if self.attn_implementation is not None:
+            invalid.append("attn_implementation")
+        if self.device_map is not None:
+            invalid.append("device_map")
+        if self.protocol in {"ultralytics", "local"} and self.torch_dtype is not None:
+            invalid.append("torch_dtype")
+        if invalid:
+            names = ", ".join(invalid)
+            raise ValueError(
+                f"{self.protocol}:// pretrained 로더에는 {names} 옵션을 전달할 수 없습니다."
+            )
+
+    def to_loader_kwargs(self) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {}
+        if self.torch_dtype is not None:
+            kwargs["torch_dtype"] = self.torch_dtype
+        if self.trust_remote_code:
+            kwargs["trust_remote_code"] = True
+        if self.attn_implementation is not None:
+            kwargs["attn_implementation"] = self.attn_implementation
+        if self.device_map is not None:
+            kwargs["device_map"] = self.device_map
+        return kwargs
 
 
 class PretrainedResolver:
@@ -31,6 +115,7 @@ class PretrainedResolver:
         cls,
         uri: str,
         class_path: str | None = None,
+        load_spec: PretrainedLoadSpec | None = None,
         **kwargs: Any,
     ) -> nn.Module:
         """URI에서 사전학습 모델을 로드한다.
@@ -43,7 +128,11 @@ class PretrainedResolver:
         Returns:
             로드된 nn.Module.
         """
+        spec = load_spec or PretrainedLoadSpec.from_options(uri)
+        if spec.uri != uri:
+            raise ValueError("load_spec.uri와 uri가 일치해야 합니다.")
         protocol, identifier = cls._parse_uri(uri)
+        kwargs = {**spec.to_loader_kwargs(), **kwargs}
 
         handlers = {
             "hf": cls._load_hf,
@@ -96,7 +185,7 @@ class PretrainedResolver:
             mod = importlib.import_module(module_path)
             model_cls = getattr(mod, cls_name)
         else:
-            config = transformers.AutoConfig.from_pretrained(identifier)
+            config = transformers.AutoConfig.from_pretrained(identifier, **kwargs)
             architectures = getattr(config, "architectures", None) or []
             if not architectures:
                 raise ValueError(

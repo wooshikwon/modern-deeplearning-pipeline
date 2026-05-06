@@ -259,7 +259,7 @@ class MemoryEstimator:
         - 단일 GPU로 충분하면 ``"none"``
         - 모델이 단일 GPU에 들어가면 ``"ddp"``
         - 모델이 크면 ``"fsdp"``
-        - 매우 크면 ``"deepspeed_zero3"``
+        - 매우 크면 현재 지원 경계에서는 ``"fsdp"``
         """
         if suggested_gpus <= 1:
             return "none"
@@ -272,5 +272,5 @@ class MemoryEstimator:
             # 모델이 2개 GPU에 분산 가능 → FSDP
             return "fsdp"
 
-        # 매우 큰 모델 → DeepSpeed ZeRO-3
-        return "deepspeed_zero3"
+        # DeepSpeed ZeRO-3 is currently fail-fast; keep recommendations on supported paths.
+        return "fsdp"

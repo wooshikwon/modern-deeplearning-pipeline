@@ -23,6 +23,8 @@ import torch
 
 from mdp.training import rl_trainer as rl_trainer_module
 from mdp.training.losses.base import BaseAlgorithm
+from mdp.training.losses import rl as rl_losses
+from mdp.training.losses.rl import PPOLoss
 from mdp.training.rl_trainer import RLTrainer
 
 
@@ -501,3 +503,87 @@ class TestGenerationNeedsLogitsFalse:
         )
         # hidden dispatcher는 mini-epoch에서 호출
         assert len(counter.extract_hidden_calls) == 1
+
+
+class TestRewardCorrectness:
+    def test_ppo_places_scalar_reward_on_last_true_response_mask(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        captured: dict[str, torch.Tensor] = {}
+
+        def _spy_compute_gae(values, rewards, mask, **kwargs):
+            captured["rewards"] = rewards.detach().clone()
+            return torch.zeros_like(values)
+
+        monkeypatch.setattr(rl_losses, "compute_gae", _spy_compute_gae)
+
+        loss = PPOLoss(mini_epochs=1)
+        logits = torch.zeros(1, 7, 11, requires_grad=True)
+        batch = {
+            "input_ids": torch.tensor([[1, 2, 3, 4, 5, 6, 7]]),
+            "old_log_probs": torch.zeros(1, 6),
+            "prompt_length": 4,
+            "rewards": torch.tensor([2.5]),
+        }
+
+        loss.compute_loss({"policy": {"logits": logits}}, {}, batch)
+
+        expected = torch.zeros(1, 6)
+        expected[0, 5] = 2.5
+        assert torch.equal(captured["rewards"], expected)
+
+    def test_compute_rewards_accepts_scalar_reward_logits(self) -> None:
+        generated_ids = torch.zeros(2, 4, dtype=torch.long)
+        gen_mask = torch.ones(2, 4, dtype=torch.long)
+
+        rewards = RLTrainer._compute_rewards(
+            object(),
+            {"reward": {"logits": torch.tensor([1.0, 2.0])}},
+            generated_ids,
+            gen_mask,
+        )
+        assert torch.equal(rewards, torch.tensor([1.0, 2.0]))
+
+        rewards = RLTrainer._compute_rewards(
+            object(),
+            {"reward": {"logits": torch.tensor([[1.0], [2.0]])}},
+            generated_ids,
+            gen_mask,
+        )
+        assert torch.equal(rewards, torch.tensor([1.0, 2.0]))
+
+    def test_compute_rewards_uses_last_valid_token_score(self) -> None:
+        generated_ids = torch.zeros(2, 4, dtype=torch.long)
+        gen_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 1, 1]])
+
+        token_scores = torch.tensor([
+            [0.1, 0.2, 0.3, 9.9],
+            [1.1, 1.2, 1.3, 1.4],
+        ])
+        rewards = RLTrainer._compute_rewards(
+            object(),
+            {"reward": {"logits": token_scores}},
+            generated_ids,
+            gen_mask,
+        )
+        assert torch.equal(rewards, torch.tensor([0.3, 1.4]))
+
+        rewards = RLTrainer._compute_rewards(
+            object(),
+            {"reward": {"logits": token_scores.unsqueeze(-1)}},
+            generated_ids,
+            gen_mask,
+        )
+        assert torch.equal(rewards, torch.tensor([0.3, 1.4]))
+
+    def test_compute_rewards_rejects_ambiguous_classification_logits(self) -> None:
+        generated_ids = torch.zeros(2, 4, dtype=torch.long)
+        gen_mask = torch.ones(2, 4, dtype=torch.long)
+
+        with pytest.raises(ValueError, match="classification logits"):
+            RLTrainer._compute_rewards(
+                object(),
+                {"reward": {"logits": torch.zeros(2, 3)}},
+                generated_ids,
+                gen_mask,
+            )

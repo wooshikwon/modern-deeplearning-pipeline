@@ -222,8 +222,12 @@ class GradientLogger(BaseCallback):
 ```
 
 ```yaml
-callbacks:
-  - _component_: my_callbacks.custom.GradientLogger
+# callbacks.yaml
+- _component_: my_callbacks.custom.GradientLogger
+```
+
+```bash
+mdp train -r recipe.yaml -c config.yaml --callbacks callbacks.yaml
 ```
 
 ### Hook 호출 순서

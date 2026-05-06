@@ -46,6 +46,36 @@ def test_compute_baseline_structure() -> None:
     assert "confidence_mean" in baseline["output_stats"]
 
 
+def test_compute_baseline_hf_style_model_outputs_stats() -> None:
+    """compute_baseline uses the shared forward normalizer for HF-style models."""
+
+    class _HFStyleModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed = nn.Embedding(16, 4)
+            self.proj = nn.Linear(4, 3)
+
+        def forward(self, input_ids=None, attention_mask=None, **kwargs):
+            hidden = self.embed(input_ids)
+            if attention_mask is not None:
+                hidden = hidden * attention_mask.unsqueeze(-1)
+            return {"logits": self.proj(hidden[:, -1])}
+
+    model = _HFStyleModel()
+    loader = ListDataLoader([
+        {
+            "input_ids": torch.tensor([[1, 2, 3], [3, 2, 1]]),
+            "attention_mask": torch.ones(2, 3, dtype=torch.long),
+            "labels": torch.tensor([0, 1]),
+        }
+    ])
+
+    baseline = compute_baseline(train_dataloader=loader, model=model, max_batches=1)
+
+    assert baseline["output_stats"]["entropy_mean"] > 0
+    assert baseline["output_stats"]["confidence_mean"] > 0
+
+
 # ---------------------------------------------------------------------------
 # compare_baselines
 # ---------------------------------------------------------------------------

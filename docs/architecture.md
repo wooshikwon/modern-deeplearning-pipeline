@@ -52,7 +52,7 @@ training/
 │
 ├── callbacks/          # EarlyStopping, ModelCheckpoint, EMA + re-export base
 ├── losses/             # DPOLoss, GRPOLoss, PPOLoss + BaseAlgorithm + _ce_helpers.py
-└── strategies/         # DDPStrategy, FSDPStrategy, DeepSpeedStrategy
+└── strategies/         # DDPStrategy, FSDPStrategy, DeepSpeedStrategy stub (unsupported)
 ```
 
 ### BaseTrainer (`_base.py`)
@@ -89,15 +89,20 @@ Stateless free functions for extracting `(hidden_states, head_weight)` from mode
 
 ### `_checkpoint.py` — Checkpoint I/O
 
-Free functions that handle all filesystem I/O for training state. Separated from the compute layer (trainer loop) to isolate side effects.
+Manifest-aware checkpoint I/O for training state. Separated from the compute layer (trainer loop) to isolate side effects.
 
 | Function | Purpose |
 |---|---|
-| `save_checkpoint(state, ckpt_dir)` | Serialize full training state to disk |
-| `load_checkpoint(ckpt_dir)` | Restore training state (pure function, no side effects) |
+| `CheckpointManager.save(context, slots, strategy, scaler)` | Write manifest, model weights, optimizer/scheduler/scaler, and trainer state |
+| `CheckpointManager.load(ckpt_dir)` | Read manifest checkpoints or legacy manifestless checkpoints |
+| `save_checkpoint(state, ckpt_dir)` / `load_checkpoint(ckpt_dir)` | Legacy wrapper API retained for existing trainer call sites |
 | `gather_fsdp_state_dict(model)` | Collect full state dict via all-rank FSDP collective |
 | `export_model_artifact(model, metadata, mlflow_run, ...)` | Register policy/SFT artifact with MLflow |
 | `find_best_checkpoint(strategy_config)` | Resolve best/latest symlink to checkpoint path |
+
+New checkpoints contain `manifest.json` with `layout_version`, checkpoint kind, trainer state file, optional recipe/config snapshots, scaler path, and per-model records. Each model record declares role, weight format, relative path, trainable flag, and optional optimizer/scheduler files. Manifestless directories are treated as legacy checkpoints and are loaded best-effort from `trainer_state.json` and `scaler.pt`.
+
+Strategies expose `checkpoint_capability`. DDP and FSDP opt in to manager-owned full-state checkpointing; FSDP also declares that save is an all-rank collective. The default strategy capability is unsupported, so DeepSpeed is intentionally fail-fast in the current Trainer/RLTrainer runtime. Its engine owns backward, optimizer step, ZeRO shards, and checkpoint semantics, so DeepSpeed ZeRO checkpoints must not be documented or restored as normal DDP/FSDP checkpoints until a separate engine-contract spec implements that path.
 
 `Trainer` and `RLTrainer` call these via `BaseTrainer._checkpoint_state()` / `_load_checkpoint_state()` hooks — they no longer own save/resume/export logic directly.
 

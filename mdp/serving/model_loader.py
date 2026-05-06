@@ -2,11 +2,120 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
+
+_CHECKPOINT_MANIFEST_FILE = "manifest.json"
+
+
+@dataclass(frozen=True)
+class ArtifactLoadPlan:
+    source: Path
+    artifact_kind: Literal[
+        "training_checkpoint",
+        "serving_artifact",
+        "legacy_checkpoint",
+    ]
+    role: str = "policy"
+    weight_format: str | None = None
+    merge: bool = False
+    weights_dir: Path | None = None
+
+
+def resolve_artifact_load_plan(
+    source: Path,
+    *,
+    role: str = "policy",
+    merge: bool = False,
+) -> ArtifactLoadPlan:
+    """Classify model source and select the role-specific weight directory."""
+    manifest_path = source / _CHECKPOINT_MANIFEST_FILE
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        models = manifest.get("models", {})
+        if models:
+            selected_name, selected = _select_manifest_model(models, role)
+            record_path = Path(str(selected.get("path", ".")))
+            weights_dir = source / record_path.parent
+            if str(record_path.parent) == ".":
+                weights_dir = source
+            logger.info(
+                "manifest checkpoint selected model slot=%s role=%s format=%s",
+                selected_name,
+                selected.get("role"),
+                selected.get("format"),
+            )
+            return ArtifactLoadPlan(
+                source=source,
+                artifact_kind="training_checkpoint",
+                role=str(selected.get("role", role)),
+                weight_format=selected.get("format"),
+                merge=merge,
+                weights_dir=weights_dir,
+            )
+
+    if (source / "recipe.yaml").exists() and (
+        (source / "export_info.json").exists()
+        or (source / "adapter_config.json").exists()
+        or (source / "adapter_model.safetensors").exists()
+        or (source / "model.safetensors").exists()
+        or (source / "model.pt").exists()
+    ):
+        return ArtifactLoadPlan(
+            source=source,
+            artifact_kind="serving_artifact",
+            role=role,
+            weight_format=_detect_weight_format(source),
+            merge=merge,
+            weights_dir=source,
+        )
+
+    return ArtifactLoadPlan(
+        source=source,
+        artifact_kind="legacy_checkpoint",
+        role=role,
+        weight_format=_detect_weight_format(source),
+        merge=merge,
+        weights_dir=source,
+    )
+
+
+def _select_manifest_model(
+    models: dict[str, Any],
+    role: str,
+) -> tuple[str, dict[str, Any]]:
+    for name, record in models.items():
+        if record.get("role") == role:
+            return name, record
+    if role in models:
+        return role, models[role]
+    available = {
+        name: record.get("role")
+        for name, record in models.items()
+    }
+    raise ValueError(
+        f"manifest checkpoint에 role={role!r} 모델이 없습니다. available={available}"
+    )
+
+
+def _detect_weight_format(source: Path) -> str | None:
+    if (source / "export_info.json").exists():
+        return "export"
+    if (
+        (source / "adapter_config.json").exists()
+        or (source / "adapter_model.safetensors").exists()
+    ):
+        return "peft_adapter"
+    if (source / "model.safetensors").exists():
+        return "safetensors"
+    if (source / "model.pt").exists():
+        return "torch_state_dict"
+    return None
 
 
 def _get_adapter_name(checkpoint_dir: Path) -> str:
@@ -119,6 +228,7 @@ def _dispatch_model(
 def reconstruct_model(
     artifact_dir: Path,
     merge: bool = False,
+    role: str = "policy",
     device_map: str | None = None,
     max_memory: dict[str, str] | None = None,
     overrides: list[str] | None = None,
@@ -131,6 +241,7 @@ def reconstruct_model(
     Args:
         artifact_dir: artifact 또는 checkpoint 디렉토리.
         merge: True이면 adapter를 base model에 merge한다 (export/serve용).
+        role: manifest checkpoint에서 로드할 모델 role. RL serving/export 기본값은 policy.
         device_map: "auto", "balanced", "sequential" 등. 지정 시 accelerate로 분산 배치.
         max_memory: GPU별 최대 메모리. {"0": "24GiB", "1": "40GiB"}.
         overrides: Recipe/Config 오버라이드 (dotted KEY=VALUE).
@@ -141,32 +252,39 @@ def reconstruct_model(
     from mdp.factory.factory import Factory
     from mdp.settings.factory import SettingsFactory
 
+    plan = resolve_artifact_load_plan(artifact_dir, role=role, merge=merge)
+    weights_dir = plan.weights_dir or artifact_dir
+
     settings = SettingsFactory().from_artifact(str(artifact_dir), overrides=overrides)
     # RL recipe는 top-level `model` 섹션에 pretrained가 없고 `rl.models.policy`에 있다.
     # create_model()은 recipe.model만 보므로 RL recipe에서 크래시한다.
     # RL recipe이면 create_models()["policy"]를 사용한다.
-    # "policy" 고정은 의도적 — generate/serve/export/inference는 항상 policy 모델을 사용.
-    # value/critic 모델은 훈련 전용이며 serving 경로에서는 필요하지 않다.
+    # default role은 policy — value/critic 모델은 훈련 전용이며 serving 경로에서는
+    # 필요하지 않다. manifest checkpoint에서는 caller가 role을 명시할 수 있다.
     factory = Factory(settings)
     if settings.recipe.rl is not None:
         models = factory.create_models(skip_base_check=True)
-        model = models.get("policy") or next(iter(models.values()))
+        model = (
+            models.get(plan.role)
+            or models.get("policy")
+            or next(iter(models.values()))
+        )
     else:
         model = factory.create_model(skip_base_check=True)
 
     # export_info.json이 있으면 BaseModel.export()가 생성한 커스텀 export artifact
     # (e.g., backbone/ + value_head.pt 분리 저장). BaseModel.load_from_export()에 위임.
-    export_info_path = artifact_dir / "export_info.json"
+    export_info_path = weights_dir / "export_info.json"
 
     # adapter_config.json이 있으면 PEFT adapter artifact
-    adapter_config_path = artifact_dir / "adapter_config.json"
-    adapter_safetensors = artifact_dir / "adapter_model.safetensors"
-    safetensors_path = artifact_dir / "model.safetensors"
+    adapter_config_path = weights_dir / "adapter_config.json"
+    adapter_safetensors = weights_dir / "adapter_model.safetensors"
+    safetensors_path = weights_dir / "model.safetensors"
 
     if export_info_path.exists():
         target = getattr(model, "module", model)
         if hasattr(target, "load_from_export"):
-            target.load_from_export(artifact_dir)
+            target.load_from_export(weights_dir)
         else:
             logger.warning(
                 "export_info.json 있지만 load_from_export() 없음 — "
@@ -176,7 +294,7 @@ def reconstruct_model(
         # device_map은 추후 필요 시 추가.
     elif adapter_config_path.exists() or adapter_safetensors.exists():
         # adapter는 항상 CPU에서 먼저 로드 + merge
-        load_checkpoint_weights(model, artifact_dir)
+        load_checkpoint_weights(model, weights_dir)
         if merge and hasattr(model, "merge_and_unload"):
             logger.info("LoRA adapter 병합 중...")
             model = model.merge_and_unload()
@@ -206,10 +324,10 @@ def reconstruct_model(
                         getattr(model, "hf_device_map", "N/A"))
     elif device_map is not None:
         # device_map 지정: accelerate로 가중치 분산 로딩
-        checkpoint = _find_checkpoint_path(artifact_dir)
+        checkpoint = _find_checkpoint_path(weights_dir)
         if checkpoint is None:
             raise ValueError(
-                f"device_map이 지정되었지만 가중치 파일(model.safetensors/model.pt)이 없습니다: {artifact_dir}"
+                f"device_map이 지정되었지만 가중치 파일(model.safetensors/model.pt)이 없습니다: {weights_dir}"
             )
         else:
             model = _dispatch_model(model, checkpoint, device_map, max_memory)
@@ -220,6 +338,6 @@ def reconstruct_model(
         state_dict = load_file(safetensors_path)
         target.load_state_dict(state_dict)
     else:
-        logger.warning("가중치 파일 없음: %s", artifact_dir)
+        logger.warning("가중치 파일 없음: %s", weights_dir)
 
     return model, settings

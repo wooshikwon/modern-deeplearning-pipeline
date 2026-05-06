@@ -10,7 +10,7 @@ MDP run을 실제 GPU/서버 환경에서 돌릴 때의 운영 실전 가이드.
 mdp rl-train -r recipe.yaml -c config.yaml
 ```
 
-4 GPU DDP 환경에서 이 한 줄만으로 torchrun이 자동 기동되어 rank 0~3에 프로세스가 뜬다. Config의 `compute.distributed.strategy`(`ddp` / `fsdp` / `deepspeed_zero3` / `auto`)가 실제 래퍼를 결정한다.
+4 GPU DDP 환경에서 이 한 줄만으로 torchrun이 자동 기동되어 rank 0~3에 프로세스가 뜬다. Config의 `compute.distributed.strategy`(`ddp` / `fsdp` / `auto`)가 실제 래퍼를 결정한다. `deepspeed*` 전략명은 현재 지원 경계에서 fail-fast하며, 별도 engine-contract 구현 전까지 학습 전략으로 사용할 수 없다.
 
 ---
 
@@ -100,23 +100,10 @@ OOM이 발생해 `_dump_oom_summary` 출력을 받은 경우의 판단 절차:
 
 ## Graceful Shutdown
 
-학습 루프가 외부 시그널(Ctrl+C, 상위 `timeout`, K8s eviction 등)로 중단될 때 MLflow run이 zombie(RUNNING) 상태로 남지 않도록, `Trainer.train()` / `RLTrainer.train()`이 SIGTERM·SIGINT를 내부에서 처리한다. 상세한 동작 원칙·분산 안전성은 `docs/training.md` "Graceful Shutdown" 섹션을 참조.
+Use `timeout` around `mdp train` / `mdp rl-train` when a wall-clock bound is needed. Training catches SIGTERM/SIGINT at step boundaries, closes MLflow cleanly, and records `stopped_reason`. The canonical behavior and result fields are in [Observability](observability.md#graceful-shutdown).
 
-운영 실전 패턴:
+`mdp inference` / `mdp generate` do not currently install that handler; split large inference jobs instead of relying on timeout for clean partial results.
 
-```bash
-# 2시간 wall-clock 상한 + graceful shutdown
-timeout 2h mdp rl-train -r recipe.yaml -c config.yaml \
-  > run.log 2>&1
-```
-
-- 2시간 후 SIGTERM → 현재 step 완료 후 break → finally(cleanup + on_train_end + MLflow summary) 실행.
-- MLflow run은 `FINISHED` 상태로 마감, `stopped_reason=signal_term` tag.
-- End banner가 `Stopped: signal_term`으로 rank-0 로그에 남아 grep으로 즉시 식별 가능.
-
-`mdp inference` / `mdp generate` 경로에는 현재 signal handler가 없다 — 장시간 배치 추론에 timeout을 걸면 출력이 부분 저장될 수 있으므로 `--batch-size`와 데이터 분할로 wall-clock을 예측 가능하게 관리한다.
-
----
 
 ## Resume
 
@@ -139,27 +126,11 @@ job:
 
 ## MLflow Tracking
 
-`config.mlflow.tracking_uri`가 기본값 `./mlruns`이면 run 산출물이 현재 디렉토리에 로컬로 쌓인다. 원격 tracking server(MLflow server 또는 Databricks)를 쓰려면:
+Set `config.mlflow.tracking_uri` to a local `./mlruns` directory or a remote tracking server. MDP treats MLflow write failures as non-fatal warnings. Canonical logging keys and failure behavior are in [Observability](observability.md#mlflow-conventions).
 
-```yaml
-# config.yaml
-mlflow:
-  tracking_uri: http://mlflow.example.com:5000
-  experiment_name: weighted-ntp-baseline
-```
-
-MLflow 자체 통신 실패는 학습을 깨뜨리지 않는다 — `log_step_metrics`의 매 step 호출은 `logger.debug`로 에러를 흡수하고, 1회성 호출(`log_static_params`, `log_summary`)은 `logger.warning`로 경고만 낸다. 상세는 `docs/training.md` "MLflow Logging Conventions" 섹션.
-
----
 
 ## 에러 복구 전략
 
-MDP는 프로세스 내 복구를 시도하지 않는다. 대신:
+Operational recovery is external to MDP: use checkpointing, `job.resume`, supported distributed strategies, and external orchestration where needed. The canonical recovery matrix is in [Observability](observability.md#error-recovery).
 
-1. `ModelCheckpoint` 콜백으로 주기적 저장
-2. `job.resume: auto`로 최신 체크포인트에서 재시작
-3. MLflow/monitoring 실패는 경고만 출력하고 학습은 계속
-4. SIGTERM/SIGINT는 Graceful Shutdown 경로로 처리되어 `stopped_reason=signal_term|signal_int` tag와 함께 정상 마감
-5. OOM은 `_dump_oom_summary` 실행 후 `stopped_reason=oom` tag 기록, 재시작은 운영자가 판단(batch size 축소 등)
-
-원격·클라우드 오케스트레이션(SSH job 제출, SkyPilot 런칭, K8s scheduling)은 MDP의 책임이 아니다. 사용자가 이미 실행 환경(로컬 머신 / SSH로 접속한 원격 서버 / 클라우드 컨테이너) 안에 있다고 가정한다. 원격 실행 자동화가 필요하면 SkyPilot, Ray, SLURM, K8s 등 전용 오케스트레이터를 쓴다.
+Remote/cloud scheduling such as SSH job submission, SkyPilot, SLURM, or K8s is outside MDP's responsibility.

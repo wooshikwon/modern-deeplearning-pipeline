@@ -61,7 +61,7 @@ def version(
 def train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
-    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe callbacks를 override)"),
+    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe에는 callbacks 필드 없음)"),
     override: list[str] | None = typer.Option(None, "--override", help="오버라이드. KEY=VALUE 또는 JSON dict. 예: --override training.epochs=3 --override data.batch_size=8, 또는 --override '{\"training.epochs\": 3, \"data.batch_size\": 8}'"),
     format: OutputFormat | None = typer.Option(None, "--format", help=_FORMAT_HELP),
 ):
@@ -76,7 +76,7 @@ def train(
 def rl_train(
     recipe: str = typer.Option(..., "-r", "--recipe", help="RL Recipe YAML 경로"),
     config: str = typer.Option(..., "-c", "--config", help="Config YAML 경로"),
-    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe callbacks를 override)"),
+    callbacks: str = typer.Option(None, "--callbacks", help="콜백 YAML 파일 경로 (Recipe에는 callbacks 필드 없음)"),
     override: list[str] | None = typer.Option(None, "--override", help="오버라이드. KEY=VALUE 또는 JSON dict. 예: --override training.epochs=3 --override data.batch_size=8, 또는 --override '{\"training.epochs\": 3, \"data.batch_size\": 8}'"),
     format: OutputFormat | None = typer.Option(None, "--format", help=_FORMAT_HELP),
 ):

@@ -119,14 +119,6 @@ scheduler:                              # 스케줄러 (선택)
 loss:                                   # 손실 함수 (선택, 생략 시 model.training_step() 사용)
   _component_: CrossEntropyLoss
 
-callbacks:                              # 콜백 리스트
-  - _component_: ModelCheckpoint
-    monitor: val_loss
-    mode: min
-  - _component_: EarlyStopping
-    monitor: val_loss
-    patience: 3
-
 evaluation:                             # 평가 메트릭
   metrics: [Accuracy, F1Score]
 
@@ -151,15 +143,17 @@ monitoring:                             # 드리프트 모니터링 (선택)
 ### ModelCheckpoint 콜백 옵션
 
 ```yaml
-callbacks:
-  - _component_: ModelCheckpoint
-    dirpath: ./checkpoints        # 생략 시 config.storage.checkpoint_dir 사용
-    monitor: val_loss             # metric 이름
-    mode: min                     # min (loss) | max (accuracy)
-    save_top_k: 3                 # 상위 k개만 유지 (나머지 삭제)
-    every_n_steps: 500            # 설정 시 매 N step마다 저장 (검증과 무관)
-    strict: false                 # 기본. true이면 첫 validation에서 monitor 미매칭 시 ValueError
+# callbacks.yaml
+- _component_: ModelCheckpoint
+  dirpath: ./checkpoints        # 생략 시 config.storage.checkpoint_dir 사용
+  monitor: val_loss             # metric 이름
+  mode: min                     # min (loss) | max (accuracy)
+  save_top_k: 3                 # 상위 k개만 유지 (나머지 삭제)
+  every_n_steps: 500            # 설정 시 매 N step마다 저장 (검증과 무관)
+  strict: false                 # 기본. true이면 첫 validation에서 monitor 미매칭 시 ValueError
 ```
+
+콜백 YAML은 `--callbacks callbacks.yaml`로 전달한다. Recipe에는 `callbacks:` 필드가 없다.
 
 | 옵션 | 기본값 | 설명 |
 |---|---|---|
@@ -326,7 +320,7 @@ compute:
   target: local                             # local (기본)
   gpus: auto                                # auto | 1 | [0, 1, 2, 3]
   distributed:
-    strategy: ddp                           # ddp | fsdp | deepspeed_zero3 | auto
+    strategy: ddp                           # ddp | fsdp | auto. deepspeed* is currently fail-fast
     # 전략별 추가 설정은 kwargs로 전달
 
 mlflow:
@@ -386,13 +380,7 @@ compute:
     precision: bf16
 ```
 
-**DeepSpeed ZeRO-3** (극대형 모델):
-```yaml
-compute:
-  gpus: auto
-  distributed:
-    strategy: deepspeed_zero3
-```
+지원 전략의 런타임 경계는 [Runtime Contracts](runtime-contracts.md#strategy-capability)를 참조한다.
 
 **MoE Expert Parallelism**:
 ```yaml
@@ -407,7 +395,7 @@ compute:
 
 ## Callbacks YAML
 
-`--callbacks` 옵션으로 별도 파일을 지정하거나, Recipe의 `callbacks:` 섹션에 직접 작성한다.
+`--callbacks` 옵션으로 별도 파일을 지정한다. Recipe에는 `callbacks:` 섹션이 없다.
 
 ```yaml
 # callbacks.yaml
@@ -417,17 +405,13 @@ compute:
   save_top_k: 3
   every_n_steps: 500
 
-- _component_: EarlyStopping
-  monitor: val_loss
-  patience: 3
-
 - _component_: EMACallback
   decay: 0.999
 ```
 
-학습률 로깅은 Trainer builtin 경로가 `mdp/training/_mlflow_logging.py` 공용 헬퍼(`log_step_metrics`·`log_epoch_metrics`)를 통해 매 step·매 epoch `learning_rate` metric을 MLflow에 기록하므로 별도 콜백이 필요 없다(자세한 규약은 [Training Guide](training.md)의 "MLflow Logging Conventions" 섹션 참조).
+학습률 로깅은 Trainer builtin 경로가 처리하므로 별도 콜백이 필요 없다. 로깅 키와 MLflow 규약은 [Observability](observability.md)를 참조한다.
 
-**병합 규칙**: `--callbacks` 파일이 지정되면 Recipe의 `callbacks:` 섹션을 override한다.
+`--callbacks` 파일이 지정되지 않으면 callback은 주입되지 않는다. EarlyStopping/EMA처럼 학습 결과 자체에 영향을 주는 동작은 Recipe의 `training.*` 1급 필드를 사용한다.
 
 ### 내장 콜백
 
@@ -441,18 +425,7 @@ compute:
 
 ## 런타임 Override
 
-CLI에서 Recipe/Config 필드를 덮어쓸 수 있다:
-
-```bash
-mdp train -r recipe.yaml -c config.yaml \
-  --override training.epochs=5 \
-  --override data.dataloader.batch_size=8 \
-  --override config.storage.checkpoint_dir=./ckpts
-```
-
-- `config.` 접두사: Config 필드
-- 그 외: Recipe 필드
-- dot notation으로 중첩 접근 가능
+CLI에서 Recipe/Config 필드를 덮어쓸 수 있다. 문법과 예시는 [CLI Reference](cli-reference.md#global-options)를 참조한다.
 
 ---
 

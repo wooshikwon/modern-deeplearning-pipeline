@@ -29,6 +29,7 @@ import torch
 import pytest
 
 from mdp.training._base import BaseTrainer
+from mdp.training._common import set_epoch_on_loader
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -171,11 +172,37 @@ class TestEstimateTotalSteps:
         # 100 // 2 = 50 steps/epoch * 3 epochs = 150
         assert trainer._estimate_total_steps() == 150
 
+    def test_residual_accumulation_flush_counts_as_step(self):
+        loader = MagicMock()
+        loader.__len__ = MagicMock(return_value=5)
+        trainer = _make_trainer(max_steps=None, epochs=1, grad_accum_steps=4, train_loader=loader)
+        assert trainer._estimate_total_steps() == 2
+
     def test_epochs_defaults_to_1_when_none(self):
         loader = MagicMock()
         loader.__len__ = MagicMock(return_value=40)
         trainer = _make_trainer(max_steps=None, epochs=None, grad_accum_steps=1, train_loader=loader)
         assert trainer._estimate_total_steps() == 40
+
+
+class TestSetEpochOnLoader:
+    def test_updates_sampler_and_batch_sampler(self):
+        sampler = MagicMock()
+        batch_sampler = MagicMock()
+        loader = SimpleNamespace(sampler=sampler, batch_sampler=batch_sampler)
+
+        set_epoch_on_loader(loader, 3)
+
+        sampler.set_epoch.assert_called_once_with(3)
+        batch_sampler.set_epoch.assert_called_once_with(3)
+
+    def test_deduplicates_same_sampler_object(self):
+        sampler = MagicMock()
+        loader = SimpleNamespace(sampler=sampler, batch_sampler=sampler)
+
+        set_epoch_on_loader(loader, 4)
+
+        sampler.set_epoch.assert_called_once_with(4)
 
 
 # ──────────────────────────────────────────────────────────────────────────

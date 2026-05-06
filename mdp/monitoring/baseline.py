@@ -15,6 +15,8 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from mdp.models.forward import make_forward_fn
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,6 +103,7 @@ def compute_baseline(
     num_samples = 0
 
     model.eval()
+    forward_fn = make_forward_fn(model)
 
     for batch_idx, batch in enumerate(train_dataloader):
         if batch_idx >= max_batches:
@@ -169,7 +172,7 @@ def compute_baseline(
                     else:
                         model_batch[k] = v
 
-                outputs = model(model_batch)
+                outputs = forward_fn(model_batch)
 
                 # Extract logits
                 logits = None
@@ -248,7 +251,7 @@ def compute_baseline(
                         else:
                             model_batch[k] = v
 
-                    model(model_batch)
+                    forward_fn(model_batch)
 
                     features = hook_output.get("features")
                     if features is None:

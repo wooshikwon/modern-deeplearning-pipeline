@@ -169,6 +169,44 @@ class TestResidualAddHook:
             assert l0_out.allclose(torch.zeros(1, 1, 4))
             assert l1_out.allclose(torch.ones(1, 1, 4))
 
+    def test_per_layer_vector_uses_actual_layer_index(self) -> None:
+        """2D vector rows are indexed by layer id, not target_layers rank."""
+        model = _make_model(hidden=4)
+        with tempfile.TemporaryDirectory() as tmp:
+            vpath = Path(tmp) / "vec.pt"
+            vecs = torch.stack([torch.full((4,), float(i)) for i in range(3)])
+            torch.save(vecs, vpath)
+
+            cb = ResidualAdd(target_layers=[1, 2], vector_path=vpath, strength=1.0)
+            cb.setup(model)
+
+            outputs = []
+            model.model[1].register_forward_hook(lambda m, inp, out: outputs.append(("layer1", out.clone())))
+            model.model[2].register_forward_hook(lambda m, inp, out: outputs.append(("layer2", out.clone())))
+
+            x = torch.zeros(1, 1, 4)
+            model.model[1](x)
+            model.model[2](x)
+
+            cb.teardown()
+
+            l1_out = next(v for k, v in outputs if k == "layer1")
+            l2_out = next(v for k, v in outputs if k == "layer2")
+            assert l1_out.allclose(torch.ones(1, 1, 4))
+            assert l2_out.allclose(torch.full((1, 1, 4), 2.0))
+
+    def test_per_layer_vector_requires_rows_for_target_layers(self) -> None:
+        """2D vector must include rows up to max target layer."""
+        model = _make_model(hidden=4)
+        with tempfile.TemporaryDirectory() as tmp:
+            vpath = Path(tmp) / "vec.pt"
+            vecs = torch.stack([torch.zeros(4), torch.ones(4)])
+            torch.save(vecs, vpath)
+
+            cb = ResidualAdd(target_layers=[2], vector_path=vpath, strength=1.0)
+            with pytest.raises(ValueError, match="vector rows"):
+                cb.setup(model)
+
 
 # ---------------------------------------------------------------------------
 # ResidualAdd — metadata structure

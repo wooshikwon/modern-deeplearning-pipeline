@@ -9,8 +9,10 @@ from __future__ import annotations
 import datetime
 import json as json_module
 import sys
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 
 class OutputFormat(str, Enum):
@@ -100,21 +102,38 @@ def build_error(
     )
 
 
-def resolve_model_source(
+@dataclass(frozen=True)
+class ModelSourcePlan:
+    """CLI 모델 입력 source를 한 번에 판정한 plan."""
+
+    kind: Literal["artifact", "pretrained"]
+    command: Literal["inference", "generate", "serve", "export"]
+    path: Path | None = None
+    uri: str | None = None
+    supports_pretrained: bool = False
+
+    @property
+    def is_pretrained(self) -> bool:
+        return self.kind == "pretrained"
+
+    @property
+    def is_artifact(self) -> bool:
+        return self.kind == "artifact"
+
+
+_PRETRAINED_COMMANDS = ("inference", "generate")
+
+
+def resolve_model_source_plan(
     run_id: str | None,
     model_dir: str | None,
-    command: str,
+    command: Literal["inference", "generate", "serve", "export"],
     pretrained: str | None = None,
-) -> Path | None:
-    """run_id, model_dir, 또는 pretrained URI에서 모델 소스를 해석한다.
-
-    세 옵션은 상호 배타적이다.  pretrained가 지정되면 None을 반환하고,
-    호출부가 PretrainedResolver로 직접 로드한다.
-    """
-    from pathlib import Path
-
+) -> ModelSourcePlan:
+    """run_id, model_dir, pretrained URI를 상호 배타적으로 판정한다."""
     import typer
 
+    supports_pretrained = command in _PRETRAINED_COMMANDS
     sources = [s for s in (run_id, model_dir, pretrained) if s]
     if len(sources) > 1:
         raise typer.BadParameter(
@@ -126,18 +145,61 @@ def resolve_model_source(
         )
 
     if pretrained:
-        _PRETRAINED_COMMANDS = ("inference", "generate")
-        if command not in _PRETRAINED_COMMANDS:
+        if not supports_pretrained:
             raise typer.BadParameter(
                 f"--pretrained는 {', '.join(_PRETRAINED_COMMANDS)} 커맨드에서만 사용할 수 있습니다."
             )
-        return None
+        return ModelSourcePlan(
+            kind="pretrained",
+            command=command,
+            uri=pretrained,
+            supports_pretrained=supports_pretrained,
+        )
 
     if run_id:
         import mlflow
 
-        return Path(mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path="model"))
-    return Path(model_dir)
+        artifact_path = mlflow.artifacts.download_artifacts(
+            run_id=run_id,
+            artifact_path="model",
+        )
+        return ModelSourcePlan(
+            kind="artifact",
+            command=command,
+            path=Path(artifact_path),
+            supports_pretrained=supports_pretrained,
+        )
+
+    return ModelSourcePlan(
+        kind="artifact",
+        command=command,
+        path=Path(model_dir),
+        supports_pretrained=supports_pretrained,
+    )
+
+
+def resolve_model_source(
+    run_id: str | None,
+    model_dir: str | None,
+    command: str,
+    pretrained: str | None = None,
+) -> Path | None:
+    """run_id, model_dir, 또는 pretrained URI에서 모델 소스를 해석한다.
+
+    세 옵션은 상호 배타적이다.  pretrained가 지정되면 None을 반환하고,
+    호출부가 PretrainedResolver로 직접 로드한다.
+    """
+    plan = resolve_model_source_plan(run_id, model_dir, command, pretrained=pretrained)
+    return None if plan.is_pretrained else plan.path
+
+
+def require_artifact_source(plan: ModelSourcePlan) -> Path:
+    """artifact source가 필요한 command에서 Path를 꺼낸다."""
+    import typer
+
+    if not plan.is_artifact or plan.path is None:
+        raise typer.BadParameter("artifact 모델 경로가 필요합니다.")
+    return plan.path
 
 
 def emit_result(result: dict[str, Any]) -> None:

@@ -71,7 +71,7 @@ mdp serve --run-id <id> --port 8000
 - **`_component_` 패턴**: 모든 컴포넌트(모델, 어댑터, 옵티마이저, 콜백, sampler 등)를 YAML에서 Python import path로 지정. 레지스트리 없이 커스텀 컴포넌트 즉시 사용
 - **Length-bucketed sampling**: 가변 길이 LM 학습에서 `data.sampler`로 `LengthGroupedBatchSampler`(single-GPU) 또는 `DistributedLengthGroupedBatchSampler`(DDP/FSDP)를 선택하면 batch 내 padding 토큰을 거의 제거 (LLaMA-3 측정 53%→0.2%). 미지정 시 기존 동작 100% 보존
 - **Recipe/Config 분리**: 실험 정의와 인프라 설정을 분리하여 동일 실험을 다른 환경에서 재현
-- **분산 학습**: DDP, FSDP, DeepSpeed ZeRO-2/3 자동 감지 및 설정
+- **분산 학습**: DDP, FSDP 지원. DeepSpeed ZeRO-2/3는 현재 fail-fast로 차단되며 별도 engine-contract 구현 후 활성화 예정
 - **RL Alignment**: DPO, GRPO, PPO를 멀티 모델(policy, reference, value, reward)로 지원
 - **어댑터**: LoRA, QLoRA, Prefix Tuning 내장
 - **MLflow 통합**: 학습 메트릭, 아티팩트 자동 추적. `TrainResult.checkpoints_saved`로 산출물 유무를 JSON에서 즉시 판정
@@ -84,13 +84,16 @@ mdp serve --run-id <id> --port 8000
 상세 문서는 [`docs/`](docs/) 디렉토리를 참조:
 
 - **[Getting Started](docs/getting-started.md)** — 설치부터 첫 학습까지
+- **[CLI Reference](docs/cli-reference.md)** — 커맨드, 플래그, 모델 소스, override 규칙
 - **[Configuration Guide](docs/configuration.md)** — Recipe/Config YAML 상세 가이드
+- **[Runtime Contracts](docs/runtime-contracts.md)** — 검증, checkpoint, source precedence, 분산 경계
 - **[Training Guide](docs/training.md)** — SFT, RL, 분산 학습, 콜백
 - **[Inference & Serving](docs/inference-and-serving.md)** — 배치 추론, 텍스트 생성, REST API
 - **[Extending MDP](docs/extending.md)** — 커스텀 모델, 콜백, 컴포넌트 작성법
 - **[Agent Integration](docs/agent-integration.md)** — AI Agent와의 연동 가이드
+- **[Observability](docs/observability.md)** — JSON 출력, logging, MLflow, recovery 계약
 
-개발자 레퍼런스는 [AGENT.md](AGENT.md)를 참조.
+AI agent 진입점은 [AGENT.md](AGENT.md)를 참조.
 
 ## Requirements
 

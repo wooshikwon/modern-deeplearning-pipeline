@@ -30,6 +30,7 @@ from mdp.training._common import (
     create_expert_parallel,
     create_strategy,
     detect_device,
+    set_epoch_on_loader,
     setup_amp,
 )
 from mdp.training._base import BaseTrainer
@@ -37,6 +38,7 @@ from mdp.training._checkpoint import (
     export_sft_model_artifact,
     find_best_checkpoint,
     load_checkpoint,
+    ModelSlot,
 )
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
@@ -223,6 +225,19 @@ class Trainer(BaseTrainer):
             },
             "scaler": self.scaler.state_dict() if self.scaler.is_enabled() else None,
         }
+
+    def _checkpoint_model_slots(self) -> list[ModelSlot]:
+        """SFT checkpoint manager input for the single trainable policy model."""
+        return [
+            ModelSlot(
+                name="",
+                role="policy",
+                model=self.model,
+                trainable=True,
+                optimizer=self.optimizer,
+                scheduler=self.scheduler,
+            )
+        ]
 
     def _load_checkpoint_state(self, state: dict) -> None:
         """``load_checkpoint``가 반환한 state dict로 학습 상태를 복원한다.
@@ -521,9 +536,7 @@ class Trainer(BaseTrainer):
                         break
 
                     # 분산 학습: 매 에폭 셔플 순서 갱신
-                    sampler = getattr(self.train_loader, "sampler", None)
-                    if sampler is not None and hasattr(sampler, "set_epoch"):
-                        sampler.set_epoch(epoch)
+                    set_epoch_on_loader(self.train_loader, epoch)
 
                     self._fire("on_epoch_start", epoch=epoch)
                     train_loss = self._train_one_epoch(epoch)
@@ -956,7 +969,12 @@ class Trainer(BaseTrainer):
             logger.warning(f"체크포인트를 찾을 수 없습니다: {ckpt_path}")
             return
 
-        state = load_checkpoint(ckpt_path)
+        state = load_checkpoint(
+            ckpt_path,
+            self._checkpoint_model_slots(),
+            strategy=self.strategy,
+            scaler=self.scaler,
+        )
         self._load_checkpoint_state(state)
 
     # ── Monitoring baseline ──

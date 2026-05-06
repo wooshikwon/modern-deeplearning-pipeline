@@ -267,16 +267,16 @@ def _list_callbacks() -> None:
 _STRATEGY_DESCRIPTIONS = {
     "ddp": "멀티 GPU 데이터 병렬",
     "fsdp": "메모리 효율적 모델 병렬",
-    "deepspeed": "DeepSpeed (기본 ZeRO Stage)",
-    "deepspeed_zero2": "DeepSpeed ZeRO-2",
-    "deepspeed_zero3": "DeepSpeed ZeRO-3 (전체 분할)",
+    "deepspeed": "UNSUPPORTED: fail-fast until DeepSpeed engine-contract is implemented",
+    "deepspeed_zero2": "UNSUPPORTED: fail-fast until DeepSpeed engine-contract is implemented",
+    "deepspeed_zero3": "UNSUPPORTED: fail-fast until DeepSpeed engine-contract is implemented",
     "auto": "GPU 수에 따라 ddp/fsdp 자동 선택",
     # CamelCase 변형도 동일한 설명으로 처리
     "DDPStrategy": "멀티 GPU 데이터 병렬",
     "FSDPStrategy": "메모리 효율적 모델 병렬",
-    "DeepSpeedStrategy": "DeepSpeed (기본 ZeRO Stage)",
-    "DeepSpeedZeRO2": "DeepSpeed ZeRO-2",
-    "DeepSpeedZeRO3": "DeepSpeed ZeRO-3 (전체 분할)",
+    "DeepSpeedStrategy": "UNSUPPORTED: fail-fast until DeepSpeed engine-contract is implemented",
+    "DeepSpeedZeRO2": "UNSUPPORTED: fail-fast until DeepSpeed engine-contract is implemented",
+    "DeepSpeedZeRO3": "UNSUPPORTED: fail-fast until DeepSpeed engine-contract is implemented",
 }
 
 

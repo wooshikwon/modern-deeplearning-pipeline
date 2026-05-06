@@ -49,21 +49,31 @@ async def _parse_request(request: Any, fields: dict, task: str) -> dict:
         form = await request.form()
         result = {}
         for role, col in (fields or {}).items():
-            if col not in form:
-                continue
             if role == "image":
                 from PIL import Image
                 import io
-                upload = form[col]
+                upload = form[role] if role in form else form.get(col)
+                if upload is None:
+                    continue
                 image = Image.open(io.BytesIO(await upload.read())).convert("RGB")
                 result["image"] = image
             else:
-                upload = form[col]
+                upload = form[role] if role in form else form.get(col)
+                if upload is None:
+                    continue
                 result[role] = upload if isinstance(upload, str) else (await upload.read()).decode("utf-8")
         return result
 
     body = await request.json()
-    return body
+    if not fields:
+        return body
+    result = dict(body)
+    for role, col in fields.items():
+        if role in result:
+            continue
+        if col in body:
+            result[role] = body[col]
+    return result
 
 
 def create_handler(

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import pytest
+import torch
 import typer
 
 from mdp.cli.output import resolve_model_source
 from mdp.cli.generate import _resolve_pretrained_tokenizer_name
+from mdp.models.pretrained import PretrainedLoadSpec
 
 
 # ── resolve_model_source 3-way 상호 배타 ──
@@ -106,3 +108,45 @@ class TestResolvePretrainedTokenizerName:
         """local:// 모델은 토크나이저 자동 추론 불가."""
         with pytest.raises(ValueError, match="local://"):
             _resolve_pretrained_tokenizer_name("local:///path/to/model.pt")
+
+
+# ── PretrainedLoadSpec option normalization ──
+
+
+class TestPretrainedLoadSpec:
+    def test_hf_cli_options_are_normalized(self):
+        spec = PretrainedLoadSpec.from_options(
+            "hf://gpt2",
+            dtype="bfloat16",
+            trust_remote_code=True,
+            attn_implementation="flash_attention_2",
+            device_map="auto",
+        )
+
+        assert spec.protocol == "hf"
+        assert spec.torch_dtype is torch.bfloat16
+        assert spec.to_loader_kwargs() == {
+            "torch_dtype": torch.bfloat16,
+            "trust_remote_code": True,
+            "attn_implementation": "flash_attention_2",
+            "device_map": "auto",
+        }
+
+    def test_no_prefix_defaults_to_hf_protocol(self):
+        spec = PretrainedLoadSpec.from_options("gpt2")
+
+        assert spec.protocol == "hf"
+        assert spec.uri == "gpt2"
+        assert spec.to_loader_kwargs() == {}
+
+    def test_invalid_dtype_raises_clear_error(self):
+        with pytest.raises(ValueError, match="지원하지 않는 torch dtype"):
+            PretrainedLoadSpec.from_options("hf://gpt2", dtype="not_a_dtype")
+
+    def test_non_hf_rejects_hf_only_options(self):
+        with pytest.raises(ValueError, match="device_map"):
+            PretrainedLoadSpec.from_options("timm://resnet50", device_map="auto")
+
+    def test_local_rejects_dtype(self):
+        with pytest.raises(ValueError, match="torch_dtype"):
+            PretrainedLoadSpec.from_options("local:///tmp/model.pt", dtype="float16")

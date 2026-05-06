@@ -8,7 +8,14 @@ from typing import Any
 
 import typer
 
-from mdp.cli.output import build_error, build_result, emit_result, is_json_mode, resolve_model_source
+from mdp.cli.output import (
+    build_error,
+    build_result,
+    emit_result,
+    is_json_mode,
+    resolve_model_source,
+    resolve_model_source_plan,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -196,18 +203,16 @@ def _build_pretrained_kwargs(
     device_map: str | None,
 ) -> dict[str, Any]:
     """pretrained 분기에서 from_pretrained에 전달할 kwargs를 구성한다."""
-    import torch
+    from mdp.models.pretrained import PretrainedLoadSpec
 
-    kwargs: dict[str, Any] = {}
-    if dtype:
-        kwargs["torch_dtype"] = getattr(torch, dtype)
-    if trust_remote_code:
-        kwargs["trust_remote_code"] = True
-    if attn_impl:
-        kwargs["attn_implementation"] = attn_impl
-    if device_map:
-        kwargs["device_map"] = device_map
-    return kwargs
+    spec = PretrainedLoadSpec.from_options(
+        "__placeholder__",
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        attn_implementation=attn_impl,
+        device_map=device_map,
+    )
+    return spec.to_loader_kwargs()
 
 
 def run_inference(
@@ -243,7 +248,9 @@ def run_inference(
     from mdp.serving.inference import run_batch_inference
 
     try:
-        model_path = resolve_model_source(run_id, model_dir, "inference", pretrained=pretrained)
+        source_plan = resolve_model_source_plan(
+            run_id, model_dir, "inference", pretrained=pretrained,
+        )
     except typer.BadParameter as e:
         msg = str(e)
         if is_json_mode():
@@ -252,7 +259,7 @@ def run_inference(
             typer.echo(f"[error] {msg}", err=True)
         raise typer.Exit(code=1)
 
-    is_pretrained = model_path is None
+    is_pretrained = source_plan.is_pretrained
 
     # 콜백 로드 (pretrained/artifact 공통)
     loaded_callbacks: list = []
@@ -281,10 +288,18 @@ def run_inference(
             from mdp.models.pretrained import PretrainedResolver
             from transformers import AutoTokenizer
 
-            model_kwargs = _build_pretrained_kwargs(dtype, trust_remote_code, attn_impl, device_map)
-            model = PretrainedResolver.load(pretrained, **model_kwargs)
+            from mdp.models.pretrained import PretrainedLoadSpec
 
-            tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(pretrained)
+            load_spec = PretrainedLoadSpec.from_options(
+                source_plan.uri,
+                dtype=dtype,
+                trust_remote_code=trust_remote_code,
+                attn_implementation=attn_impl,
+                device_map=device_map,
+            )
+            model = PretrainedResolver.load(source_plan.uri, load_spec=load_spec)
+
+            tok_name = tokenizer_name or _resolve_pretrained_tokenizer_name(source_plan.uri)
             from mdp.serving.model_loader import _resolve_padding_side
             tokenizer = AutoTokenizer.from_pretrained(tok_name, padding_side=_resolve_padding_side(model))
             if tokenizer.pad_token is None:
@@ -354,7 +369,7 @@ def run_inference(
                     evaluation_metrics=eval_results or None,
                 )
                 emit_result(build_result(
-                    command="inference", pretrained=pretrained,
+                    command="inference", pretrained=source_plan.uri,
                     **result.model_dump(exclude_none=True),
                 ))
 
@@ -367,7 +382,7 @@ def run_inference(
 
             # 1. 모델 재구성 + 가중치 로드 (adapter면 merge)
             model, settings = reconstruct_model(
-                model_path, merge=True, device_map=device_map,
+                source_plan.path, merge=True, device_map=device_map,
                 overrides=overrides,
             )
 
@@ -436,7 +451,7 @@ def run_inference(
             monitoring_result = None
             monitoring_cfg = getattr(settings.recipe, "monitoring", None)
             if monitoring_cfg and getattr(monitoring_cfg, "enabled", False):
-                baseline_path = _resolve_baseline_path(model_path)
+                baseline_path = _resolve_baseline_path(source_plan.path)
                 if baseline_path is not None:
                     try:
                         import json as _json

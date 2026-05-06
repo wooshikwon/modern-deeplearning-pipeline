@@ -40,11 +40,13 @@ def test_ddp_strategy_train_and_checkpoint() -> None:
         project_root = str(Path(__file__).resolve().parents[2])
         env = os.environ.copy()
         env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
+        env.setdefault("GLOO_SOCKET_IFNAME", "lo0" if _IS_MAC else "lo")
         result = subprocess.run(
             [
                 sys.executable, "-m", "torch.distributed.run",
-                "--standalone",
+                "--nnodes=1",
                 "--nproc_per_node=2",
+                "--master_addr", "127.0.0.1",
                 "--master_port", str(port),
                 __file__,
                 "--worker", "ddp",
