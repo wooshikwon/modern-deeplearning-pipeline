@@ -28,6 +28,124 @@ init_args_schema:
   seq_classif_dropout: {type: float, default: 0.1}
   max_position_embeddings: {type: int, default: 512}
 
+recipe_defaults:
+  text_classification:
+    model:
+      torch_dtype: bfloat16
+    head:
+      _component_: SequenceClassificationHead
+      hidden_dim: 768
+      dropout: 0.1
+      num_classes: "???"
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???", label: "???"}
+        tokenizer: distilbert-base-uncased
+        max_length: 512
+        padding: false
+        truncation: true
+      collator:
+        _component_: ClassificationCollator
+        tokenizer: distilbert-base-uncased
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 256
+      dataloader:
+        batch_size: 32
+        num_workers: 4
+        drop_last: true
+    adapter: lora
+    training:
+      epochs: 3
+      precision: bf16
+      gradient_accumulation_steps: 1
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 3.0e-5
+      weight_decay: 0.01
+    evaluation:
+      metrics: [Accuracy, F1Score]
+    metadata:
+      author: "???"
+      description: "???"
+  token_classification:
+    model:
+      torch_dtype: bfloat16
+    head:
+      _component_: TokenClassificationHead
+      hidden_dim: 768
+      dropout: 0.1
+      num_classes: "???"
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???", token_labels: "???"}
+        tokenizer: distilbert-base-uncased
+        max_length: 512
+        padding: false
+        truncation: true
+      collator:
+        _component_: TokenClassificationCollator
+        tokenizer: distilbert-base-uncased
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 256
+      dataloader:
+        batch_size: 32
+        num_workers: 4
+        drop_last: true
+    adapter: lora
+    training:
+      epochs: 3
+      precision: bf16
+      gradient_accumulation_steps: 1
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 3.0e-5
+      weight_decay: 0.01
+    evaluation:
+      metrics: [Accuracy, F1Score]
+    metadata:
+      author: "???"
+      description: "???"
+  feature_extraction:
+    model:
+      torch_dtype: bfloat16
+    head: null
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???"}
+        tokenizer: distilbert-base-uncased
+        max_length: 512
+        padding: false
+        truncation: true
+      collator:
+        _component_: ClassificationCollator
+        tokenizer: distilbert-base-uncased
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 256
+      dataloader:
+        batch_size: 32
+        num_workers: 4
+        drop_last: true
+    training:
+      max_steps: 1
+      precision: bf16
+    metadata:
+      author: "???"
+      description: "???"
+
 adapter_defaults:
   lora:
     target: [attention.q_lin, attention.v_lin]

@@ -25,6 +25,52 @@ init_args_schema:
   attention_dropout: {type: float, default: 0.0}
   max_position_embeddings: {type: int, default: 8192}
 
+recipe_defaults:
+  text_generation:
+    model:
+      torch_dtype: bfloat16
+      attn_implementation: flash_attention_2
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???"}
+        tokenizer: google/gemma-2-9b
+        max_length: 2048
+        padding: false
+        truncation: true
+      collator:
+        _component_: CausalLMCollator
+        tokenizer: google/gemma-2-9b
+        max_length: 2048
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 128
+      dataloader:
+        batch_size: 1
+        num_workers: 4
+        drop_last: true
+    adapter: qlora
+    training:
+      epochs: 3
+      precision: bf16
+      gradient_accumulation_steps: 16
+      gradient_checkpointing: true
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 2.0e-5
+      weight_decay: 0.01
+    generation:
+      max_new_tokens: 256
+      temperature: 0.7
+      top_p: 0.9
+      do_sample: true
+    metadata:
+      author: "???"
+      description: "???"
+
 adapter_defaults:
   lora:
     target: [attn.q, attn.k, attn.v, attn.o]

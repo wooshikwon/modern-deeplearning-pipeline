@@ -27,6 +27,93 @@ init_args_schema:
   d_model: {type: int, default: 1024}
   num_heads: {type: int, default: 16}
 
+recipe_defaults:
+  seq2seq:
+    model:
+      torch_dtype: bfloat16
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???", target: "???"}
+        tokenizer: t5-large
+        max_length: 512
+        padding: false
+        truncation: true
+      collator:
+        _component_: Seq2SeqCollator
+        tokenizer: t5-large
+        max_length: 512
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 128
+      dataloader:
+        batch_size: 2
+        num_workers: 4
+        drop_last: true
+    adapter: lora
+    training:
+      epochs: 3
+      precision: bf16
+      gradient_accumulation_steps: 16
+      gradient_checkpointing: true
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 2.0e-5
+      weight_decay: 0.01
+    generation:
+      max_new_tokens: 128
+      num_beams: 4
+      do_sample: false
+    metadata:
+      author: "???"
+      description: "???"
+  text_classification:
+    model:
+      torch_dtype: bfloat16
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???", label: "???"}
+        tokenizer: t5-large
+        max_length: 512
+        padding: false
+        truncation: true
+      collator:
+        _component_: ClassificationCollator
+        tokenizer: t5-large
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 128
+      dataloader:
+        batch_size: 2
+        num_workers: 4
+        drop_last: true
+    head:
+      _component_: SequenceClassificationHead
+      hidden_dim: 1024
+      num_classes: "???"
+    adapter: lora
+    training:
+      epochs: 3
+      precision: bf16
+      gradient_accumulation_steps: 16
+      gradient_checkpointing: true
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 2.0e-5
+      weight_decay: 0.01
+    evaluation:
+      metrics: [Accuracy, F1Score]
+    metadata:
+      author: "???"
+      description: "???"
+
 adapter_defaults:
   lora:
     target: [attn.q, attn.v]

@@ -26,6 +26,97 @@ input_spec:
   width: 224
   dtype: float32
 
+recipe_defaults:
+  image_classification:
+    model:
+      pretrained: "timm://vit_large_patch16_224"
+      num_classes: "???"
+    data:
+      dataset:
+        _component_: ImageClassificationDataset
+        source: "???"
+        split: train
+        fields: {image: "???", label: "???"}
+        augmentation:
+          - type: RandomResizedCrop
+            params: {size: 224}
+          - type: RandomHorizontalFlip
+          - type: ToImage
+          - type: ToDtype
+            params: {dtype: float32, scale: true}
+          - type: Normalize
+            params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+      val_dataset:
+        _component_: ImageClassificationDataset
+        source: "???"
+        split: validation
+        fields: {image: "???", label: "???"}
+        augmentation:
+          - type: Resize
+            params: {size: 256}
+          - type: CenterCrop
+            params: {size: 224}
+          - type: ToImage
+          - type: ToDtype
+            params: {dtype: float32, scale: true}
+          - type: Normalize
+            params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+      collator:
+        _component_: VisionCollator
+      dataloader:
+        batch_size: 32
+        num_workers: 8
+    training:
+      epochs: 20
+      precision: bf16
+      gradient_accumulation_steps: 2
+      gradient_clip_max_norm: 1.0
+      gradient_checkpointing: true
+    optimizer:
+      _component_: AdamW
+      lr: 2.0e-5
+      weight_decay: 0.05
+    scheduler:
+      _component_: CosineAnnealingLR
+      T_max: 20
+      warmup_ratio: 0.05
+    evaluation:
+      metrics: [Accuracy, F1Score]
+    metadata:
+      author: "???"
+      description: "???"
+  feature_extraction:
+    model:
+      pretrained: "timm://vit_large_patch16_224"
+      num_classes: 0
+    data:
+      dataset:
+        _component_: ImageClassificationDataset
+        source: "???"
+        split: train
+        fields: {image: "???"}
+        augmentation:
+          - type: Resize
+            params: {size: 256}
+          - type: CenterCrop
+            params: {size: 224}
+          - type: ToImage
+          - type: ToDtype
+            params: {dtype: float32, scale: true}
+          - type: Normalize
+            params: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
+      collator:
+        _component_: VisionCollator
+      dataloader:
+        batch_size: 64
+        num_workers: 8
+    training:
+      max_steps: 1
+      precision: bf16
+    metadata:
+      author: "???"
+      description: "???"
+
 init_args_schema:
   num_classes:
     type: int

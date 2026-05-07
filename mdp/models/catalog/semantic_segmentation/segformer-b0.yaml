@@ -21,6 +21,48 @@ input_spec:
   width: 512
   dtype: float32
 
+recipe_defaults:
+  semantic_segmentation:
+    model:
+      _component_: transformers.AutoModelForSemanticSegmentation
+      pretrained: "hf://nvidia/segformer-b0-finetuned-ade-512-512"
+      num_labels: "???"
+      ignore_mismatched_sizes: true
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {image: "???", label: "???"}
+      val_dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: validation
+        fields: {image: "???", label: "???"}
+      collator:
+        _component_: VisionCollator
+      dataloader:
+        batch_size: 8
+        num_workers: 8
+    training:
+      epochs: 40
+      precision: bf16
+      gradient_accumulation_steps: 2
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 6.0e-5
+      weight_decay: 0.01
+    scheduler:
+      _component_: CosineAnnealingLR
+      T_max: 40
+      warmup_ratio: 0.05
+    evaluation:
+      metrics: [mIoU]
+    metadata:
+      author: "???"
+      description: "???"
+
 init_args_schema:
   num_labels:
     type: int

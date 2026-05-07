@@ -26,6 +26,49 @@ init_args_schema:
   embd_pdrop: {type: float, default: 0.1}
   n_positions: {type: int, default: 1024}
 
+recipe_defaults:
+  text_generation:
+    model:
+      torch_dtype: float32
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???"}
+        tokenizer: gpt2
+        max_length: 1024
+        padding: false
+        truncation: true
+      collator:
+        _component_: CausalLMCollator
+        tokenizer: gpt2
+        max_length: 1024
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 128
+      dataloader:
+        batch_size: 4
+        num_workers: 4
+        drop_last: true
+    training:
+      epochs: 3
+      precision: fp32
+      gradient_accumulation_steps: 4
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 5.0e-5
+      weight_decay: 0.01
+    generation:
+      max_new_tokens: 128
+      temperature: 0.8
+      top_p: 0.95
+      do_sample: true
+    metadata:
+      author: "???"
+      description: "???"
+
 adapter_defaults:
   lora:
     target: [attn.qkv, attn.o]

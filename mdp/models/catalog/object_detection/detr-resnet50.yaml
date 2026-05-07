@@ -18,6 +18,48 @@ input_spec:
   width: 800
   dtype: float32
 
+recipe_defaults:
+  object_detection:
+    model:
+      _component_: transformers.AutoModelForObjectDetection
+      pretrained: "hf://facebook/detr-resnet-50"
+      num_labels: "???"
+      ignore_mismatched_sizes: true
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {image: "???", label: "???"}
+      val_dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: validation
+        fields: {image: "???", label: "???"}
+      collator:
+        _component_: VisionCollator
+      dataloader:
+        batch_size: 4
+        num_workers: 8
+    training:
+      epochs: 25
+      precision: bf16
+      gradient_accumulation_steps: 4
+      gradient_clip_max_norm: 0.1
+    optimizer:
+      _component_: AdamW
+      lr: 1.0e-5
+      weight_decay: 1.0e-4
+    scheduler:
+      _component_: CosineAnnealingLR
+      T_max: 25
+      warmup_ratio: 0.05
+    evaluation:
+      metrics: [mAP]
+    metadata:
+      author: "???"
+      description: "???"
+
 init_args_schema:
   pretrained:
     type: bool

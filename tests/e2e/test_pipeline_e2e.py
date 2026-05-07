@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+import yaml
 
 _FIXTURES = Path(__file__).parent.parent / "fixtures"
 
@@ -94,6 +95,72 @@ def test_init_generates_parseable_yaml(tmp_path: Path) -> None:
     assert "pretrained" not in settings.recipe.model, (
         "fallback init 템플릿은 torchvision 모델에 HF pretrained URI를 섞으면 안 된다"
     )
+
+
+def test_catalog_init_recipes_are_parseable_for_all_supported_tasks() -> None:
+    """catalog의 모든 supported_tasks 조합이 최신 Recipe 스키마로 파싱되어야 한다."""
+    from mdp.cli.init import _build_recipe_from_catalog
+    from mdp.settings.schema import Recipe
+
+    catalog_dir = Path(__file__).resolve().parents[2] / "mdp" / "models" / "catalog"
+    failures: list[str] = []
+
+    for catalog_path in sorted(catalog_dir.rglob("*.yaml")):
+        catalog = yaml.safe_load(catalog_path.read_text())
+        if not catalog:
+            continue
+        for task in catalog.get("supported_tasks", []):
+            recipe_yaml = _build_recipe_from_catalog(task, catalog, "agent-project")
+            recipe_dict = yaml.safe_load(recipe_yaml)
+            try:
+                Recipe(**recipe_dict)
+            except Exception as exc:  # pragma: no cover - assertion detail path
+                failures.append(f"{catalog_path.relative_to(catalog_dir)}:{task}: {exc}")
+
+    assert not failures, "\n".join(failures)
+
+
+def test_catalog_init_recipes_use_task_specific_data_components() -> None:
+    """mdp init은 text/vision/token/seq2seq task별 collator를 섞으면 안 된다."""
+    from mdp.cli.init import _build_recipe_from_catalog
+
+    expected_collators = {
+        "image_classification": "VisionCollator",
+        "object_detection": "VisionCollator",
+        "semantic_segmentation": "VisionCollator",
+        "text_classification": "ClassificationCollator",
+        "token_classification": "TokenClassificationCollator",
+        "text_generation": "CausalLMCollator",
+        "seq2seq": "Seq2SeqCollator",
+    }
+    expected_datasets = {
+        "image_classification": "ImageClassificationDataset",
+    }
+
+    catalog_dir = Path(__file__).resolve().parents[2] / "mdp" / "models" / "catalog"
+    failures: list[str] = []
+
+    for catalog_path in sorted(catalog_dir.rglob("*.yaml")):
+        catalog = yaml.safe_load(catalog_path.read_text())
+        if not catalog:
+            continue
+        for task in catalog.get("supported_tasks", []):
+            recipe = yaml.safe_load(_build_recipe_from_catalog(task, catalog, "agent-project"))
+            collator = recipe["data"]["collator"]["_component_"].rsplit(".", 1)[-1]
+            expected = expected_collators.get(task)
+            if expected is not None and collator != expected:
+                failures.append(
+                    f"{catalog['name']}:{task}: collator={collator}, expected={expected}"
+                )
+
+            dataset = recipe["data"]["dataset"]["_component_"].rsplit(".", 1)[-1]
+            expected_dataset = expected_datasets.get(task)
+            if expected_dataset is not None and dataset != expected_dataset:
+                failures.append(
+                    f"{catalog['name']}:{task}: dataset={dataset}, expected={expected_dataset}"
+                )
+
+    assert not failures, "\n".join(failures)
 
 
 def test_train_json_output_schema() -> None:

@@ -32,6 +32,52 @@ init_args_schema:
   image_token_index: {type: int, default: 32000}
   vision_feature_select_strategy: {type: str, default: "default", choices: ["default", "full"]}
 
+recipe_defaults:
+  text_generation:
+    model:
+      torch_dtype: bfloat16
+      attn_implementation: flash_attention_2
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {text: "???"}
+        tokenizer: llava-hf/llava-1.5-7b-hf
+        max_length: 2048
+        padding: false
+        truncation: true
+      collator:
+        _component_: CausalLMCollator
+        tokenizer: llava-hf/llava-1.5-7b-hf
+        max_length: 2048
+      sampler:
+        _component_: LengthGroupedBatchSampler
+        bucket_size: 64
+      dataloader:
+        batch_size: 1
+        num_workers: 4
+        drop_last: true
+    adapter: qlora
+    training:
+      epochs: 3
+      precision: bf16
+      gradient_accumulation_steps: 16
+      gradient_checkpointing: true
+      gradient_clip_max_norm: 1.0
+    optimizer:
+      _component_: AdamW
+      lr: 2.0e-5
+      weight_decay: 0.01
+    generation:
+      max_new_tokens: 256
+      temperature: 0.7
+      top_p: 0.9
+      do_sample: true
+    metadata:
+      author: "???"
+      description: "???"
+
 adapter_defaults:
   lora:
     # LLM 부분의 어텐션 레이어에 적용 (내부 LLM은 Llama-style)

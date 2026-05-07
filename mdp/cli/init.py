@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from copy import deepcopy
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
@@ -81,6 +82,229 @@ _TASK_DEFAULT_LABEL_STRATEGY: dict[str, str] = {
 }
 
 
+def _pretrained_identifier(pretrained: str) -> str:
+    """Recipe 안 tokenizer/model identifier로 쓸 prefix-stripped 이름."""
+    for prefix in ("hf://", "timm://", "ultralytics://", "local://"):
+        if pretrained.startswith(prefix):
+            return pretrained[len(prefix):]
+    return pretrained
+
+
+def _base_model_config(class_path: str, pretrained: str) -> dict[str, Any]:
+    """catalog class_path/pretrained에서 Recipe model 블록의 기본형을 만든다."""
+    model: dict[str, Any] = {"pretrained": pretrained}
+    # timm/ultralytics는 PretrainedResolver가 URI를 소유해야 한다. _component_를
+    # 함께 넣으면 일반 constructor 경로로 빠져 URI가 잘못 전달된다.
+    if not pretrained.startswith(("timm://", "ultralytics://")):
+        model["_component_"] = class_path
+    return model
+
+
+def _pick_task_recipe_defaults(
+    task: str,
+    catalog: dict[str, Any],
+) -> dict[str, Any] | None:
+    """catalog의 task별 recipe_defaults를 반환한다.
+
+    지원 형태:
+    - recipe_defaults: {data: ..., training: ...}  # 단일 task 항목
+    - recipe_defaults: {text_generation: {data: ...}, seq2seq: ...}
+    """
+    defaults = catalog.get("recipe_defaults")
+    if not isinstance(defaults, dict):
+        return None
+
+    task_specific = defaults.get(task)
+    if isinstance(task_specific, dict):
+        return deepcopy(task_specific)
+
+    # 단일 task catalog에서는 바로 recipe_defaults를 본문으로 사용할 수 있다.
+    if any(k in defaults for k in ("model", "head", "data", "training", "optimizer", "generation")):
+        return deepcopy(defaults)
+    return None
+
+
+def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    """override를 base 위에 재귀 병합한다."""
+    merged = deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = deepcopy(value)
+    return merged
+
+
+def _adapter_from_catalog_default(
+    adapter_name: str,
+    catalog: dict[str, Any],
+) -> dict[str, Any]:
+    """catalog adapter_defaults의 lora/qlora shorthand를 Recipe adapter로 확장."""
+    adapter_key = adapter_name.lower()
+    defaults = catalog.get("adapter_defaults", {})
+    adapter_defaults = deepcopy(defaults.get(adapter_key, {}))
+    component = "QLoRA" if adapter_key == "qlora" else "LoRA"
+    adapter_defaults["_component_"] = component
+
+    bits = adapter_defaults.pop("bits", None)
+    if adapter_key == "qlora":
+        quantization = adapter_defaults.get("quantization")
+        if quantization is None:
+            adapter_defaults["quantization"] = {"bits": bits or 4}
+        elif isinstance(quantization, dict) and bits is not None:
+            quantization.setdefault("bits", bits)
+    return adapter_defaults
+
+
+def _expand_recipe_default_shorthands(
+    defaults: dict[str, Any],
+    catalog: dict[str, Any],
+) -> dict[str, Any]:
+    """catalog recipe_defaults의 짧은 표기를 Recipe 스키마 dict로 정규화."""
+    expanded = deepcopy(defaults)
+    adapter = expanded.get("adapter")
+    if isinstance(adapter, str):
+        expanded["adapter"] = _adapter_from_catalog_default(adapter, catalog)
+    return expanded
+
+
+def _default_data_for_task(task: str, pretrained_id: str) -> dict[str, Any]:
+    """catalog recipe_defaults가 없을 때 쓰는 최신 task별 data fallback."""
+    if task == "text_generation":
+        return {
+            "dataset": {
+                "_component_": "HuggingFaceDataset",
+                "source": "???",
+                "split": "train",
+                "fields": {"text": "???"},
+                "tokenizer": pretrained_id,
+                "max_length": 2048,
+            },
+            "collator": {
+                "_component_": "CausalLMCollator",
+                "tokenizer": pretrained_id,
+                "max_length": 2048,
+            },
+            "dataloader": {"batch_size": 1, "num_workers": 4},
+        }
+    if task == "seq2seq":
+        return {
+            "dataset": {
+                "_component_": "HuggingFaceDataset",
+                "source": "???",
+                "split": "train",
+                "fields": {"text": "???", "target": "???"},
+                "tokenizer": pretrained_id,
+                "max_length": 1024,
+            },
+            "collator": {
+                "_component_": "Seq2SeqCollator",
+                "tokenizer": pretrained_id,
+                "max_length": 1024,
+            },
+            "dataloader": {"batch_size": 4, "num_workers": 4},
+        }
+    if task == "text_classification":
+        return {
+            "dataset": {
+                "_component_": "HuggingFaceDataset",
+                "source": "???",
+                "split": "train",
+                "fields": {"text": "???", "label": "???"},
+                "tokenizer": pretrained_id,
+                "max_length": 512,
+            },
+            "collator": {
+                "_component_": "ClassificationCollator",
+                "tokenizer": pretrained_id,
+            },
+            "dataloader": {"batch_size": 16, "num_workers": 4},
+        }
+    if task == "token_classification":
+        return {
+            "dataset": {
+                "_component_": "HuggingFaceDataset",
+                "source": "???",
+                "split": "train",
+                "fields": {"text": "???", "token_labels": "???"},
+                "tokenizer": pretrained_id,
+                "max_length": 512,
+            },
+            "collator": {
+                "_component_": "TokenClassificationCollator",
+                "tokenizer": pretrained_id,
+            },
+            "dataloader": {"batch_size": 16, "num_workers": 4},
+        }
+    if task == "image_classification":
+        return {
+            "dataset": {
+                "_component_": "ImageClassificationDataset",
+                "source": "???",
+                "split": "train",
+                "fields": {"image": "???", "label": "???"},
+            },
+            "collator": {"_component_": "VisionCollator"},
+            "dataloader": {"batch_size": 32, "num_workers": 4},
+        }
+    if task in {"object_detection", "semantic_segmentation"}:
+        return {
+            "dataset": {
+                "_component_": "HuggingFaceDataset",
+                "source": "???",
+                "split": "train",
+                "fields": {"image": "???", "label": "???"},
+            },
+            "collator": {"_component_": "VisionCollator"},
+            "dataloader": {"batch_size": 4, "num_workers": 4},
+        }
+    if task == "feature_extraction":
+        return {
+            "dataset": {
+                "_component_": "HuggingFaceDataset",
+                "source": "???",
+                "split": "train",
+            },
+            "collator": {"_component_": "VisionCollator"},
+            "dataloader": {"batch_size": 32, "num_workers": 4},
+        }
+    return {
+        "dataset": {
+            "_component_": "HuggingFaceDataset",
+            "source": "???",
+            "split": "train",
+        },
+        "collator": {"_component_": "VisionCollator"},
+        "dataloader": {"batch_size": 32, "num_workers": 4},
+    }
+
+
+def _default_head_for_task(
+    task: str,
+    catalog: dict[str, Any],
+    preset_default_head: str | None,
+) -> dict[str, Any] | None:
+    """catalog/preset 기반 head fallback."""
+    if catalog.get("head_builtin", False) or preset_default_head is None:
+        return None
+
+    head_config: dict[str, Any] = {"_component_": preset_default_head}
+    catalog_head = catalog.get("default_head", {})
+    if catalog_head.get("hidden_dim"):
+        head_config["hidden_dim"] = catalog_head["hidden_dim"]
+    if catalog_head.get("dropout") is not None:
+        head_config["dropout"] = catalog_head["dropout"]
+    if task in {
+        "image_classification",
+        "text_classification",
+        "token_classification",
+        "object_detection",
+        "semantic_segmentation",
+    }:
+        head_config["num_classes"] = "???"
+    return head_config
+
+
 def _build_recipe_from_catalog(
     task: str, catalog: dict[str, Any], project_name: str,
 ) -> str:
@@ -91,64 +315,32 @@ def _build_recipe_from_catalog(
     preset = TASK_PRESETS.get(task)
     name = catalog.get("name", "model")
     class_path = catalog.get("class_path", "???")
-    head_builtin = catalog.get("head_builtin", False)
     pretrained = catalog.get("pretrained_sources", [""])[0]
-    input_spec = catalog.get("input_spec", {})
-
-    # pretrained URI에서 tokenizer pretrained 파생
-    tokenizer_pretrained = pretrained.replace("hf://", "").replace("timm://", "")
+    pretrained_id = _pretrained_identifier(pretrained)
+    project_slug = Path(project_name).name
 
     recipe: dict[str, Any] = {
-        "name": f"{name}-{project_name}",
+        "name": f"{name}-{project_slug}",
         "task": task,
-        "model": {
-            "_component_": class_path,
-            "pretrained": pretrained,
-        },
+        "model": _base_model_config(class_path, pretrained),
+        "data": _default_data_for_task(task, pretrained_id),
+        "training": {"epochs": 3, "precision": "bf16"},
+        "optimizer": {"_component_": "AdamW", "lr": 2e-5, "weight_decay": 0.01},
+        "metadata": {"author": "???", "description": "???"},
     }
 
-    # head: head_builtin이 아닌 경우만 추가
-    if not head_builtin and preset and preset.default_head:
-        head_config: dict[str, Any] = {"_component_": preset.default_head}
-        catalog_head = catalog.get("default_head", {})
-        if catalog_head.get("hidden_dim"):
-            head_config["hidden_dim"] = catalog_head["hidden_dim"]
-        if catalog_head.get("dropout") is not None:
-            head_config["dropout"] = catalog_head["dropout"]
-        head_config["num_classes"] = "???"
+    head_config = _default_head_for_task(
+        task,
+        catalog,
+        preset.default_head if preset else None,
+    )
+    if head_config:
         recipe["head"] = head_config
 
-    # data 섹션 — _component_ 패턴
-    data: dict[str, Any] = {
-        "dataset": {
-            "_component_": "mdp.data.datasets.HuggingFaceDataset",
-            "source": "???",
-            "split": "train",
-        },
-    }
-
-    # collator 결정: task에 따라 적절한 collator 선택
-    label_strategy = _TASK_DEFAULT_LABEL_STRATEGY.get(task, "unlabeled")
-    if label_strategy == "causal":
-        collator_component = "mdp.data.collators.CausalLMCollator"
-    elif label_strategy == "seq2seq":
-        collator_component = "mdp.data.collators.Seq2SeqCollator"
-    else:
-        collator_component = "mdp.data.collators.ClassificationCollator"
-
-    collator: dict[str, Any] = {"_component_": collator_component}
-    if tokenizer_pretrained:
-        collator["tokenizer"] = tokenizer_pretrained
-    else:
-        collator["tokenizer"] = "gpt2"
-    data["collator"] = collator
-
-    data["dataloader"] = {"batch_size": 32, "num_workers": 4}
-    recipe["data"] = data
-
-    recipe["training"] = {"epochs": 3, "precision": "bf16"}
-    recipe["optimizer"] = {"_component_": "AdamW", "lr": 2e-5, "weight_decay": 0.01}
-    recipe["metadata"] = {"author": "???", "description": "???"}
+    recipe_defaults = _pick_task_recipe_defaults(task, catalog)
+    if recipe_defaults:
+        recipe_defaults = _expand_recipe_default_shorthands(recipe_defaults, catalog)
+        recipe = _deep_merge(recipe, recipe_defaults)
 
     return _yaml.dump(recipe, allow_unicode=True, default_flow_style=False, sort_keys=False)
 
@@ -337,6 +529,21 @@ def init_project(
         if task and model:
             catalog = _find_catalog_entry(model)
             if catalog:
+                supported_tasks = catalog.get("supported_tasks", [])
+                if task not in supported_tasks:
+                    msg = (
+                        f"모델 '{model}'은 task '{task}'을(를) 지원하지 않습니다. "
+                        f"지원 task: {supported_tasks}"
+                    )
+                    if is_json_mode():
+                        emit_result(build_error(
+                            command="init",
+                            error_type="ValidationError",
+                            message=msg,
+                        ))
+                    else:
+                        typer.echo(f"[error] {msg}", err=True)
+                    raise typer.Exit(code=1)
                 recipe_content = _build_recipe_from_catalog(task, catalog, project_name)
             else:
                 recipe_content = _default_recipe_yaml()

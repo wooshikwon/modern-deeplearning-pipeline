@@ -18,6 +18,41 @@ input_spec:
   width: 640
   dtype: float32
 
+recipe_defaults:
+  object_detection:
+    model:
+      pretrained: "ultralytics://yolov8n.pt"
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {image: "???", label: "???"}
+      val_dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: validation
+        fields: {image: "???", label: "???"}
+      collator:
+        _component_: VisionCollator
+      dataloader:
+        batch_size: 16
+        num_workers: 8
+    training:
+      epochs: 100
+      precision: bf16
+      gradient_accumulation_steps: 1
+    optimizer:
+      _component_: SGD
+      lr: 1.0e-2
+      weight_decay: 5.0e-4
+      momentum: 0.937
+    evaluation:
+      metrics: [mAP]
+    metadata:
+      author: "???"
+      description: "???"
+
 init_args_schema:
   pretrained:
     type: bool

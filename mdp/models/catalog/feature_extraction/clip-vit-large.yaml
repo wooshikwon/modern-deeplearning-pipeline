@@ -26,6 +26,29 @@ input_spec:
     max_length: 77
     dtype: long
 
+recipe_defaults:
+  feature_extraction:
+    model:
+      _component_: transformers.CLIPModel
+      pretrained: "hf://openai/clip-vit-large-patch14"
+    data:
+      dataset:
+        _component_: HuggingFaceDataset
+        source: "???"
+        split: train
+        fields: {image: "???", text: "???"}
+      collator:
+        _component_: VisionCollator
+      dataloader:
+        batch_size: 64
+        num_workers: 8
+    training:
+      max_steps: 1
+      precision: bf16
+    metadata:
+      author: "???"
+      description: "???"
+
 init_args_schema:
   pretrained_model_name_or_path: {type: str, default: "openai/clip-vit-large-patch14"}
   projection_dim: {type: int, default: 768}
