@@ -23,7 +23,7 @@ language = [
     "transformers>=4.36",
     "tokenizers>=0.15",
     "datasets>=2.16",
-    "peft>=0.10",  # torch>=2.6 since 2026-05-07 — peft>=0.19 (float8_e8m0fnu) compatible
+    "peft>=0.10,<0.19.0",  # peft>=0.19 requires torch float8 symbols absent from torch 2.5.x
     "bitsandbytes>=0.41",
     "flash-attn>=2.5",
 ]

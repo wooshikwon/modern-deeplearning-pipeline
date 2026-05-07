@@ -77,7 +77,7 @@ def test_ddp_strategy_train_and_checkpoint() -> None:
         model_new.load_state_dict(state_dict)
 
         batch = {"pixel_values": torch.randn(2, 3, 8, 8), "labels": torch.tensor([0, 1])}
-        assert torch.isfinite(model_new.training_step(batch))
+        assert torch.isfinite(model_new(batch)["loss"])
 
 
 @pytest.mark.skipif(
@@ -115,7 +115,7 @@ def _ddp_worker_main(ckpt_dir: str) -> None:
                 "pixel_values": torch.randn(4, 3, 8, 8),
                 "labels": torch.randint(0, 2, (4,)),
             }
-            loss = ddp_model.module.training_step(batch)
+            loss = ddp_model.module(batch)["loss"]
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()

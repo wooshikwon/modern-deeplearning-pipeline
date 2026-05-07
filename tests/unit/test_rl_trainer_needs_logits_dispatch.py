@@ -108,6 +108,14 @@ def _make_trainer_stub(
     return stub, counter
 
 
+def _settings_with_strategy(strategy: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        config=SimpleNamespace(
+            compute=SimpleNamespace(distributed={"strategy": strategy})
+        )
+    )
+
+
 @contextmanager
 def _stub_backward_and_step(monkeypatch: pytest.MonkeyPatch):
     """`backward_and_step`를 성공(True, {}) 반환으로 교체. optimizer 상호작용 회피.
@@ -257,6 +265,20 @@ class TestOfflineNeedsLogitsFalse:
         # step_logits는 None — policy_out에 "logits" 키 없음
         assert step_logits is None
         assert loss_val == pytest.approx(1.0)
+
+    def test_fsdp_hidden_head_extraction_fails_fast(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """FSDP + needs_hidden_states=True is rejected before unsafe unwrapped extraction."""
+        algo = _MockFusedLossAlgorithm()
+        stub, counter = _make_trainer_stub(algo, monkeypatch)
+        stub.settings = _settings_with_strategy("fsdp_full_shard")
+        batch = {"input_ids": torch.arange(8).view(2, 4)}
+
+        with pytest.raises(RuntimeError, match="needs_hidden_states=True.*FSDP"):
+            _call_offline(stub, batch)
+
+        assert counter.extract_hidden_calls == []
 
     def test_frozen_forward_still_runs_when_nonempty(
         self, monkeypatch: pytest.MonkeyPatch

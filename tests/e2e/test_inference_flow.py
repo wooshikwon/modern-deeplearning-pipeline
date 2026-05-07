@@ -25,7 +25,7 @@ def _create_artifact(tmp_path: Path) -> Path:
     # 몇 step 학습 시뮬레이션
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
     for batch in make_vision_batches(3, 4, 2, 8):
-        loss = model.training_step(batch)
+        loss = model(batch)["loss"]
         loss.backward()
         optimizer.step()
         optimizer.zero_grad()

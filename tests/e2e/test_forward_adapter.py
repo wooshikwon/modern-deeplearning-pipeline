@@ -69,6 +69,36 @@ class _HFClassificationModel(nn.Module):
         return _FakeModelOutput(logits=logits, hidden_states=None, attentions=None)
 
 
+class _HFLossClassificationModel(_HFClassificationModel):
+    """HF classifier output with both native loss and logits."""
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor | None = None,
+        labels: Tensor | None = None,
+        **kwargs,
+    ) -> _FakeModelOutput:
+        logits = super().forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs).logits
+        loss = torch.nn.functional.cross_entropy(logits, labels) if labels is not None else None
+        return _FakeModelOutput(logits=logits, loss=loss, hidden_states=None, attentions=None)
+
+
+class _HFLossOnlyModel(_HFClassificationModel):
+    """HF-style output that exposes only a native loss."""
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        attention_mask: Tensor | None = None,
+        labels: Tensor | None = None,
+        **kwargs,
+    ) -> _FakeModelOutput:
+        logits = super().forward(input_ids=input_ids, attention_mask=attention_mask, **kwargs).logits
+        loss = torch.nn.functional.cross_entropy(logits, labels) if labels is not None else None
+        return _FakeModelOutput(logits=None, loss=loss, hidden_states=None, attentions=None)
+
+
 class _HFFeatureExtractionModel(nn.Module):
     """HF AutoModel (feature extraction)을 시뮬레이션한다.
 
@@ -122,6 +152,20 @@ class _PlainDictModel(nn.Module):
         return {"logits": logits}
 
 
+class _PlainBatchDictModel(nn.Module):
+    """Plain nn.Module using the MDP-style forward(batch) convention."""
+
+    def __init__(self, vocab_size: int = 64, hidden_dim: int = 16, num_classes: int = 3) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(vocab_size, hidden_dim)
+        self.classifier = nn.Linear(hidden_dim, num_classes)
+
+    def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+        x = self.embedding(batch["input_ids"]).mean(dim=1)
+        logits = self.classifier(x)
+        return {"logits": logits}
+
+
 class _PlainTensorModel(nn.Module):
     """단일 Tensor를 반환하는 nn.Module.
 
@@ -136,6 +180,18 @@ class _PlainTensorModel(nn.Module):
     def forward(self, input_ids: Tensor, attention_mask: Tensor | None = None, **kwargs) -> Tensor:
         x = self.embedding(input_ids).mean(dim=1)
         return self.classifier(x)
+
+
+class _VisionTensorModel(nn.Module):
+    """raw timm/torchvision-style model: forward(x) -> logits tensor."""
+
+    def __init__(self, num_classes: int = 3) -> None:
+        super().__init__()
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.classifier = nn.Linear(3, num_classes)
+
+    def forward(self, x: Tensor) -> Tensor:
+        return self.classifier(self.pool(x).flatten(1))
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +228,42 @@ def test_make_forward_fn_hf_classification() -> None:
     assert outputs["logits"].shape == (2, 3)
     # hidden_states가 None이므로 포함되지 않아야 한다
     assert "hidden_states" not in outputs
+
+
+def test_make_forward_fn_hf_classification_preserves_loss() -> None:
+    """HF output with logits and native loss keeps both fields."""
+    model = _HFLossClassificationModel(vocab_size=64, hidden_dim=16, num_classes=3)
+    forward_fn = _make_forward_fn(model)
+
+    batch = {
+        "input_ids": torch.randint(0, 64, (2, 8)),
+        "attention_mask": torch.ones(2, 8, dtype=torch.long),
+        "labels": torch.tensor([0, 1]),
+    }
+    outputs = forward_fn(batch)
+
+    assert isinstance(outputs, dict)
+    assert "logits" in outputs
+    assert "loss" in outputs
+    assert outputs["logits"].shape == (2, 3)
+    assert outputs["loss"].ndim == 0
+
+
+def test_make_forward_fn_hf_loss_only_output() -> None:
+    """HF output with native loss only normalizes to a loss dict."""
+    model = _HFLossOnlyModel(vocab_size=64, hidden_dim=16, num_classes=3)
+    forward_fn = _make_forward_fn(model)
+
+    batch = {
+        "input_ids": torch.randint(0, 64, (2, 8)),
+        "attention_mask": torch.ones(2, 8, dtype=torch.long),
+        "labels": torch.tensor([0, 1]),
+    }
+    outputs = forward_fn(batch)
+
+    assert isinstance(outputs, dict)
+    assert set(outputs) == {"loss"}
+    assert outputs["loss"].ndim == 0
 
 
 def test_make_forward_fn_hf_feature_extraction() -> None:
@@ -224,6 +316,22 @@ def test_make_forward_fn_plain_dict_output() -> None:
     assert outputs["logits"].shape == (2, 3)
 
 
+def test_make_forward_fn_plain_batch_dict_output() -> None:
+    """non-BaseModel using forward(batch) keeps the MDP batch convention."""
+    model = _PlainBatchDictModel(vocab_size=64, hidden_dim=16, num_classes=3)
+    forward_fn = _make_forward_fn(model)
+
+    batch = {
+        "input_ids": torch.randint(0, 64, (2, 8)),
+        "attention_mask": torch.ones(2, 8, dtype=torch.long),
+    }
+    outputs = forward_fn(batch)
+
+    assert isinstance(outputs, dict)
+    assert "logits" in outputs
+    assert outputs["logits"].shape == (2, 3)
+
+
 def test_make_forward_fn_plain_tensor_output() -> None:
     """non-BaseModel이 단일 Tensor를 반환하면 {"logits": tensor}로 감싸진다."""
     model = _PlainTensorModel(vocab_size=64, hidden_dim=16, num_classes=3)
@@ -232,6 +340,22 @@ def test_make_forward_fn_plain_tensor_output() -> None:
     batch = {
         "input_ids": torch.randint(0, 64, (2, 8)),
         "attention_mask": torch.ones(2, 8, dtype=torch.long),
+    }
+    outputs = forward_fn(batch)
+
+    assert isinstance(outputs, dict)
+    assert "logits" in outputs
+    assert outputs["logits"].shape == (2, 3)
+
+
+def test_make_forward_fn_raw_vision_single_tensor_model() -> None:
+    """raw timm/torchvision-style forward(x) consumes batch['pixel_values']."""
+    model = _VisionTensorModel(num_classes=3)
+    forward_fn = _make_forward_fn(model)
+
+    batch = {
+        "pixel_values": torch.randn(2, 3, 8, 8),
+        "labels": torch.tensor([0, 1]),
     }
     outputs = forward_fn(batch)
 

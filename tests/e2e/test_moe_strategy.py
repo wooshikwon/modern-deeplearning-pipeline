@@ -374,7 +374,7 @@ def _moe_backward_worker(rank: int, world_size: int, result_queue) -> None:
         wrapped = s.setup(model, device)
 
         batch = {"input_ids": torch.randint(0, 32, (2, 8))}
-        loss = wrapped.training_step(batch)
+        loss = wrapped(batch)["loss"]
         loss.backward()
 
         has_grad = False

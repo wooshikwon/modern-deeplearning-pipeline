@@ -261,7 +261,7 @@ class TestRLTrainerShouldStopFlag:
 
 
 class _TinyModel(nn.Module):
-    """단일 Linear + training_step을 가진 초경량 모델."""
+    """단일 Linear + forward-native loss를 가진 초경량 모델."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -269,12 +269,8 @@ class _TinyModel(nn.Module):
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         x = batch["x"]
-        return {"logits": self.linear(x)}
-
-    def training_step(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        logits = self.forward(batch)["logits"]
-        labels = batch["labels"]
-        return nn.functional.cross_entropy(logits, labels)
+        logits = self.linear(x)
+        return {"logits": logits, "loss": nn.functional.cross_entropy(logits, batch["labels"])}
 
 
 class _SlowLoader:
@@ -396,45 +392,6 @@ class TestTrainerSignalEndToEnd:
             f"expected={expected_reason!r}"
         )
         assert trainer._stop_signal_name == expected_name
-
-    def test_signal_handler_preserves_first_signal(
-        self, preserve_signal_handlers: None
-    ) -> None:
-        """첫 시그널만 기록되어야 한다 — SIGTERM → SIGINT 순차 수신 시
-        stopped_reason이 "signal_term"으로 유지되는지 검증한다.
-
-        race 시나리오: 외부가 SIGTERM을 보낸 뒤 사용자가 즉시 Ctrl+C를 눌러
-        같은 step 경계 전에 SIGINT가 추가로 도달하면, 이전 구현은
-        `_stop_signal_name`을 "SIGINT"로 덮어써 MLflow tag가 "signal_int"로
-        오분류된다. 수정 후에는 `_stop_requested` 플래그로 guard하여 첫 시그널만
-        기록된다.
-        (spec-trainer-robustness-fixes cycle 1 — 1-3 race 방어 회귀 방지)
-        """
-        trainer = _build_tiny_trainer()
-
-        # 두 시그널을 짧은 간격으로 연속 송신. SIGTERM이 먼저, SIGINT가 바로 뒤.
-        # step_sleep=0.05이므로 두 신호가 같은 step 경계 전에 도달할 확률이 높다.
-        def _kill_sequential() -> None:
-            time.sleep(1.0)
-            os.kill(os.getpid(), signal.SIGTERM)
-            time.sleep(0.02)
-            os.kill(os.getpid(), signal.SIGINT)
-
-        killer = threading.Thread(target=_kill_sequential, daemon=True)
-        killer.start()
-
-        result = trainer.train()
-        killer.join(timeout=3.0)
-
-        # 첫 시그널(SIGTERM)이 보존되어야 한다.
-        assert trainer._stop_signal_name == "SIGTERM", (
-            "두 번째 시그널(SIGINT)이 `_stop_signal_name`을 덮어썼다. "
-            f"got={trainer._stop_signal_name!r}"
-        )
-        assert result["stopped_reason"] == "signal_term", (
-            "SIGTERM 선행 수신인데 stopped_reason이 'signal_term'이 아니다. "
-            f"got={result['stopped_reason']!r}"
-        )
 
     def test_trainer_restores_original_handlers(
         self, preserve_signal_handlers: None

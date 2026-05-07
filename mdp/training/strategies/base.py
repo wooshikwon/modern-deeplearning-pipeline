@@ -35,14 +35,11 @@ class BaseStrategy(ABC):
     of the DDP/FSDP restore path until a separate engine-contract spec owns
     engine state, optimizer shards, and resume semantics.
 
-    ``unwrap`` and ``invoke_custom`` bridge the gap between MDP's
-    declarative contract ("a model may define ``training_step`` /
-    ``validation_step`` to own its own loss logic") and the runtime
-    reality that those methods are hidden behind distributed wrappers
-    (DDP's ``__getattr__`` does not forward custom methods; FSDP's
-    all-gather hooks only fire through the wrapper's ``forward``).
-    Trainers call these two helpers so model authors can keep writing
-    plain methods without special-casing DDP/FSDP themselves.
+    ``unwrap`` and ``invoke_custom`` bridge custom model methods and
+    distributed wrappers. DDP's ``__getattr__`` does not forward arbitrary
+    methods, and FSDP's all-gather hooks only fire through the wrapper's
+    ``forward``. Trainers call these helpers when a model-owned custom hook
+    must be invoked without special-casing DDP/FSDP at the call site.
     """
 
     @abstractmethod
@@ -105,11 +102,10 @@ class BaseStrategy(ABC):
     ) -> Any:
         """Invoke a model's custom method while preserving distributed semantics.
 
-        Models may define ``training_step``, ``validation_step``, and similar
-        methods to encapsulate non-standard loss / evaluation logic (e.g.
-        Bradley-Terry pairwise ranking in a value model).  Those methods are
-        not forwarded through DDP's ``__getattr__`` and must not short-circuit
-        FSDP's all-gather hooks — hence this strategy-specific dispatch.
+        Models may define custom methods for non-standard evaluation or
+        auxiliary behavior. Those methods are not forwarded through DDP's
+        ``__getattr__`` and must not short-circuit FSDP's all-gather hooks,
+        hence this strategy-specific dispatch.
 
         Default implementation: resolve the method on the unwrapped model and
         call it directly.  This is correct for:

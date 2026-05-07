@@ -72,7 +72,7 @@ def test_factory_model_with_head_and_lora() -> None:
     # 학습 1 step 가능한지
     batch = {"pixel_values": torch.randn(2, 3, 8, 8), "labels": torch.tensor([0, 1])}
     model.train()
-    loss = model.training_step(batch)
+    loss = model(batch)["loss"]
     assert torch.isfinite(loss)
 
 
@@ -85,7 +85,7 @@ def test_factory_model_without_head() -> None:
     # TinyVisionModel의 기본 head가 유지
     assert hasattr(model, "head")
     batch = {"pixel_values": torch.randn(2, 3, 8, 8), "labels": torch.tensor([0, 1])}
-    loss = model.training_step(batch)
+    loss = model(batch)["loss"]
     assert torch.isfinite(loss)
 
 

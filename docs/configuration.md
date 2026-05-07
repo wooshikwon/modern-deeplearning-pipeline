@@ -116,7 +116,7 @@ scheduler:                              # 스케줄러 (선택)
   T_max: 100
   warmup_steps: 500                     # 또는 warmup_ratio: 0.1 (상호 배타)
 
-loss:                                   # 손실 함수 (선택, 생략 시 model.training_step() 사용)
+loss:                                   # 외부 supervised criterion (선택, 생략 시 forward output loss 사용)
   _component_: CrossEntropyLoss
 
 evaluation:                             # 평가 메트릭
@@ -310,7 +310,7 @@ rl:
     group_size: 4                           # GRPO K개 응답
 ```
 
-내장 알고리즘: `DPO`, `GRPO`, `PPO`. 외부 알고리즘은 `rl.algorithm._component_`에 풀 경로(`weighted_ntp.algorithms.WeightedNTPLoss` 등)를 지정하면 주입된다.
+내장 알고리즘: `DPO`, `GRPO`, `PPO`. 외부 알고리즘은 `rl.algorithm._component_`에 풀 경로(`weighted_ntp.algorithms.WeightedNTPLoss` 등)를 지정하면 주입된다. RL recipe에서는 top-level `loss:`를 사용하지 않는다. RL objective는 항상 `rl.algorithm.compute_loss(trainable_out, frozen_out, batch)`가 소유한다.
 
 ---
 

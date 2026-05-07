@@ -22,6 +22,7 @@ from torch.amp import autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
+from mdp.models.forward import make_forward_fn
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
@@ -123,6 +124,7 @@ class Trainer(BaseTrainer):
         # 정상적으로 실행되도록 한다.
         self._stop_requested: bool = False
         self._stop_signal_name: str | None = None
+        self._warned_ignored_forward_loss: bool = False
 
     # ── Component creation ──
 
@@ -854,26 +856,54 @@ class Trainer(BaseTrainer):
         return total_loss / max(num_batches, 1)
 
     def _compute_loss(self, batch: dict[str, Any]) -> torch.Tensor:
+        outputs = self._forward_batch(batch)
         if self.loss_fn is not None:
-            outputs = self.model(batch)
-            logits = outputs.get("logits", outputs.get("output"))
-            labels = batch.get("labels", batch.get("label"))
+            if self._extract_output_loss(outputs) is not None:
+                self._warn_ignored_forward_loss_once()
+            logits = self._extract_logits(outputs)
+            labels = self._extract_labels(batch)
             if logits is None:
                 raise ValueError("model.forward()가 'logits' 또는 'output' 키를 반환하지 않았습니다")
             if labels is None:
                 raise ValueError("배치에 'labels' 키가 없습니다")
             return self.loss_fn(logits, labels)
-        # Recipe가 loss를 지정하지 않은 경우 (예: loss: null), model이 자체
-        # training_step을 갖고 있다는 선언이다. DDP/FSDP 래핑 이후에도 이 호출이
-        # 분산 의미(gradient all-reduce, FSDP all-gather)를 보존하도록 strategy에
-        # 위임한다. strategy가 없으면(=단일 GPU) 그대로 직접 호출한다.
-        return self._invoke_model_method("training_step", batch)
+        if (loss := self._extract_output_loss(outputs)) is not None:
+            return loss
+        raise ValueError(
+            "No train loss found. Provide recipe.loss, or return `loss` from "
+            "model forward output."
+        )
 
     def _invoke_model_method(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         """Strategy가 있으면 분산 의미를 보존해 호출, 없으면 직접 호출한다."""
         if self.strategy is not None:
             return self.strategy.invoke_custom(self.model, method_name, *args, **kwargs)
         return getattr(self.model, method_name)(*args, **kwargs)
+
+    def _forward_batch(self, batch: dict[str, Any]) -> dict[str, Any]:
+        """Run model forward through the shared MDP/HF adapter."""
+        return make_forward_fn(self.model)(batch)
+
+    def _extract_output_loss(self, outputs: dict[str, Any]) -> torch.Tensor | None:
+        """Return a backward-capable forward loss candidate, if present."""
+        loss = outputs.get("loss")
+        return loss if isinstance(loss, torch.Tensor) else None
+
+    def _extract_logits(self, outputs: dict[str, Any]) -> torch.Tensor | None:
+        """Return logits for external supervised criteria."""
+        logits = outputs.get("logits", outputs.get("output"))
+        return logits if isinstance(logits, torch.Tensor) else None
+
+    def _extract_labels(self, batch: dict[str, Any]) -> torch.Tensor | None:
+        """Return labels for external supervised criteria."""
+        labels = batch.get("labels", batch.get("label"))
+        return labels if isinstance(labels, torch.Tensor) else None
+
+    def _warn_ignored_forward_loss_once(self) -> None:
+        if self._warned_ignored_forward_loss:
+            return
+        logger.warning("recipe.loss is configured; model forward output loss will be ignored.")
+        self._warned_ignored_forward_loss = True
 
     def _unwrapped_model(self) -> nn.Module:
         """hasattr/getattr 같은 read-only 접근용. 분산 래퍼를 벗긴 model 반환."""
@@ -927,20 +957,18 @@ class Trainer(BaseTrainer):
         """Fallback validation when model lacks validation_step."""
         device_type = self.device.type if self.device.type != "mps" else "cpu"
         with autocast(device_type, dtype=self.amp_dtype, enabled=self.amp_enabled):
-            outputs = self.model(batch)
+            outputs = self._forward_batch(batch)
 
         # Priority matches _compute_loss: loss_fn first, then outputs["loss"]/outputs.loss
         if self.loss_fn is not None:
-            logits = outputs.get("logits", outputs.get("output")) if isinstance(outputs, dict) else (getattr(outputs, "logits", None) or getattr(outputs, "output", None))
-            labels = batch.get("labels", batch.get("label"))
+            logits = self._extract_logits(outputs)
+            labels = self._extract_labels(batch)
             if logits is not None and labels is not None:
                 loss = self.loss_fn(logits, labels)
             else:
                 logger.warning("_validate_fallback: logits 또는 labels를 찾을 수 없습니다")
                 return {}
-        elif isinstance(outputs, dict) and "loss" in outputs:
-            loss = outputs["loss"]
-        elif (_out_loss := getattr(outputs, "loss", None)) is not None:
+        elif (_out_loss := self._extract_output_loss(outputs)) is not None:
             loss = _out_loss
         else:
             logger.warning("_validate_fallback: loss를 계산할 수 없습니다")

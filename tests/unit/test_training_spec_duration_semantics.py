@@ -81,7 +81,7 @@ class TestTrainingSpecDocumentation:
 
 
 class _TinyModel(nn.Module):
-    """단일 Linear + training_step을 가진 초경량 모델."""
+    """단일 Linear + forward-native loss를 가진 초경량 모델."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -89,12 +89,8 @@ class _TinyModel(nn.Module):
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         x = batch["x"]
-        return {"logits": self.linear(x)}
-
-    def training_step(self, batch: dict[str, torch.Tensor]) -> torch.Tensor:
-        logits = self.forward(batch)["logits"]
-        labels = batch["labels"]
-        return nn.functional.cross_entropy(logits, labels)
+        logits = self.linear(x)
+        return {"logits": logits, "loss": nn.functional.cross_entropy(logits, batch["labels"])}
 
 
 class _SlowLoader:

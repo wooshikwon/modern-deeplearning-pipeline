@@ -15,6 +15,7 @@ from mdp.settings.schema import (
     MetadataSpec,
     MonitoringSpec,
     Recipe,
+    RLSpec,
     Settings,
     TrainingSpec,
 )
@@ -118,6 +119,33 @@ def test_business_validator_head_task_mismatch() -> None:
     result = BusinessValidator().validate(settings)
     assert len(result.errors) > 0
     assert any("CausalLMHead" in e for e in result.errors)
+
+
+def test_rl_recipe_rejects_top_level_loss() -> None:
+    """RL objectives are owned by rl.algorithm.compute_loss(), not recipe.loss."""
+    with pytest.raises(ValueError, match="rl.algorithm.compute_loss"):
+        Recipe(
+            name="bad-rl-loss",
+            task="text_generation",
+            model={"_component_": "test.Model"},
+            data=DataSpec.model_construct(
+                dataset={"_component_": "test.Dataset"},
+                collator={"_component_": "test.Collator"},
+            ),
+            training=TrainingSpec(epochs=1),
+            optimizer=None,
+            loss={"_component_": "torch.nn.CrossEntropyLoss"},
+            metadata=MetadataSpec(author="test", description="test"),
+            rl=RLSpec(
+                algorithm={"_component_": "DPO"},
+                models={
+                    "policy": {
+                        "model": {"_component_": "test.Policy"},
+                        "optimizer": {"_component_": "AdamW", "lr": 1e-4},
+                    }
+                },
+            ),
+        )
 
 
 # ---------------------------------------------------------------------------

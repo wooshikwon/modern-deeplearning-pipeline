@@ -145,8 +145,9 @@ class Factory:
         if not skip_base_check and not hasattr(model, "from_pretrained") and not isinstance(model, BaseModel):
             raise TypeError(
                 f"{model.__class__.__name__}이 BaseModel을 상속하지 않습니다. "
-                "커스텀 모델은 BaseModel을 상속하여 forward, training_step, "
-                "validation_step을 구현하세요. HF 모델이라면 pretrained: hf://... 를 사용하세요."
+                "커스텀 모델은 BaseModel을 상속하여 forward를 구현하고, "
+                "SFT loss는 recipe.loss 또는 forward output `loss`로 제공하세요. "
+                "HF 모델이라면 pretrained: hf://... 를 사용하세요."
             )
 
         # 단계 5: adapter 적용 (설정이 있을 때만, QLoRA는 위에서 처리)

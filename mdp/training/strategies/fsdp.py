@@ -160,7 +160,7 @@ class FSDPStrategy(BaseStrategy):
     ) -> Any:
         """FSDP에서 model의 custom 메서드를 호출한다 (forward swap trick).
 
-        문제: ``wrapped_model.training_step(batch)``를 쓰면 Python이
+        문제: ``wrapped_model.custom_method(batch)``를 쓰면 Python이
         ``FSDP.__getattr__``을 타고 내부 module의 bound method를 반환해 버린다.
         그 결과 FSDP의 root all-gather 훅이 발동하지 않아, ``embed_tokens.weight``
         같은 파라미터가 1-D shard 그대로 forward에 들어가 ``RuntimeError:

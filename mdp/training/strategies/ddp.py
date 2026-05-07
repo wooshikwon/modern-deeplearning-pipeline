@@ -53,7 +53,7 @@ class DDPStrategy(BaseStrategy):
 
         ``invoke_custom``은 base 구현(``unwrap`` + ``getattr``)이면 충분하다:
         DDP의 gradient 동기화는 parameter autograd hook으로 이루어지므로,
-        ``.module.training_step(batch)``처럼 wrapper forward를 우회해 호출해도
+        ``.module.custom_method(batch)``처럼 wrapper forward를 우회해 호출해도
         backward 시 정상적으로 all-reduce가 발생한다.
         """
         return getattr(wrapped_model, "module", wrapped_model)

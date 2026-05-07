@@ -225,9 +225,6 @@ def test_inference_callback_teardown_on_error(tmp_path: Path) -> None:
             x = batch["pixel_values"].flatten(1)
             return {"logits": self.linear(x)}
 
-        def training_step(self, batch: dict) -> torch.Tensor:
-            return self.forward(batch)["logits"].mean()
-
         def validation_step(self, batch: dict) -> dict[str, float]:
             return {"val_loss": 0.0}
 

@@ -69,10 +69,17 @@ backward, optimizer step, ZeRO shards, and checkpoint semantics.
 
 ## Forward Contract
 
-Model forward/training outputs must be normalized before shared trainer logic
-consumes them. RL algorithms declare their forward needs through contract flags
-so the trainer can avoid unnecessary logits/materialization when hidden-state or
-fused-loss paths are sufficient.
+SFT has two loss owners. If `recipe.loss` is configured, Trainer uses
+`loss_fn(logits, labels)` and ignores any native forward loss. If `recipe.loss`
+is absent, Trainer reads Tensor `loss` from model forward output.
+Raw single-argument vision models are adapted by passing `batch["pixel_values"]`
+to `forward(x)`, so timm/torchvision-style classifiers work with `recipe.loss`.
+
+RL does not consume top-level `recipe.loss`. RL algorithms declare their
+forward needs through contract flags and own the objective in
+`rl.algorithm.compute_loss(trainable_out, frozen_out, batch)`. FSDP with
+`needs_hidden_states=True` is rejected until hidden/head extraction is
+strategy-aware and can avoid bypassing wrapper forward hooks.
 
 ## Runtime Precedence
 

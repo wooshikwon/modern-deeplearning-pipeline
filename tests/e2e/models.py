@@ -43,12 +43,10 @@ class TinyVisionModel(BaseModel):
         x = batch["pixel_values"]
         features = self.classifier(self.backbone(x))
         logits = self.head(F.relu(features))
-        return {"logits": logits, "features": features}
-
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        labels = batch["labels"]
-        return F.cross_entropy(outputs["logits"], labels)
+        outputs = {"logits": logits, "features": features}
+        if "labels" in batch:
+            outputs["loss"] = F.cross_entropy(logits, batch["labels"])
+        return outputs
 
     def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
         outputs = self.forward(batch)
@@ -84,11 +82,7 @@ class TinyFeatureMapModel(BaseModel):
         x = batch["pixel_values"]
         features = self.backbone(x)
         logits = self.head(features)
-        return {"logits": logits, "features": features}
-
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        return outputs["logits"].mean()
+        return {"logits": logits, "features": features, "loss": logits.mean()}
 
     def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
         outputs = self.forward(batch)
@@ -143,15 +137,16 @@ class TinyLanguageModel(BaseModel):
         causal_mask = nn.Transformer.generate_square_subsequent_mask(L, device=input_ids.device)
         x = self.transformer(x, mask=causal_mask, is_causal=True)
         logits = self.lm_head(x)  # (B, L, V)
-        return {"logits": logits}
-
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        logits = outputs["logits"][:, :-1].contiguous()  # shifted
-        labels = batch["input_ids"][:, 1:].contiguous()
-        return F.cross_entropy(
-            logits.view(-1, self.vocab_size), labels.view(-1)
-        )
+        outputs = {"logits": logits}
+        labels = batch.get("labels", batch.get("input_ids"))
+        if labels is not None and labels.numel() > 0 and int(labels.max()) < logits.size(-1):
+            shifted_logits = logits[:, :-1].contiguous()
+            shifted_labels = labels[:, 1:].contiguous()
+            outputs["loss"] = F.cross_entropy(
+                shifted_logits.view(-1, logits.size(-1)),
+                shifted_labels.view(-1),
+            )
+        return outputs
 
     def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
         outputs = self.forward(batch)
@@ -168,7 +163,7 @@ class TinyTokenClassModel(BaseModel):
     """Minimal Transformer for token classification.
 
     Like TinyLanguageModel but .head = Linear(hidden_dim, num_classes).
-    training_step uses CE with ignore_index=-100.
+    forward loss uses CE with ignore_index=-100.
     """
 
     _block_classes = None  # 반복 블록 없는 테스트용 모델
@@ -210,17 +205,17 @@ class TinyTokenClassModel(BaseModel):
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
         x = self.transformer(x)
         logits = self.head(x)  # (B, L, C)
-        return {"logits": logits}
-
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        logits = outputs["logits"]
-        labels = batch["labels"]  # (B, L)
-        return F.cross_entropy(
-            logits.view(-1, self.num_classes),
-            labels.view(-1),
-            ignore_index=-100,
-        )
+        outputs = {"logits": logits}
+        if "labels" in batch:
+            labels = batch["labels"]
+            valid_labels = labels[labels != -100]
+            if valid_labels.numel() == 0 or int(valid_labels.max()) < logits.size(-1):
+                outputs["loss"] = F.cross_entropy(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                    ignore_index=-100,
+                )
+        return outputs
 
     def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
         outputs = self.forward(batch)
@@ -283,16 +278,17 @@ class TinyMoEModel(BaseModel):
         x = self.token_embedding(input_ids) + self.position_embedding(positions)
         x = self.moe_layer(x)
         logits = self.lm_head(x)
-        return {"logits": logits}
-
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        logits = outputs["logits"][:, :-1].contiguous()
-        labels = batch["input_ids"][:, 1:].contiguous()
-        return F.cross_entropy(logits.view(-1, self.vocab_size), labels.view(-1))
+        outputs = {"logits": logits}
+        labels = batch.get("labels", batch.get("input_ids"))
+        if labels is not None and labels.numel() > 0 and int(labels.max()) < logits.size(-1):
+            outputs["loss"] = F.cross_entropy(
+                logits[:, :-1].contiguous().view(-1, logits.size(-1)),
+                labels[:, 1:].contiguous().view(-1),
+            )
+        return outputs
 
     def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
-        loss = self.training_step(batch)
+        loss = self.forward(batch)["loss"]
         return {"val_loss": loss.item()}
 
 
@@ -377,25 +373,19 @@ class TinyDualEncoderModel(BaseModel):
         text_features = self.text_projection(text_pooled)
         text_features = F.normalize(text_features, dim=-1)
 
-        return {
+        outputs = {
             "image_features": image_features,
             "text_features": text_features,
             "features": image_features,
         }
-
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        img_f = outputs["image_features"]
-        txt_f = outputs["text_features"]
-
-        # Symmetric contrastive loss (CLIP-style)
-        logits = (img_f @ txt_f.T) * self.temperature.exp()
+        logits = (image_features @ text_features.T) * self.temperature.exp()
         B = logits.size(0)
         labels = torch.arange(B, device=logits.device)
         loss_i2t = F.cross_entropy(logits, labels)
         loss_t2i = F.cross_entropy(logits.T, labels)
-        return (loss_i2t + loss_t2i) / 2.0
+        outputs["loss"] = (loss_i2t + loss_t2i) / 2.0
+        return outputs
 
     def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
-        loss = self.training_step(batch)
+        loss = self.forward(batch)["loss"]
         return {"val_loss": loss.item()}

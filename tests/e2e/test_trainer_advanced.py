@@ -296,16 +296,15 @@ def test_baseline_info_safe_on_exception() -> None:
             self._call_count = 0
 
         def forward(self, batch):
-            x = batch["pixel_values"].flatten(1)
-            return {"logits": self.linear(x)}
-
-        def training_step(self, batch):
             self._call_count += 1
             if self._call_count >= 2:
                 raise RuntimeError("Intentional crash for testing")
             x = batch["pixel_values"].flatten(1)
             logits = self.linear(x)
-            return torch.nn.functional.cross_entropy(logits, batch["labels"])
+            return {
+                "logits": logits,
+                "loss": torch.nn.functional.cross_entropy(logits, batch["labels"]),
+            }
 
         def validation_step(self, batch):
             return {"loss": 0.0}

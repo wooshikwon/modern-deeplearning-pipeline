@@ -64,7 +64,7 @@ class TestVisionClassification:
         )
 
         def loss_fn(m, batch):
-            return m.training_step(batch)
+            return m(batch)["loss"]
 
         losses = _train_loop(model, batches, loss_fn, epochs=3)
         assert losses[-1] < losses[0], (
@@ -219,7 +219,7 @@ class TestLoRA:
         model.train()
         for batch in batches:
             optimizer.zero_grad()
-            loss = model.training_step(batch)
+            loss = model(batch)["loss"]
             loss.backward()
             optimizer.step()
 

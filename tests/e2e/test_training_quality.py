@@ -180,8 +180,8 @@ class TestPaddingMasking:
         }
         batch_masked["labels"][:, 8:] = -100
 
-        loss_valid = model.training_step(batch_valid)
-        loss_masked = model.training_step(batch_masked)
+        loss_valid = model(batch_valid)["loss"]
+        loss_masked = model(batch_masked)["loss"]
 
         # Both should produce finite losses
         assert torch.isfinite(loss_valid), f"Valid loss not finite: {loss_valid}"
@@ -197,7 +197,7 @@ class TestPaddingMasking:
             "labels": torch.full((2, 16), -100, dtype=torch.long),
         }
 
-        loss = model.training_step(batch)
+        loss = model(batch)["loss"]
         # PyTorch CE(reduction='mean') + all ignore_index=-100 → NaN (0/0).
         # 크래시하지 않는 것만 검증.
         assert loss is not None

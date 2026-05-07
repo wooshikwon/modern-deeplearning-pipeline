@@ -30,9 +30,6 @@ class TestBlockClassesContract:
                 def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                     return {}
 
-                def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                    return torch.tensor(0.0)
-
                 def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                     return {}
 
@@ -45,14 +42,35 @@ class TestBlockClassesContract:
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
 
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
-
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
 
         # 클래스가 정상적으로 정의됨
         assert SimpleModel._block_classes is None
+
+    def test_forward_and_block_classes_only_model_is_allowed(self) -> None:
+        """forward와 _block_classes만 구현한 BaseModel 서브클래스가 인스턴스화된다."""
+
+        class ForwardOnlyModel(BaseModel):
+            _block_classes = None
+
+            def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+                return {"loss": torch.tensor(0.0)}
+
+        model = ForwardOnlyModel()
+
+        assert model._block_classes is None
+        with pytest.raises(NotImplementedError, match="validation_step"):
+            model.validation_step({})
+
+    def test_forward_is_still_required(self) -> None:
+        """forward 미구현 BaseModel 서브클래스는 여전히 abstract다."""
+
+        class MissingForwardModel(BaseModel):
+            _block_classes = None
+
+        with pytest.raises(TypeError):
+            MissingForwardModel()
 
     def test_block_classes_set_is_allowed(self) -> None:
         """_block_classes = {"LlamaDecoderLayer"} 선언은 TypeError 없이 허용된다."""
@@ -62,9 +80,6 @@ class TestBlockClassesContract:
 
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
-
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
 
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
@@ -80,9 +95,6 @@ class TestBlockClassesContract:
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
 
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
-
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
 
@@ -95,9 +107,6 @@ class TestBlockClassesContract:
             class MyBrokenModel(BaseModel):
                 def forward(self, batch):
                     return {}
-
-                def training_step(self, batch):
-                    return torch.tensor(0.0)
 
                 def validation_step(self, batch):
                     return {}
@@ -125,9 +134,6 @@ class TestInheritBlockClasses:
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
 
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
-
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
 
@@ -148,9 +154,6 @@ class TestInheritBlockClasses:
 
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
-
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
 
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
@@ -174,9 +177,6 @@ class TestInheritBlockClasses:
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
 
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
-
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
 
@@ -196,9 +196,6 @@ class TestInheritBlockClasses:
 
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
-
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
 
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
@@ -224,9 +221,6 @@ class TestInheritBlockClasses:
 
             def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
                 return {}
-
-            def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-                return torch.tensor(0.0)
 
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}

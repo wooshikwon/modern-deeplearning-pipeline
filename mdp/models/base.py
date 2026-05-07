@@ -12,7 +12,9 @@ from torch import Tensor, nn
 class BaseModel(nn.Module, ABC):
     """MDP 모델의 추상 기반 클래스.
 
-    모든 모델은 forward, training_step, validation_step을 구현해야 한다.
+    모든 모델은 forward를 구현해야 한다. SFT loss는 recipe.loss external
+    criterion 또는 forward output의 ``loss``로 제공한다.
+    validation_step()은 선택적 검증 hook으로만 오버라이드한다.
     generate()는 자기회귀 모델만 오버라이드한다.
 
     ``_block_classes`` 는 필수 선언이다. 모델의 반복 블록 클래스 이름의
@@ -154,15 +156,11 @@ class BaseModel(nn.Module, ABC):
             "함께 사용하려면 이 메서드를 구현하세요."
         )
 
-    @abstractmethod
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        """학습 스텝. 스칼라 loss를 반환한다."""
-        ...
-
-    @abstractmethod
     def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
-        """검증 스텝. 메트릭 이름-값 dict를 반환한다."""
-        ...
+        """선택적 검증 hook. 없으면 Trainer validation fallback을 사용한다."""
+        raise NotImplementedError(
+            f"{self.__class__.__name__}은 validation_step을 override하지 않았습니다."
+        )
 
     def configure_optimizers(self) -> dict[str, Any] | None:
         """모델 전용 옵티마이저 설정. None이면 Recipe의 optimizer를 사용한다."""

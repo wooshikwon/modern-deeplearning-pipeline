@@ -169,11 +169,22 @@ loss:
   _component_: CrossEntropyLoss
 ```
 
-**방법 2: 모델 내장 loss 사용** — `loss:` 섹션 생략 → `model.training_step(batch)` 호출
+**방법 2: 모델 내장 loss 사용** — `loss:` 섹션 생략 → `model.forward()` output의 `loss` 사용
 ```yaml
 # loss 섹션 생략
-# HuggingFace AutoModelFor* 는 내장 loss가 있어 이 방식이 기본
+# HuggingFace AutoModelFor* 는 labels가 있으면 outputs.loss를 반환하므로 이 방식이 기본
 ```
+
+`loss:`를 지정하면 external supervised criterion이 loss를 소유한다. 이때 모델이
+forward output에 `loss`를 함께 반환해도 Trainer는 `loss_fn(logits, labels)`만
+사용하고 native loss는 무시한다. `loss:`를 생략하면 Trainer는 forward output의
+Tensor `loss`를 요구한다.
+
+raw timm/torchvision-style vision 모델처럼 `forward(x) -> logits`만 제공하는
+모델은 `loss:`를 지정하면 그대로 사용할 수 있다. Trainer의 forward adapter가
+batch의 `pixel_values`를 positional `x`로 전달하고, external criterion이
+`logits`와 `labels`로 loss를 계산한다. `loss:`를 생략하려면 raw 모델을 감싼
+custom wrapper가 `forward()` output에 `loss`를 반환해야 한다.
 
 ### 체크포인트 & Resume
 
@@ -519,7 +530,7 @@ MDP does not hide process-level failures with automatic in-process recovery. Age
 
 ## 주의사항
 
-1. **loss 생략 시**: HuggingFace AutoModelFor\*는 내장 loss가 있어 생략 가능. 커스텀 모델은 `training_step()` 구현 또는 `loss:` 지정 필수
+1. **loss 생략 시**: HuggingFace AutoModelFor\*는 labels가 있으면 `outputs.loss`를 반환하므로 생략 가능. 커스텀 SFT 모델은 forward output에 Tensor `loss`를 반환하거나 `loss:`를 지정한다
 2. **DDP에서 drop_last**: `false`로 설정하면 GPU별 배치 크기 불일치로 gradient 동기화 실패. 기본 `true` 유지
 3. **대형 모델 torch_dtype**: 미지정 시 fp32로 로드되어 OOM. `float16` 또는 `bfloat16` 지정 필수
 4. **gradient_accumulation**: `batch_size × gpus × accumulation_steps = 실질 배치 크기`. accumulation 변경 시 학습률 조정 필요

@@ -301,8 +301,12 @@ class TestBaseModelValidation:
         })
         factory = Factory(settings)
 
-        with pytest.raises(TypeError, match="BaseModel을 상속하지 않습니다"):
+        with pytest.raises(TypeError, match="BaseModel을 상속하지 않습니다") as exc_info:
             factory.create_model()
+        message = str(exc_info.value)
+        assert "forward를 구현" in message
+        assert "training_step" not in message
+        assert "validation_step" not in message
 
     def test_custom_with_pretrained_and_basemodel_passes(self) -> None:
         """BaseModel 상속 커스텀 클래스 + pretrained는 정상 통과."""

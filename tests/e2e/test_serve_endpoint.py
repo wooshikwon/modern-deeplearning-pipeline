@@ -150,9 +150,6 @@ def test_predict_handler_basemodel_style_forward() -> None:
         def forward(self, batch: dict) -> dict[str, torch.Tensor]:
             return {"logits": self.proj(batch["features"])}
 
-        def training_step(self, batch: dict) -> torch.Tensor:
-            return self.forward(batch)["logits"].mean()
-
         def validation_step(self, batch: dict) -> dict[str, float]:
             return {"val_loss": 0.0}
 

@@ -153,7 +153,7 @@ class TestGlobalStep:
 
         model.train()
         for step, batch in enumerate(batches):
-            loss = model.training_step(batch)
+            loss = model(batch)["loss"]
             loss = loss / grad_accum_steps
             loss.backward()
 

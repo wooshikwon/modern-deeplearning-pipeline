@@ -22,6 +22,7 @@ from torch.amp import autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
+from mdp.settings.distributed import get_strategy_name
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
@@ -177,6 +178,20 @@ class RLTrainer(BaseTrainer):
         내리지 않는다 — Trainer와 동일한 대칭 계약.
         """
         log_static_params(self.settings.recipe, self.settings)
+
+    def _assert_hidden_state_extraction_supported(self) -> None:
+        """Fail fast when hidden/head extraction would bypass FSDP wrapper hooks."""
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return
+        strategy = get_strategy_name(settings)
+        if isinstance(strategy, str) and strategy.replace("-", "_").lower().startswith("fsdp"):
+            raise RuntimeError(
+                "RL algorithms with needs_hidden_states=True are not supported with "
+                "FSDP yet. Hidden/head extraction must be strategy-aware so it does "
+                "not bypass FSDP wrapper forward hooks. Use DDP or disable FSDP for "
+                "this RL objective."
+            )
 
     def _checkpoint_state(self) -> dict:
         """현재 학습 상태를 dict로 직렬화한다.
@@ -1278,6 +1293,7 @@ class RLTrainer(BaseTrainer):
                 else:
                     trainable_out = {name: {} for name in self.trainable}
                 if needs_hidden and "policy" in self.trainable:
+                    RLTrainer._assert_hidden_state_extraction_supported(self)
                     hidden, head_weight = extract_hidden_states_and_head(
                         self.trainable["policy"], batch
                     )
@@ -1399,6 +1415,7 @@ class RLTrainer(BaseTrainer):
                 else:
                     trainable_out = {name: {} for name in self.trainable}
                 if needs_hidden and "policy" in self.trainable:
+                    RLTrainer._assert_hidden_state_extraction_supported(self)
                     hidden, head_weight = extract_hidden_states_and_head(
                         self.trainable["policy"], gen_forward_batch
                     )

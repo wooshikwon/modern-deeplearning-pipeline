@@ -40,12 +40,6 @@ class ModelWithoutValidationStep(nn.Module):
         logits = self.head(features)
         return {"logits": logits}
 
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        labels = batch["labels"]
-        return F.cross_entropy(outputs["logits"], labels)
-
-
 class ModelReturningLossInForward(nn.Module):
     """Model with forward returning both loss and logits."""
 
@@ -68,11 +62,6 @@ class ModelReturningLossInForward(nn.Module):
         if labels is not None:
             result["loss"] = F.cross_entropy(logits, labels)
         return result
-
-    def training_step(self, batch: dict[str, Tensor]) -> Tensor:
-        outputs = self.forward(batch)
-        return outputs["loss"]
-
 
 # ── Helpers ──
 

@@ -231,6 +231,11 @@ class Recipe(BaseModel):
     @model_validator(mode="after")
     def check_rl_consistency(self):
         if self.rl is not None:
+            if self.loss is not None:
+                raise ValueError(
+                    "RL recipes cannot use top-level recipe.loss. "
+                    "RL objectives must be owned by rl.algorithm.compute_loss()."
+                )
             if "policy" not in self.rl.models:
                 raise ValueError("RL 학습에는 rl.models.policy가 필수입니다")
             policy = self.rl.models["policy"]
