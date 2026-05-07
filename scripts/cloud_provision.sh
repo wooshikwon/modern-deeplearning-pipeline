@@ -23,7 +23,7 @@ STATE_DIR="$HOME/.cache/cloud-runner/$REPO_NAME"
 STATE_FILE="$STATE_DIR/current.env"
 ARTIFACT_DIR="${ARTIFACT_DIR:-$HOME/cloud-artifacts/$REPO_NAME}"
 SSH_KEY="${SSH_KEY:-$HOME/.ssh/cloud_runner}"
-DEFAULT_IMAGE="pytorch/pytorch:2.6.0-cuda12.4-cudnn9-devel"
+DEFAULT_IMAGE="pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel"  # base image; venv installs torch 2.6 on top
 TORCH_WHEEL_URL="https://download.pytorch.org/whl/cu124"
 
 # ────────────────────────────────────────────────────────────
@@ -112,14 +112,14 @@ if [ "$PROVIDER" = "vastai" ]; then
   log "waiting for running status..."
   # vastai show instance --raw can return either an array (older) or a single object (newer).
   VASTAI_FIRST='if type=="array" then .[0] else . end'
-  for i in $(seq 1 36); do
+  for i in $(seq 1 60); do
     STATUS=$(vastai show instance "$INSTANCE_ID" --raw 2>/dev/null \
       | jq -r "$VASTAI_FIRST | .actual_status // \"\"")
-    echo "  [$i/36] status=$STATUS"
+    echo "  [$i/60] status=$STATUS"
     [ "$STATUS" = "running" ] && break
-    [ "$i" -eq 36 ] && {
+    [ "$i" -eq 60 ] && {
       vastai destroy instance "$INSTANCE_ID" -y || true
-      die "instance did not reach running in 6min (destroyed)"
+      die "instance did not reach running in 10min (destroyed)"
     }
     sleep 10
   done
