@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
+import yaml
+
 from mdp.settings.schema import (
     Config,
     DataSpec,
@@ -10,6 +15,34 @@ from mdp.settings.schema import (
     Settings,
     TrainingSpec,
 )
+
+
+def e2e_artifact_dir(tmp_path: Path, test_name: str, *parts: str) -> Path:
+    root = os.environ.get("MDP_TEST_ARTIFACT_DIR")
+    if root:
+        safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in test_name)
+        path = Path(root) / "tests" / safe_name
+    else:
+        path = tmp_path
+    for part in parts:
+        path = path / part
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def make_checkpoint_callbacks_yaml(tmp_path: Path, *, save_top_k: int = 2) -> str:
+    callbacks = [
+        {
+            "_component_": "mdp.training.callbacks.checkpoint.ModelCheckpoint",
+            "every_n_steps": 1,
+            "save_top_k": save_top_k,
+            "monitor": "loss",
+            "mode": "min",
+        }
+    ]
+    path = tmp_path / "callbacks.yaml"
+    yaml.safe_dump(callbacks, path.open("w"))
+    return str(path)
 
 
 def make_test_settings(

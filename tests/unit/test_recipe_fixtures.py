@@ -21,14 +21,23 @@ import yaml
 from mdp.settings.factory import SettingsFactory
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Recipe
+from mdp.task_taxonomy import TASK_PRESETS
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "recipes"
+CATALOG = Path(__file__).resolve().parent.parent.parent / "mdp" / "models" / "catalog"
 
 
 def _all_recipe_paths() -> list[Path]:
     """fixture 디렉토리의 모든 recipe YAML 경로를 반환."""
     paths = sorted(FIXTURES.glob("*.yaml"))
     assert paths, f"No recipe fixtures found at {FIXTURES}"
+    return paths
+
+
+def _all_catalog_paths() -> list[Path]:
+    """모든 model catalog YAML 경로를 반환한다."""
+    paths = sorted(CATALOG.rglob("*.yaml"))
+    assert paths, f"No catalog YAML files found at {CATALOG}"
     return paths
 
 
@@ -136,6 +145,88 @@ def test_fixture_components_resolvable(recipe_path: Path) -> None:
         )
 
     assert not errors, f"{recipe_path.name}: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# (3-1) Catalog YAML 전수 검증: mdp init recipe generation의 입력 데이터가
+#       task taxonomy와 component-unified schema를 만족해야 한다.
+# ---------------------------------------------------------------------------
+
+
+_CATALOG_REQUIRED_KEYS = {
+    "name",
+    "family",
+    "class_path",
+    "pretrained_sources",
+    "supported_tasks",
+    "recipe_defaults",
+}
+
+
+@pytest.mark.parametrize("catalog_path", _all_catalog_paths(), ids=lambda p: str(p.relative_to(CATALOG)))
+def test_catalog_entry_required_shape(catalog_path: Path) -> None:
+    """모든 catalog entry가 mdp init에 필요한 최소 필드를 가진다."""
+    raw = yaml.safe_load(catalog_path.read_text())
+    assert isinstance(raw, dict), f"{catalog_path}: YAML root must be a mapping"
+
+    missing = _CATALOG_REQUIRED_KEYS - set(raw)
+    assert not missing, f"{catalog_path}: missing required keys: {sorted(missing)}"
+
+    assert isinstance(raw["name"], str) and raw["name"], f"{catalog_path}: invalid name"
+    assert isinstance(raw["family"], str) and raw["family"], f"{catalog_path}: invalid family"
+    assert isinstance(raw["class_path"], str) and raw["class_path"], f"{catalog_path}: invalid class_path"
+    assert isinstance(raw["pretrained_sources"], list) and raw["pretrained_sources"], (
+        f"{catalog_path}: pretrained_sources must be a non-empty list"
+    )
+    assert all(isinstance(source, str) and source for source in raw["pretrained_sources"]), (
+        f"{catalog_path}: pretrained_sources must contain non-empty strings"
+    )
+
+    supported_tasks = raw["supported_tasks"]
+    assert isinstance(supported_tasks, list) and supported_tasks, (
+        f"{catalog_path}: supported_tasks must be a non-empty list"
+    )
+    unknown_tasks = sorted(set(supported_tasks) - set(TASK_PRESETS))
+    assert not unknown_tasks, f"{catalog_path}: unknown supported_tasks: {unknown_tasks}"
+
+
+@pytest.mark.parametrize("catalog_path", _all_catalog_paths(), ids=lambda p: str(p.relative_to(CATALOG)))
+def test_catalog_recipe_defaults_cover_supported_tasks(catalog_path: Path) -> None:
+    """지원 task마다 task-specific recipe_defaults를 제공한다."""
+    raw = yaml.safe_load(catalog_path.read_text())
+    supported_tasks = raw["supported_tasks"]
+    defaults = raw["recipe_defaults"]
+
+    assert isinstance(defaults, dict) and defaults, (
+        f"{catalog_path}: recipe_defaults must be a non-empty mapping"
+    )
+    missing = [task for task in supported_tasks if not isinstance(defaults.get(task), dict)]
+    assert not missing, (
+        f"{catalog_path}: recipe_defaults missing task-specific entries: {missing}"
+    )
+
+
+@pytest.mark.parametrize("catalog_path", _all_catalog_paths(), ids=lambda p: str(p.relative_to(CATALOG)))
+def test_catalog_recipe_default_components_resolvable(catalog_path: Path) -> None:
+    """catalog recipe_defaults 안의 모든 _component_ 값이 alias로 해석 가능하다."""
+    raw = yaml.safe_load(catalog_path.read_text())
+    resolver = ComponentResolver()
+
+    errors: list[str] = []
+    for cfg in _iter_component_dicts(raw["recipe_defaults"]):
+        name = cfg["_component_"]
+        if not isinstance(name, str):
+            errors.append(f"_component_ 값이 문자열이 아님: {name!r}")
+            continue
+        try:
+            resolved = resolver._resolve_alias(name)
+        except ValueError as exc:
+            errors.append(str(exc))
+            continue
+        if "." not in resolved:
+            errors.append(f"'{name}'이 점 없는 경로로 해석됨: {resolved}")
+
+    assert not errors, f"{catalog_path}: {errors}"
 
 
 # ---------------------------------------------------------------------------

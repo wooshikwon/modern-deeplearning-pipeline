@@ -67,3 +67,9 @@ class TestApplyOverrides:
         d = {"adapter": {"method": "lora"}}
         apply_overrides(d, ["adapter=null"])
         assert d["adapter"] is None
+
+    def test_json_dict_override(self):
+        d = {"training": {"epochs": 10}, "data": {"batch_size": 2}}
+        apply_overrides(d, ['{"training.epochs": 2, "data.batch_size": 8}'])
+        assert d["training"]["epochs"] == 2
+        assert d["data"]["batch_size"] == 8

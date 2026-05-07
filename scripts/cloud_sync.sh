@@ -24,7 +24,7 @@ STATE_FILE="$HOME/.cache/cloud-runner/$REPO_NAME/current.env"
 # shellcheck disable=SC1090
 source "$STATE_FILE"
 
-mkdir -p "$ARTIFACT_DIR"/{hf_cache,test_fixtures,checkpoints,outputs,logs}
+mkdir -p "$ARTIFACT_DIR"/{hf_cache,test_fixtures,checkpoints,outputs,logs,test_artifacts}
 
 RSYNC_SSH="ssh -i $SSH_KEY -p $SSH_PORT -o StrictHostKeyChecking=no -o ConnectTimeout=20"
 
@@ -33,13 +33,14 @@ REMOTE_HF=/root/.cache/huggingface
 REMOTE_FIXTURES=/workspace/test-fixtures
 REMOTE_CKPT=/workspace/$REPO/checkpoints
 REMOTE_OUT=/workspace/$REPO/outputs
+REMOTE_TEST_ARTIFACTS=/tmp/mdp-test-artifacts
 REMOTE_LOG_GLOB="/tmp/install.log /tmp/cloud_test.log"
 
 if [ "$MODE" = "push" ]; then
   log "push: $ARTIFACT_DIR -> $SSH_HOST:$SSH_PORT"
   ssh -i "$SSH_KEY" -p "$SSH_PORT" root@"$SSH_HOST" \
     -o StrictHostKeyChecking=no -o ConnectTimeout=20 \
-    "mkdir -p $REMOTE_HF $REMOTE_FIXTURES $REMOTE_CKPT $REMOTE_OUT"
+    "mkdir -p $REMOTE_HF $REMOTE_FIXTURES $REMOTE_CKPT $REMOTE_OUT $REMOTE_TEST_ARTIFACTS"
   [ -d "$ARTIFACT_DIR/hf_cache" ]       && rsync -az --partial -e "$RSYNC_SSH" "$ARTIFACT_DIR/hf_cache/"       "root@$SSH_HOST:$REMOTE_HF/"       || true
   [ -d "$ARTIFACT_DIR/test_fixtures" ]  && rsync -az --partial -e "$RSYNC_SSH" "$ARTIFACT_DIR/test_fixtures/"  "root@$SSH_HOST:$REMOTE_FIXTURES/" || true
   [ -d "$ARTIFACT_DIR/checkpoints" ]    && rsync -az --partial -e "$RSYNC_SSH" "$ARTIFACT_DIR/checkpoints/"    "root@$SSH_HOST:$REMOTE_CKPT/"     || true
@@ -52,6 +53,7 @@ if [ "$MODE" = "pull" ]; then
   rsync -az --partial -e "$RSYNC_SSH" "root@$SSH_HOST:$REMOTE_FIXTURES/" "$ARTIFACT_DIR/test_fixtures/" || true
   rsync -az --partial -e "$RSYNC_SSH" "root@$SSH_HOST:$REMOTE_CKPT/"     "$ARTIFACT_DIR/checkpoints/"   || true
   rsync -az --partial -e "$RSYNC_SSH" "root@$SSH_HOST:$REMOTE_OUT/"      "$ARTIFACT_DIR/outputs/"       || true
+  rsync -az --partial -e "$RSYNC_SSH" "root@$SSH_HOST:$REMOTE_TEST_ARTIFACTS/" "$ARTIFACT_DIR/test_artifacts/" || true
   for f in $REMOTE_LOG_GLOB; do
     rsync -az -e "$RSYNC_SSH" "root@$SSH_HOST:$f" "$ARTIFACT_DIR/logs/" 2>/dev/null || true
   done

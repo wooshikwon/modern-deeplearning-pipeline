@@ -62,6 +62,7 @@ def _run_distributed_worker(worker_name: str, nproc: int = 2) -> list[dict]:
         return results
 
 
+@pytest.mark.distributed_cpu
 def test_dpo_distributed_2rank() -> None:
     """DPO: gloo CPU 2-process에서 학습 완료, loss finite."""
     results = _run_distributed_worker("dpo")
@@ -70,6 +71,7 @@ def test_dpo_distributed_2rank() -> None:
         assert r["loss_finite"], f"rank {r['rank']}: loss is not finite ({r['loss']})"
 
 
+@pytest.mark.distributed_cpu
 def test_grpo_distributed_2rank() -> None:
     """GRPO: gloo CPU 2-process에서 generation + 학습 완료, loss finite."""
     results = _run_distributed_worker("grpo")

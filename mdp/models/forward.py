@@ -14,7 +14,7 @@ from mdp.models.base import BaseModel
 
 def make_forward_fn(model: nn.Module) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Build a normalized ``forward(batch)`` callable for model consumers."""
-    signature_model = getattr(model, "module", model)
+    signature_model = _unwrap_for_signature(model)
     if isinstance(signature_model, BaseModel):
         def _base_forward(batch: dict[str, Any]) -> dict[str, Any]:
             outputs = model(batch)
@@ -28,7 +28,7 @@ def make_forward_fn(model: nn.Module) -> Callable[[dict[str, Any]], dict[str, An
             return normalize_model_output(outputs)
         return _batch_forward
     if single_arg is not None:
-        def _single_tensor_forward(batch: dict[str, Any]) -> dict[str, Any]:
+        def _single_tensor_forward(batch: Any) -> dict[str, Any]:
             inputs = _extract_single_tensor_input(batch, preferred_key=single_arg)
             outputs = model(inputs)
             return normalize_model_output(outputs)
@@ -39,6 +39,37 @@ def make_forward_fn(model: nn.Module) -> Callable[[dict[str, Any]], dict[str, An
         return normalize_model_output(outputs)
 
     return _kwarg_forward
+
+
+def _unwrap_for_signature(model: nn.Module) -> nn.Module:
+    """Return the inner model whose forward contract should guide dispatch."""
+    current: Any = model
+    seen: set[int] = set()
+    while isinstance(current, nn.Module) and id(current) not in seen:
+        seen.add(id(current))
+
+        module = getattr(current, "module", None)
+        if isinstance(module, nn.Module):
+            current = module
+            continue
+
+        get_base_model = getattr(current, "get_base_model", None)
+        if callable(get_base_model):
+            try:
+                base = get_base_model()
+            except TypeError:
+                base = None
+            if isinstance(base, nn.Module) and base is not current:
+                current = base
+                continue
+
+        base_model = getattr(current, "base_model", None)
+        if isinstance(base_model, nn.Module) and base_model is not current:
+            current = base_model
+            continue
+
+        break
+    return current if isinstance(current, nn.Module) else model
 
 
 def _single_required_arg_name(model: nn.Module) -> str | None:
@@ -58,12 +89,10 @@ def _single_required_arg_name(model: nn.Module) -> str | None:
     return None
 
 
-def _extract_single_tensor_input(
-    batch: dict[str, Any],
-    *,
-    preferred_key: str,
-) -> Any:
+def _extract_single_tensor_input(batch: Any, *, preferred_key: str) -> Any:
     """Select the tensor input for raw single-arg vision models."""
+    if isinstance(batch, Tensor):
+        return batch
     if preferred_key in batch:
         return batch[preferred_key]
     for key in ("pixel_values", "input_ids", "features", "x"):

@@ -7,6 +7,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from torch.utils.data import DataLoader
 
 from mdp.callbacks.inference import DefaultOutputCallback
 from mdp.models.base import BaseModel
@@ -94,6 +95,41 @@ def test_batch_inference_hf_style_forward(tmp_path: Path) -> None:
 
     assert result_path is None
     assert inspector.shapes == [(2, 2)]
+
+
+def test_batch_inference_tensor_batch_single_arg_model(tmp_path: Path) -> None:
+    """Tensor dataloader batches are passed directly to ``forward(x)`` models."""
+
+    class _TensorModel(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(3, 2)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.proj(x)
+
+    class _Inspector(BaseInferenceCallback):
+        def __init__(self) -> None:
+            self.shapes: list[tuple[int, ...]] = []
+
+        def on_batch(self, batch_idx: int, batch: torch.Tensor, outputs: dict, **kwargs) -> None:
+            self.shapes.append(tuple(outputs["logits"].shape))
+
+    inspector = _Inspector()
+    loader = DataLoader(torch.randn(4, 3), batch_size=2)
+
+    result_path, _ = run_batch_inference(
+        model=_TensorModel(),
+        dataloader=loader,
+        output_path=tmp_path / "preds",
+        output_format="jsonl",
+        task="classification",
+        device="cpu",
+        callbacks=[inspector],
+    )
+
+    assert result_path is None
+    assert inspector.shapes == [(2, 2), (2, 2)]
 
 
 def test_batch_inference_formats(tmp_path: Path) -> None:

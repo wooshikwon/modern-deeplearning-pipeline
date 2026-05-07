@@ -16,9 +16,10 @@ Usage:
   python scripts/prepare_test_fixtures.py --clean
 
 Outputs (target-dir layout):
-  models/{smollm2,bert-tiny,vit-tiny,clip-base,gpt2}/   # HF snapshots (safetensors)
+  models/{smollm2,gpt2,bert-tiny,vit-tiny}/              # HF snapshots (safetensors)
   data/wikitext-2-tiny/train.jsonl                       # 1k rows
   data/cifar10-tiny/samples.pt                           # 1k samples
+  data/{preference-tiny,prompt-tiny,classification-text-tiny}/train.jsonl
   manifest.json                                          # arch + n_params + paths
 
 Verification:
@@ -37,12 +38,15 @@ from typing import Any
 
 # Real, small, safetensors-native models. Each entry: (local name, HF repo,
 # task family). Family steers verify_models forward signature.
+#
+# Multimodal (CLIP) is intentionally absent here — the canonical small CLIP
+# repos still ship .bin only, and a thorough CLIP e2e is deferred to the
+# next coverage spec along with DPO/GRPO/FSDP/eval extensions.
 TINY_MODELS: list[tuple[str, str, str]] = [
-    ("smollm2",   "HuggingFaceTB/SmolLM2-135M",       "causal-lm"),
-    ("gpt2",      "gpt2",                              "causal-lm"),
-    ("bert-tiny", "prajjwal1/bert-tiny",               "encoder"),
-    ("vit-tiny",  "WinKawaks/vit-tiny-patch16-224",    "vision"),
-    ("clip-base", "openai/clip-vit-base-patch32",      "multimodal"),
+    ("smollm2",   "HuggingFaceTB/SmolLM2-135M",            "causal-lm"),
+    ("gpt2",      "gpt2",                                   "causal-lm"),
+    ("bert-tiny", "google/bert_uncased_L-2_H-128_A-2",      "encoder"),
+    ("vit-tiny",  "WinKawaks/vit-tiny-patch16-224",         "vision"),
 ]
 
 
@@ -93,14 +97,13 @@ def verify_models(cached: dict[str, dict[str, Any]]) -> None:
     from transformers import (
         AutoConfig, AutoTokenizer,
         AutoModelForCausalLM, AutoModelForSequenceClassification,
-        AutoModelForImageClassification, CLIPModel,
+        AutoModelForImageClassification,
     )
 
     head_for_family = {
         "causal-lm": AutoModelForCausalLM,
         "encoder": AutoModelForSequenceClassification,
         "vision": AutoModelForImageClassification,
-        "multimodal": CLIPModel,
     }
 
     for name, info in cached.items():
@@ -129,17 +132,6 @@ def verify_models(cached: dict[str, dict[str, Any]]) -> None:
                     image_size = config.image_size
                     out = model(pixel_values=torch.randn(1, 3, image_size, image_size))
                     assert out.logits.shape[0] == 1
-                elif family == "multimodal":
-                    tok = AutoTokenizer.from_pretrained(path)
-                    inputs = tok(["a photo of a cat"], return_tensors="pt", padding=True, truncation=True, max_length=16)
-                    image_size = config.vision_config.image_size
-                    out = model(
-                        input_ids=inputs.input_ids,
-                        attention_mask=inputs.attention_mask,
-                        pixel_values=torch.randn(1, 3, image_size, image_size),
-                    )
-                    assert out.logits_per_image is not None
-
             info["n_params"] = n_params
             info["arch"] = config.architectures[0] if config.architectures else cls.__name__
             print(f"  ok: {name} ({info['arch']}, {n_params:,} params, forward ok)")
@@ -162,6 +154,9 @@ DATASETS = {
         "hf_name": "cifar10", "config": None,
         "split": "train", "n_rows": 1000,
     },
+    "preference-tiny": {"kind": "synthetic-jsonl", "n_rows": 16},
+    "prompt-tiny": {"kind": "synthetic-jsonl", "n_rows": 16},
+    "classification-text-tiny": {"kind": "synthetic-jsonl", "n_rows": 16},
 }
 
 
@@ -172,6 +167,27 @@ def cache_dataset_slice(data_dir: Path, name: str, spec: dict[str, Any]) -> dict
     if sentinel.exists():
         print(f"  [skip] {name} already cached")
         return {"path": str(target), "n_rows": spec["n_rows"], "cached": True}
+
+    if spec.get("kind") == "synthetic-jsonl":
+        out_path = target / "train.jsonl"
+        print(f"  [write] synthetic {name} -> {out_path}")
+        with out_path.open("w") as f:
+            for i in range(spec["n_rows"]):
+                if name == "preference-tiny":
+                    row = {
+                        "chosen": f"Question {i}: answer with concise helpful detail.",
+                        "rejected": f"Question {i}: irrelevant response.",
+                    }
+                elif name == "prompt-tiny":
+                    row = {"text": f"Write one useful sentence about fixture prompt {i}."}
+                elif name == "classification-text-tiny":
+                    row = {"text": f"tiny classification example {i}", "label": i % 2}
+                else:
+                    raise ValueError(f"unknown synthetic dataset: {name}")
+                f.write(json.dumps(row) + "\n")
+        sentinel.touch()
+        size_mb = sum(p.stat().st_size for p in target.rglob("*") if p.is_file()) / 1e6
+        return {"path": str(target), "n_rows": spec["n_rows"], "size_mb": round(size_mb, 2)}
 
     print(f"  [pull] {spec['hf_name']} -> {target}")
     from datasets import load_dataset

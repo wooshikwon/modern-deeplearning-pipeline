@@ -17,8 +17,17 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.e2e.conftest import make_checkpoint_callbacks_yaml, e2e_artifact_dir
 
-def _make_yaml(tmp_path: Path, model_path: Path, data_path: Path, gpus: int) -> tuple[str, str]:
+
+def _make_yaml(
+    tmp_path: Path,
+    model_path: Path,
+    data_path: Path,
+    gpus: int,
+    *,
+    strategy: str = "ddp",
+) -> tuple[str, str]:
     recipe = {
         "name": "e2e-gpu-distributed-sft",
         "task": "text_generation",
@@ -34,6 +43,8 @@ def _make_yaml(tmp_path: Path, model_path: Path, data_path: Path, gpus: int) -> 
                 "fields": {"text": "text"},
                 "tokenizer": str(model_path),
                 "max_length": 32,
+                "padding": "max_length",
+                "truncation": True,
             },
             "collator": {
                 "_component_": "CausalLMCollator",
@@ -59,7 +70,7 @@ def _make_yaml(tmp_path: Path, model_path: Path, data_path: Path, gpus: int) -> 
         "compute": {
             "target": "local",
             "gpus": gpus,
-            "distributed": {"strategy": "ddp"},
+            "distributed": {"strategy": strategy},
         },
         "mlflow": {
             "tracking_uri": str(tmp_path / "mlruns"),
@@ -80,7 +91,7 @@ def _make_yaml(tmp_path: Path, model_path: Path, data_path: Path, gpus: int) -> 
 
 @pytest.mark.distributed
 @pytest.mark.fixtures
-def test_ddp_causal_lm_2gpu(tmp_path, smollm2, wikitext_tiny):
+def test_ddp_causal_lm_2gpu(tmp_path, request, smollm2, wikitext_tiny):
     """End-to-end: HF causal LM SFT under DDP (2 ranks, NCCL), 2 steps."""
     import torch
 
@@ -89,9 +100,42 @@ def test_ddp_causal_lm_2gpu(tmp_path, smollm2, wikitext_tiny):
 
     from mdp.cli.train import run_train
 
-    recipe_path, config_path = _make_yaml(tmp_path, smollm2, wikitext_tiny, gpus=n_gpus)
-    run_train(recipe_path, config_path)
+    run_dir = e2e_artifact_dir(tmp_path, request.node.name)
+    recipe_path, config_path = _make_yaml(run_dir, smollm2, wikitext_tiny, gpus=n_gpus)
+    callbacks_path = make_checkpoint_callbacks_yaml(run_dir)
+    run_train(recipe_path, config_path, callbacks_file=callbacks_path)
 
-    ckpt_dir = tmp_path / "ckpt"
+    ckpt_dir = run_dir / "ckpt"
     saved = list(ckpt_dir.rglob("*.safetensors")) + list(ckpt_dir.rglob("*.bin"))
     assert saved, f"no checkpoint produced under {ckpt_dir}"
+    assert (ckpt_dir / "latest").exists()
+    assert len([p for p in ckpt_dir.glob("checkpoint-*") if p.is_dir()]) <= 2
+
+
+@pytest.mark.distributed
+@pytest.mark.fixtures
+def test_fsdp_causal_lm_2gpu(tmp_path, request, smollm2, wikitext_tiny):
+    """End-to-end: HF causal LM SFT under FSDP, rank-0 checkpoint saved."""
+    import torch
+
+    n_gpus = min(2, torch.cuda.device_count())
+    assert n_gpus >= 2, "test should be skipped if <2 GPUs"
+
+    from mdp.cli.train import run_train
+
+    run_dir = e2e_artifact_dir(tmp_path, request.node.name)
+    recipe_path, config_path = _make_yaml(
+        run_dir,
+        smollm2,
+        wikitext_tiny,
+        gpus=n_gpus,
+        strategy="fsdp",
+    )
+    callbacks_path = make_checkpoint_callbacks_yaml(run_dir)
+    run_train(recipe_path, config_path, callbacks_file=callbacks_path)
+
+    ckpt_dir = run_dir / "ckpt"
+    assert (ckpt_dir / "latest").exists()
+    checkpoints = [p for p in ckpt_dir.glob("checkpoint-*") if p.is_dir()]
+    assert checkpoints, f"no checkpoint directory produced under {ckpt_dir}"
+    assert list(ckpt_dir.rglob("model.safetensors")), "FSDP full-state checkpoint missing"

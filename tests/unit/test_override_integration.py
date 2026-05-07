@@ -68,6 +68,37 @@ def test_override_multiple(recipe_and_config):
     assert settings.recipe.training.precision == "bf16"
 
 
+def test_env_var_substitution_with_auto_cast(tmp_path, monkeypatch):
+    """${VAR:default} 치환은 SettingsFactory에서 타입 변환까지 적용된다."""
+    monkeypatch.setenv("MDP_TEST_EPOCHS", "4")
+    monkeypatch.setenv("MDP_TEST_GPUS", "0")
+    recipe = {
+        "name": "test-env",
+        "task": "text_generation",
+        "model": {
+            "_component_": "transformers.AutoModelForCausalLM",
+            "pretrained": "hf://gpt2",
+        },
+        "data": {
+            "dataset": {"_component_": "HuggingFaceDataset", "source": "wikitext"},
+            "collator": {"_component_": "CausalLMCollator", "tokenizer": "gpt2"},
+        },
+        "training": {"epochs": "${MDP_TEST_EPOCHS:1}", "precision": "fp32"},
+        "metadata": {"author": "test", "description": "env override test"},
+    }
+    config = {"compute": {"gpus": "${MDP_TEST_GPUS:1}"}}
+
+    recipe_path = tmp_path / "recipe.yaml"
+    config_path = tmp_path / "config.yaml"
+    recipe_path.write_text(yaml.dump(recipe))
+    config_path.write_text(yaml.dump(config))
+
+    settings = SettingsFactory().for_training(str(recipe_path), str(config_path))
+
+    assert settings.recipe.training.epochs == 4
+    assert settings.config.compute.gpus == 0
+
+
 def test_no_overrides(recipe_and_config):
     """오버라이드 없이 기본 동작 유지."""
     recipe_path, config_path = recipe_and_config

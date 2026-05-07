@@ -194,6 +194,24 @@ class _VisionTensorModel(nn.Module):
         return self.classifier(self.pool(x).flatten(1))
 
 
+class _PeftLikeWrapper(nn.Module):
+    """Minimal PEFT-like wrapper that keeps adapter call-through semantics."""
+
+    def __init__(self, base_model: nn.Module) -> None:
+        super().__init__()
+        self._base_model = base_model
+        self.calls: list[str] = []
+
+    def get_base_model(self) -> nn.Module:
+        return self._base_model
+
+    def forward(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append("args" if args else "kwargs")
+        if args:
+            return self._base_model(*args)
+        return self._base_model(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Unit tests: _make_forward_fn dispatch
 # ---------------------------------------------------------------------------
@@ -207,6 +225,20 @@ def test_make_forward_fn_base_model() -> None:
     batch = {"pixel_values": torch.randn(2, 3, 8, 8), "labels": torch.tensor([0, 1])}
     outputs = forward_fn(batch)
 
+    assert isinstance(outputs, dict)
+    assert "logits" in outputs
+    assert outputs["logits"].shape == (2, 2)
+
+
+def test_make_forward_fn_peft_wrapped_base_model_uses_batch_call() -> None:
+    """PEFT-like wrappers keep adapter call-through while using BaseModel dispatch."""
+    wrapper = _PeftLikeWrapper(TinyVisionModel(num_classes=2, hidden_dim=16))
+    forward_fn = _make_forward_fn(wrapper)
+
+    batch = {"pixel_values": torch.randn(2, 3, 8, 8), "labels": torch.tensor([0, 1])}
+    outputs = forward_fn(batch)
+
+    assert wrapper.calls == ["args"]
     assert isinstance(outputs, dict)
     assert "logits" in outputs
     assert outputs["logits"].shape == (2, 2)
@@ -228,6 +260,23 @@ def test_make_forward_fn_hf_classification() -> None:
     assert outputs["logits"].shape == (2, 3)
     # hidden_states가 None이므로 포함되지 않아야 한다
     assert "hidden_states" not in outputs
+
+
+def test_make_forward_fn_peft_wrapped_hf_model_keeps_kwarg_call() -> None:
+    """PEFT-like wrappers around HF-style models still use model(**batch)."""
+    wrapper = _PeftLikeWrapper(_HFClassificationModel(vocab_size=64, hidden_dim=16, num_classes=3))
+    forward_fn = _make_forward_fn(wrapper)
+
+    batch = {
+        "input_ids": torch.randint(0, 64, (2, 8)),
+        "attention_mask": torch.ones(2, 8, dtype=torch.long),
+    }
+    outputs = forward_fn(batch)
+
+    assert wrapper.calls == ["kwargs"]
+    assert isinstance(outputs, dict)
+    assert "logits" in outputs
+    assert outputs["logits"].shape == (2, 3)
 
 
 def test_make_forward_fn_hf_classification_preserves_loss() -> None:

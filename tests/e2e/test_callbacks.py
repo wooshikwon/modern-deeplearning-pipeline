@@ -170,3 +170,49 @@ def test_noncritical_callback_swallowed() -> None:
 
     # Should not raise — exception is swallowed and logged
     trainer._fire("on_batch_end", step=0, epoch=0)
+
+
+def test_callback_lifecycle_counts_on_cpu_train(tmp_path) -> None:
+    """A CPU tiny train run fires start/batch/end hooks in order."""
+
+    class CountingCallback(BaseCallback):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def on_train_start(self, **kwargs):
+            self.events.append("train_start")
+
+        def on_batch_start(self, **kwargs):
+            self.events.append("batch_start")
+
+        def on_batch_end(self, **kwargs):
+            self.events.append("batch_end")
+
+        def on_train_end(self, **kwargs):
+            self.events.append("train_end")
+
+    callback = CountingCallback()
+    settings = make_test_settings(
+        epochs=1,
+        max_steps=2,
+        checkpoint_dir=str(tmp_path / "checkpoints"),
+        name="callback-lifecycle-test",
+    )
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    batches = make_vision_batches(num_batches=3, batch_size=4, num_classes=2, image_size=8)
+    trainer = Trainer(
+        settings=settings,
+        model=model,
+        train_loader=ListDataLoader(batches),
+    )
+    trainer.device = torch.device("cpu")
+    trainer.amp_enabled = False
+    trainer.callbacks.append(callback)
+
+    result = trainer.train()
+
+    assert result["total_steps"] == 2
+    assert callback.events[0] == "train_start"
+    assert callback.events[-1] == "train_end"
+    assert callback.events.count("batch_start") == 2
+    assert callback.events.count("batch_end") == 2

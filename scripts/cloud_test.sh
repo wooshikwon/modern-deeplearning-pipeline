@@ -6,20 +6,16 @@
 #   2. Run multi-GPU pytest with MDP_TEST_FIXTURES env exposed
 #
 # Usage:
-#   bash scripts/cloud_test.sh                              # default selection
+#   bash scripts/cloud_test.sh                              # --suite quick
+#   bash scripts/cloud_test.sh --suite gpu
+#   bash scripts/cloud_test.sh --suite distributed --allow-skip
+#   bash scripts/cloud_test.sh --suite memory --memory-profile cuda_24gb
+#   bash scripts/cloud_test.sh --suite all --memory-profile cuda_24gb
 #   bash scripts/cloud_test.sh tests/e2e/test_distributed_cpu.py
 #   bash scripts/cloud_test.sh -k allreduce -x --tb=long
 #   bash scripts/cloud_test.sh --skip-fixtures              # assume already cached
 #
-# Default test selection (when no path given) picks GPU-meaningful e2e:
-#   - tests/e2e/test_distributed_cpu.py     (gloo→nccl path verification)
-#   - tests/e2e/test_distributed_rl.py      (RL distributed)
-#   - tests/e2e/test_factory_e2e.py         (factory routing on GPU)
-#   - tests/e2e/test_inference.py           (inference path)
-#   - tests/e2e/test_inference_hooks_device_map.py
-#   - tests/e2e/test_pipeline_e2e.py        (end-to-end recipe runs)
-#   - tests/e2e/test_callbacks.py           (callback hooks)
-# Plus any test marked @pytest.mark.distributed or @pytest.mark.gpu.
+# Default suite is quick. Explicit pytest args still run as-is.
 #
 # Reads state from ~/.cache/cloud-runner/<repo>/current.env.
 
@@ -36,31 +32,66 @@ STATE_FILE="$HOME/.cache/cloud-runner/$REPO_NAME/current.env"
 # shellcheck disable=SC1090
 source "$STATE_FILE"
 
+WORKSPACE=/workspace/$REPO_NAME
+SSH_BASE="ssh -i $SSH_KEY -p $SSH_PORT root@$SSH_HOST -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ServerAliveInterval=15"
+
+SUITE=quick
+MEMORY_PROFILE="${MDP_MEMORY_BUDGET_PROFILE:-}"
+ALLOW_SKIP=0
 SKIP_FIXTURES=0
 PYTEST_ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --skip-fixtures) SKIP_FIXTURES=1; shift ;;
+    --suite)
+      [ "$#" -ge 2 ] || die "--suite requires a value"
+      SUITE="$2"; shift 2 ;;
+    --suite=*)
+      SUITE="${1#--suite=}"; shift ;;
+    --memory-profile)
+      [ "$#" -ge 2 ] || die "--memory-profile requires a value"
+      MEMORY_PROFILE="$2"; shift 2 ;;
+    --memory-profile=*)
+      MEMORY_PROFILE="${1#--memory-profile=}"; shift ;;
+    --allow-skip) ALLOW_SKIP=1; shift ;;
     *) PYTEST_ARGS+=("$1"); shift ;;
   esac
 done
 
-# Default test selection if none given
-DEFAULT_TARGETS=(
-  "tests/e2e/test_distributed_cpu.py"
-  "tests/e2e/test_distributed_rl.py"
-  "tests/e2e/test_factory_e2e.py"
-  "tests/e2e/test_inference.py"
-  "tests/e2e/test_inference_hooks_device_map.py"
-  "tests/e2e/test_pipeline_e2e.py"
-  "tests/e2e/test_callbacks.py"
-)
-if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
-  PYTEST_ARGS=("${DEFAULT_TARGETS[@]}")
-fi
+case "$SUITE" in
+  quick|gpu|distributed|memory|all) ;;
+  *) die "unknown suite: $SUITE (expected quick|gpu|distributed|memory|all)" ;;
+esac
 
-WORKSPACE=/workspace/$REPO_NAME
-SSH_BASE="ssh -i $SSH_KEY -p $SSH_PORT root@$SSH_HOST -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ServerAliveInterval=15"
+if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
+  case "$SUITE" in
+    quick)
+      PYTEST_ARGS=("tests/unit/test_gpu_fixture_contract.py" "tests/e2e/test_gpu_sft.py" "tests/e2e/test_gpu_inference.py" "-m" "not distributed and not memory")
+      ;;
+    gpu)
+      PYTEST_ARGS=("-m" "gpu and fixtures and not distributed and not memory")
+      ;;
+    distributed)
+      if [ "${N_GPUS:-0}" -lt 2 ]; then
+        if [ "$ALLOW_SKIP" -eq 1 ]; then
+          log "skipping distributed suite: requires >=2 GPUs (have ${N_GPUS:-0})"
+          exit 0
+        fi
+        die "distributed suite requires >=2 GPUs (have ${N_GPUS:-0}); pass --allow-skip to skip"
+      fi
+      PYTEST_ARGS=("-m" "distributed and fixtures")
+      ;;
+    memory)
+      [ -n "$MEMORY_PROFILE" ] || die "memory suite requires --memory-profile or MDP_MEMORY_BUDGET_PROFILE"
+      PYTEST_ARGS=("-m" "memory")
+      ;;
+    all)
+      [ -n "$MEMORY_PROFILE" ] || log "memory tests will skip: no memory profile selected"
+      PYTEST_ARGS=("-m" "not slow")
+      ;;
+  esac
+fi
+PYTEST_REMOTE_ARGS=$(printf " %q" "${PYTEST_ARGS[@]}")
 
 # ────────────────────────────────────────────────────────────
 # Step 1 — Test fixtures (tiny HF models + small dataset slices)
@@ -90,6 +121,7 @@ fi
 # Step 2 — pytest with fixture path exposed
 # ────────────────────────────────────────────────────────────
 log "running pytest on $SSH_HOST:$SSH_PORT ($N_GPUS x $GPU_NAME)"
+log "  suite: $SUITE"
 log "  targets: ${PYTEST_ARGS[*]}"
 
 REMOTE_CMD="
@@ -98,10 +130,15 @@ cd $WORKSPACE
 source .venv/bin/activate
 export MDP_TEST_FIXTURES=/workspace/test-fixtures
 export HF_HOME=/root/.cache/huggingface
+export MDP_MEMORY_BUDGET_PROFILE=$MEMORY_PROFILE
+export MDP_TEST_ARTIFACT_DIR=/tmp/mdp-test-artifacts
+mkdir -p \$MDP_TEST_ARTIFACT_DIR
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -$N_GPUS
 python -c 'import torch; print(\"CUDA devices:\", torch.cuda.device_count(), \"| bf16:\", torch.cuda.is_bf16_supported())'
-pytest ${PYTEST_ARGS[*]} --tb=short -ra 2>&1 | tee /tmp/cloud_test.log
-exit \${PIPESTATUS[0]}
+pytest$PYTEST_REMOTE_ARGS --tb=short -ra --junitxml=\$MDP_TEST_ARTIFACT_DIR/pytest.xml 2>&1 | tee /tmp/cloud_test.log
+rc=\${PIPESTATUS[0]}
+cp /tmp/cloud_test.log \$MDP_TEST_ARTIFACT_DIR/cloud_test.log
+exit \$rc
 "
 
 set +e
@@ -112,7 +149,7 @@ set -e
 if [ "$RC" -eq 0 ]; then
   log "tests passed"
 else
-  log "tests failed (rc=$RC) — full log: $WORKSPACE/../  /tmp/cloud_test.log on instance"
+  log "tests failed (rc=$RC) — full log: /tmp/cloud_test.log on instance"
   log "  pull with: bash scripts/cloud_sync.sh pull"
 fi
 exit "$RC"
