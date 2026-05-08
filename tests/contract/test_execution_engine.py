@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -148,6 +149,34 @@ def _rl_plan(settings: Settings, cb_configs: list[dict] | None = None) -> RunPla
         validation_scope="training",
         distributed_intent=has_distributed_intent(settings),
     )
+
+
+def test_worker_dist_init_accepts_run_plan_when_settings_intent_disagrees(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from mdp.runtime.worker import init_distributed_if_torchrun
+
+    import torch.distributed as dist
+
+    run_plan = replace(_sft_plan(_sft_settings(tmp_path)), distributed_intent=True)
+    initialized: dict[str, object] = {}
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "2")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(
+        dist,
+        "init_process_group",
+        lambda *, backend: initialized.update({"backend": backend}),
+    )
+
+    context = init_distributed_if_torchrun(run_plan)
+
+    assert context.is_torchrun is True
+    assert initialized == {"backend": "gloo"}
 
 
 def test_engine_runs_sft_cpu_smoke_through_bundle_boundary(
@@ -388,8 +417,8 @@ def test_torchrun_main_worker_contract_bootstraps_before_runtime_steps(
     def fake_bootstrap(settings_arg=None):
         events.append("bootstrap-settings" if settings_arg is not None else "bootstrap-env")
 
-    def fake_dist_init(settings_arg):
-        assert settings_arg.recipe.name == "engine-sft"
+    def fake_dist_init(run_plan_arg):
+        assert run_plan_arg.settings.recipe.name == "engine-sft"
         events.append("dist-init")
 
     def fake_run_training(run_plan_arg):

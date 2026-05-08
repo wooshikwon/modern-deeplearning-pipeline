@@ -28,17 +28,17 @@ def _resolve_tokenizer_name(settings: Any) -> str:
     recipe = settings.recipe
 
     # 1. collator의 tokenizer 필드
-    tok = recipe.data.collator.get("tokenizer")
+    tok = recipe.data.collator.kwargs.get("tokenizer")
     if tok:
         return tok
 
     # 2. dataset의 tokenizer 필드
-    tok = recipe.data.dataset.get("tokenizer")
+    tok = recipe.data.dataset.kwargs.get("tokenizer")
     if tok:
         return tok
 
     # 3. model의 pretrained 필드 (hf:// 접두사 제거)
-    pretrained = recipe.model.get("pretrained", "")
+    pretrained = recipe.model.pretrained or ""
     if pretrained.startswith("hf://"):
         return pretrained[5:]
     if pretrained:

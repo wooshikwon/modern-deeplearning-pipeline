@@ -8,11 +8,11 @@ import logging
 import os
 
 
-def _init_distributed_if_torchrun(settings) -> None:
+def _init_distributed_if_torchrun(run_plan) -> None:
     """torchrun 워커로 실행 중이면 process group을 초기화한다."""
     from mdp.runtime.worker import init_distributed_if_torchrun
 
-    init_distributed_if_torchrun(settings)
+    init_distributed_if_torchrun(run_plan)
 
 
 def run_training(run_plan) -> dict:
@@ -77,7 +77,7 @@ def main() -> None:
     # Worker-side order: logging bootstrap → settings load →
     # bootstrap_logging(settings) → dist init → Liger patch(run_training) →
     # assembly materialization(ExecutionEngine).
-    _init_distributed_if_torchrun(settings)
+    _init_distributed_if_torchrun(run_plan)
 
     # Liger monkey-patch와 materialization은 run_training() 내부 ExecutionEngine
     # 경로에서 수행된다. 여기서는 dist init 선행만 보장한다.

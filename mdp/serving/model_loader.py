@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import logging
 from pathlib import Path
@@ -11,6 +11,11 @@ from typing import Any, Literal
 logger = logging.getLogger(__name__)
 
 _CHECKPOINT_MANIFEST_FILE = "manifest.json"
+AdapterPolicy = Literal[
+    "preserve_recipe_adapter",
+    "suppress_recipe_adapter",
+    "load_peft_adapter_artifact",
+]
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,7 @@ class ArtifactLoadPlan:
     weight_format: str | None = None
     merge: bool = False
     weights_dir: Path | None = None
+    adapter_policy: AdapterPolicy = "preserve_recipe_adapter"
 
 
 def resolve_artifact_load_plan(
@@ -50,13 +56,18 @@ def resolve_artifact_load_plan(
                 selected.get("role"),
                 selected.get("format"),
             )
+            weight_format = selected.get("format")
             return ArtifactLoadPlan(
                 source=source,
                 artifact_kind="training_checkpoint",
                 role=str(selected.get("role", role)),
-                weight_format=selected.get("format"),
+                weight_format=weight_format,
                 merge=merge,
                 weights_dir=weights_dir,
+                adapter_policy=_adapter_policy_for_artifact(
+                    "training_checkpoint",
+                    weight_format,
+                ),
             )
 
     if (source / "recipe.yaml").exists() and (
@@ -66,22 +77,32 @@ def resolve_artifact_load_plan(
         or (source / "model.safetensors").exists()
         or (source / "model.pt").exists()
     ):
+        weight_format = _detect_weight_format(source)
         return ArtifactLoadPlan(
             source=source,
             artifact_kind="serving_artifact",
             role=role,
-            weight_format=_detect_weight_format(source),
+            weight_format=weight_format,
             merge=merge,
             weights_dir=source,
+            adapter_policy=_adapter_policy_for_artifact(
+                "serving_artifact",
+                weight_format,
+            ),
         )
 
+    weight_format = _detect_weight_format(source)
     return ArtifactLoadPlan(
         source=source,
         artifact_kind="legacy_checkpoint",
         role=role,
-        weight_format=_detect_weight_format(source),
+        weight_format=weight_format,
         merge=merge,
         weights_dir=source,
+        adapter_policy=_adapter_policy_for_artifact(
+            "legacy_checkpoint",
+            weight_format,
+        ),
     )
 
 
@@ -118,6 +139,37 @@ def _detect_weight_format(source: Path) -> str | None:
     return None
 
 
+def _adapter_policy_for_artifact(
+    artifact_kind: Literal[
+        "training_checkpoint",
+        "serving_artifact",
+        "legacy_checkpoint",
+    ],
+    weight_format: str | None,
+) -> AdapterPolicy:
+    if weight_format == "peft_adapter":
+        return "load_peft_adapter_artifact"
+    if (
+        artifact_kind == "serving_artifact"
+        and weight_format in {"export", "safetensors", "torch_state_dict"}
+    ):
+        return "suppress_recipe_adapter"
+    return "preserve_recipe_adapter"
+
+
+def _apply_artifact_adapter_policy(assembly_plan: Any, plan: ArtifactLoadPlan) -> Any:
+    """Adjust recipe adapter materialization to match artifact weight ownership."""
+    if plan.adapter_policy == "preserve_recipe_adapter":
+        return assembly_plan
+    models = tuple(
+        replace(node, adapter=None) if node.adapter is not None else node
+        for node in assembly_plan.models
+    )
+    if models == assembly_plan.models:
+        return assembly_plan
+    return replace(assembly_plan, models=models)
+
+
 def _get_adapter_name(checkpoint_dir: Path) -> str:
     """adapter_config.json에서 adapter_name을 읽는다. 없으면 PEFT 기본값 "default"로 폴백.
 
@@ -136,7 +188,40 @@ def _get_adapter_name(checkpoint_dir: Path) -> str:
     return "default"
 
 
-def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
+def _load_peft_adapter_artifact(model: Any, checkpoint_dir: Path) -> Any:
+    target = getattr(model, "module", model)
+    adapter_name = _get_adapter_name(checkpoint_dir)
+    if hasattr(target, "load_adapter"):
+        target.load_adapter(str(checkpoint_dir), adapter_name=adapter_name)
+        logger.info(
+            "LoRA adapter loaded from %s (adapter_name=%s)",
+            checkpoint_dir,
+            adapter_name,
+        )
+        return model
+
+    try:
+        from peft import PeftModel
+    except ImportError as exc:
+        raise ImportError(
+            "PEFT adapter artifact를 로드하려면 peft가 필요합니다: "
+            "pip install peft"
+        ) from exc
+
+    loaded = PeftModel.from_pretrained(
+        model,
+        str(checkpoint_dir),
+        adapter_name=adapter_name,
+    )
+    logger.info(
+        "PEFT adapter artifact loaded from %s (adapter_name=%s)",
+        checkpoint_dir,
+        adapter_name,
+    )
+    return loaded
+
+
+def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> Any:
     """checkpoint/ artifact에서 가중치를 로드한다. resume용 — adapter/safetensors/pt 3가지 분기."""
     import torch
 
@@ -147,24 +232,22 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> None:
     model_pt_path = checkpoint_dir / "model.pt"
 
     if adapter_path.exists():
-        if hasattr(target, "load_adapter"):
-            adapter_name = _get_adapter_name(checkpoint_dir)
-            target.load_adapter(str(checkpoint_dir), adapter_name=adapter_name)
-            logger.info("LoRA adapter loaded from %s (adapter_name=%s)", checkpoint_dir, adapter_name)
-        else:
-            logger.warning("adapter_model.safetensors가 있지만 load_adapter 메서드 없음")
+        return _load_peft_adapter_artifact(model, checkpoint_dir)
     elif safetensors_path.exists():
         from safetensors.torch import load_file
 
         state_dict = load_file(safetensors_path)
         target.load_state_dict(state_dict)
         logger.info("모델 가중치 로드: %s", safetensors_path)
+        return model
     elif model_pt_path.exists():
         state_dict = torch.load(model_pt_path, map_location="cpu", weights_only=True)
         target.load_state_dict(state_dict)
         logger.info("모델 가중치 로드: %s", model_pt_path)
+        return model
     else:
         logger.warning("체크포인트에 모델 가중치 파일이 없습니다: %s", checkpoint_dir)
+        return model
 
 
 def _resolve_padding_side(model: Any) -> str:
@@ -267,7 +350,9 @@ def reconstruct_model(
     # RL recipe이면 create_models()["policy"]를 사용한다.
     # default role은 policy — value/critic 모델은 훈련 전용이며 serving 경로에서는
     # 필요하지 않다. manifest checkpoint에서는 caller가 role을 명시할 수 있다.
-    materializer = AssemblyMaterializer(AssemblyPlanner.from_run_plan(run_plan))
+    assembly_plan = AssemblyPlanner.from_run_plan(run_plan)
+    assembly_plan = _apply_artifact_adapter_policy(assembly_plan, plan)
+    materializer = AssemblyMaterializer(assembly_plan)
     if settings.recipe.rl is not None:
         models = materializer.materialize_models(skip_base_check=True)
         model = (
@@ -300,7 +385,7 @@ def reconstruct_model(
         # device_map은 추후 필요 시 추가.
     elif adapter_config_path.exists() or adapter_safetensors.exists():
         # adapter는 항상 CPU에서 먼저 로드 + merge
-        load_checkpoint_weights(model, weights_dir)
+        model = load_checkpoint_weights(model, weights_dir)
         if merge and hasattr(model, "merge_and_unload"):
             logger.info("LoRA adapter 병합 중...")
             model = model.merge_and_unload()

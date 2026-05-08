@@ -13,11 +13,12 @@ mdp/
 │   └── interventions/    # ResidualAdd, LogitBias
 ├── cli/                  # CLI entry points (typer)
 ├── data/                 # Data pipeline (Dataset, DataLoader, transforms)
-├── materializer/              # Component assembly planning/materialization
-│   ├── materializer.py        # Stable AssemblyMaterializer facade (caching + delegation)
+├── assembly/             # Component assembly planning/materialization
 │   ├── assembly_plan.py  # AssemblyPlan graph
 │   ├── planner.py        # RunPlan -> AssemblyPlan
-│   └── materializer.py   # AssemblyPlan -> concrete training bundles/components
+│   ├── materializer.py   # AssemblyPlan -> concrete training bundles/components
+│   ├── bundles.py        # Materialized training bundle dataclasses
+│   └── specs.py          # Assembly node/spec dataclasses
 ├── models/               # Model layer
 │   ├── base.py           # BaseModel ABC
 │   ├── pretrained.py     # PretrainedResolver (hf://, timm://, ...)
@@ -28,7 +29,7 @@ mdp/
 ├── monitoring/           # Data distribution monitoring
 ├── serving/              # Serving layer (FastAPI)
 ├── runtime/              # Training runtime launcher/worker/engine
-├── settings/             # Settings system (schema, validation, planner)
+├── settings/             # Settings loading, schema validation, and RunPlan building
 ├── training/             # Training engine (see below)
 └── utils/
     ├── estimator.py      # GPU memory estimator
@@ -42,16 +43,22 @@ Training execution is explicit across three planning/execution objects:
 
 ```
 Raw YAML / artifact snapshot / CLI args
+  -> SettingsLoader
+  -> Settings
+  -> RunPlanBuilder
   -> RunPlan
   -> AssemblyPlan
   -> ExecutionEngine
 ```
 
-`RunPlanner` owns environment substitution, override application,
-validation scope, callback config loading, and command intent. `SettingsLoader`
-is the stable path-oriented facade over this planner: public methods such as
-`for_training()` return `plan.settings`, while `RunPlan` remains the
-runtime source of truth.
+`SettingsLoader` owns source loading only: it reads recipe/config/artifact
+sources, applies overrides, performs environment substitution, and returns a
+validated `Settings` object. It does not wrap runtime planning.
+
+`RunPlanBuilder` combines the loaded `Settings` with command intent, validation
+scope, source paths, callback config path, artifact source, and distributed
+intent to produce the `RunPlan`. `RunPlan` is the runtime source of truth after
+settings loading has completed.
 
 `AssemblyPlanner` converts the validated `RunPlan` into an
 `AssemblyPlan`, a serializable graph of model, data, strategy, callback, and
@@ -197,8 +204,8 @@ Tier 3 (Orchestrator)
   Load RunPlan, launch workers, and dispatch training bundles or serving paths
   ↓
 Tier 2 (Composite)
-  RunPlanner, AssemblyPlanner, AssemblyMaterializer
-  AssemblyMaterializer        — stable component creation facade, singleton caching
+  SettingsLoader, RunPlanBuilder, AssemblyPlanner, AssemblyMaterializer
+  AssemblyMaterializer        — stable component creation API, singleton caching
   Trainer/RLTrainer — training loop execution
   (AssemblyMaterializer and Trainer are both Tier 2 but do not create each other)
   ↓

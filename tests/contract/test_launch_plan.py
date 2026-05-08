@@ -22,7 +22,11 @@ def _settings(distributed: dict | None = None):
     return settings
 
 
-def _run_plan(distributed: dict | None = None, callbacks: list[dict] | None = None):
+def _run_plan(
+    distributed: dict | None = None,
+    callbacks: list[dict] | None = None,
+    distributed_intent: bool | None = None,
+):
     settings = _settings(distributed)
     return RunPlan(
         command="train",
@@ -32,7 +36,11 @@ def _run_plan(distributed: dict | None = None, callbacks: list[dict] | None = No
         overrides=(),
         callback_configs=normalize_callback_configs(callbacks),
         validation_scope="training",
-        distributed_intent=has_distributed_intent(settings),
+        distributed_intent=(
+            has_distributed_intent(settings)
+            if distributed_intent is None
+            else distributed_intent
+        ),
     )
 
 
@@ -62,6 +70,14 @@ def test_build_launch_plan_requires_intent_and_multiple_processes() -> None:
         nproc=2,
         distributed=True,
     )
+
+
+def test_build_launch_plan_uses_run_plan_intent_when_settings_disagree() -> None:
+    settings_intent_plan = _run_plan({"strategy": "ddp"}, distributed_intent=False)
+    no_settings_intent_plan = _run_plan(None, distributed_intent=True)
+
+    assert build_launch_plan(settings_intent_plan, nproc=2).distributed is False
+    assert build_launch_plan(no_settings_intent_plan, nproc=2).distributed is True
 
 
 def test_build_launch_plan_detects_gpu_count_when_nproc_is_not_provided(

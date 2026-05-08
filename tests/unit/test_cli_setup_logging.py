@@ -442,8 +442,8 @@ class TestCLIEntryBootstrapWiring:
         def _bootstrap(settings_arg: Any | None = None) -> None:
             events.append("bootstrap-settings" if settings_arg is not None else "bootstrap-env")
 
-        def _init_dist(settings_arg: Any) -> None:
-            assert settings_arg.recipe.name == settings.recipe.name
+        def _init_dist(run_plan_arg: Any) -> None:
+            assert run_plan_arg.settings.recipe.name == settings.recipe.name
             events.append("dist-init")
 
         def _run_training(run_plan_arg: Any) -> dict:

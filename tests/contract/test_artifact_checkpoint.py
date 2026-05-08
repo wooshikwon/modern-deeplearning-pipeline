@@ -226,14 +226,31 @@ def test_artifact_load_plan_selects_manifest_role_path(tmp_path: Path) -> None:
     assert plan.weight_format == "safetensors"
     assert plan.weights_dir == reward_dir
     assert plan.merge is True
+    assert plan.adapter_policy == "preserve_recipe_adapter"
 
 
 @pytest.mark.parametrize(
-    ("files", "artifact_kind", "weight_format"),
+    ("files", "artifact_kind", "weight_format", "adapter_policy"),
     [
-        ({"recipe.yaml": "", "model.safetensors": ""}, "serving_artifact", "safetensors"),
-        ({"model.pt": ""}, "legacy_checkpoint", "torch_state_dict"),
-        ({}, "legacy_checkpoint", None),
+        (
+            {"recipe.yaml": "", "model.safetensors": ""},
+            "serving_artifact",
+            "safetensors",
+            "suppress_recipe_adapter",
+        ),
+        (
+            {"recipe.yaml": "", "adapter_model.safetensors": ""},
+            "serving_artifact",
+            "peft_adapter",
+            "load_peft_adapter_artifact",
+        ),
+        (
+            {"model.pt": ""},
+            "legacy_checkpoint",
+            "torch_state_dict",
+            "preserve_recipe_adapter",
+        ),
+        ({}, "legacy_checkpoint", None, "preserve_recipe_adapter"),
     ],
 )
 def test_artifact_load_plan_classifies_artifact_layouts(
@@ -241,6 +258,7 @@ def test_artifact_load_plan_classifies_artifact_layouts(
     files: dict[str, str],
     artifact_kind: str,
     weight_format: str | None,
+    adapter_policy: str,
 ) -> None:
     for name, content in files.items():
         (tmp_path / name).write_text(content)
@@ -251,6 +269,7 @@ def test_artifact_load_plan_classifies_artifact_layouts(
     assert plan.role == "policy"
     assert plan.weight_format == weight_format
     assert plan.weights_dir == tmp_path
+    assert plan.adapter_policy == adapter_policy
 
 
 def test_artifact_load_plan_rejects_missing_manifest_role(tmp_path: Path) -> None:

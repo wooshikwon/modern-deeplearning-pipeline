@@ -96,6 +96,12 @@ source_modules = ["mdp.serving", "mdp.settings"]
 forbidden_modules = ["mdp.runtime.engine"]
 
 [[tool.importlinter.contracts]]
+name = "Settings must not import assembly"
+type = "forbidden"
+source_modules = ["mdp.settings"]
+forbidden_modules = ["mdp.assembly"]
+
+[[tool.importlinter.contracts]]
 name = "Runtime must not import CLI"
 type = "forbidden"
 source_modules = ["mdp.runtime"]

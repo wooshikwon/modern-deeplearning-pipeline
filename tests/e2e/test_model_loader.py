@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
@@ -90,6 +91,7 @@ def test_artifact_load_plan_selects_manifest_policy_role(tmp_path: Path) -> None
     assert plan.role == "policy"
     assert plan.weight_format == "safetensors"
     assert plan.weights_dir == policy_dir
+    assert plan.adapter_policy == "preserve_recipe_adapter"
 
 
 def test_reconstruct_model_from_manifest_checkpoint(tmp_path: Path) -> None:
@@ -142,6 +144,136 @@ def test_reconstruct_model_from_manifest_checkpoint(tmp_path: Path) -> None:
         loaded.named_parameters(),
     ):
         assert torch.equal(expected, actual)
+
+
+def test_reconstruct_model_preserves_recipe_adapter_for_manifest_safetensors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Manifest safetensors checkpoints still build the recipe adapter architecture."""
+    from safetensors.torch import save_file
+
+    from mdp.serving.model_loader import reconstruct_model
+
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    save_file(model.state_dict(), tmp_path / "model.safetensors")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps({
+            "models": {
+                "model": {
+                    "role": "policy",
+                    "format": "safetensors",
+                    "path": "model.safetensors",
+                    "trainable": True,
+                }
+            }
+        })
+    )
+    _write_tiny_recipe(
+        tmp_path,
+        name="manifest-safetensors-preserves-recipe-adapter-test",
+        adapter={"_component_": "LoRA", "r": 4, "alpha": 8},
+    )
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_apply_lora(model: Any, **kwargs: Any) -> Any:
+        calls.append(kwargs)
+        return model
+
+    monkeypatch.setattr("mdp.models.adapters.lora.apply_lora", fake_apply_lora)
+
+    reconstruct_model(tmp_path)
+
+    assert calls == [{"r": 4, "alpha": 8}]
+
+
+def test_reconstruct_model_suppresses_recipe_adapter_for_full_artifact_weights(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Full artifact weights own adapter state; recipe adapter is not re-applied."""
+    from safetensors.torch import save_file
+
+    from mdp.serving.model_loader import reconstruct_model
+
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    save_file(model.state_dict(), tmp_path / "model.safetensors")
+    _write_tiny_recipe(
+        tmp_path,
+        name="full-artifact-suppresses-recipe-adapter-test",
+        adapter={"_component_": "LoRA", "r": 4, "alpha": 8},
+    )
+
+    def fail_if_recipe_adapter_is_applied(*args, **kwargs):
+        raise AssertionError("recipe adapter must not be applied for full artifact weights")
+
+    monkeypatch.setattr(
+        "mdp.models.adapters.lora.apply_lora",
+        fail_if_recipe_adapter_is_applied,
+    )
+
+    loaded, settings = reconstruct_model(tmp_path)
+
+    assert settings.recipe.adapter is not None
+    for (_, expected), (_, actual) in zip(
+        model.named_parameters(),
+        loaded.named_parameters(),
+    ):
+        assert torch.equal(expected, actual)
+
+
+def test_reconstruct_model_suppresses_recipe_adapter_for_peft_artifact(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PEFT adapter artifacts load saved adapter state, not a fresh recipe adapter."""
+    from mdp.serving.model_loader import reconstruct_model
+
+    (tmp_path / "adapter_config.json").write_text(
+        json.dumps({"adapter_name": "trained"})
+    )
+    (tmp_path / "adapter_model.safetensors").touch()
+    _write_tiny_recipe(
+        tmp_path,
+        name="peft-artifact-suppresses-recipe-adapter-test",
+        adapter={"_component_": "LoRA", "r": 4, "alpha": 8},
+    )
+
+    def fail_if_recipe_adapter_is_applied(*args, **kwargs):
+        raise AssertionError("recipe adapter must not be applied for PEFT artifact weights")
+
+    monkeypatch.setattr(
+        "mdp.models.adapters.lora.apply_lora",
+        fail_if_recipe_adapter_is_applied,
+    )
+
+    calls: list[tuple[Any, str, str]] = []
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(
+            model: Any,
+            checkpoint_dir: str,
+            *,
+            adapter_name: str,
+        ) -> Any:
+            calls.append((model, checkpoint_dir, adapter_name))
+            model.peft_adapter_loaded = True
+            return model
+
+    monkeypatch.setitem(
+        sys.modules,
+        "peft",
+        type("FakePeftModule", (), {"PeftModel": FakePeftModel}),
+    )
+
+    loaded, settings = reconstruct_model(tmp_path)
+
+    assert settings.recipe.adapter is not None
+    assert loaded.peft_adapter_loaded is True
+    assert calls
+    assert calls[0][1:] == (str(tmp_path), "trained")
 
 
 def test_reconstruct_model_dispatches_safetensors_with_device_map(
@@ -236,7 +368,12 @@ def test_serving_config_device_map_fields() -> None:
     assert default.max_memory is None
 
 
-def _write_tiny_recipe(tmp_path: Path, *, name: str) -> None:
+def _write_tiny_recipe(
+    tmp_path: Path,
+    *,
+    name: str,
+    adapter: dict | None = None,
+) -> None:
     recipe = {
         "name": name,
         "task": "image_classification",
@@ -257,4 +394,6 @@ def _write_tiny_recipe(tmp_path: Path, *, name: str) -> None:
         "optimizer": {"_component_": "AdamW", "lr": 1e-3},
         "metadata": {"author": "test", "description": "device map test"},
     }
+    if adapter is not None:
+        recipe["adapter"] = adapter
     (tmp_path / "recipe.yaml").write_text(yaml.dump(recipe))

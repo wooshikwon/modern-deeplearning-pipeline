@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from mdp.settings.distributed import should_launch_distributed
 from mdp.settings.run_plan import RunPlan
 from mdp.runtime.payload import RunPlanPayload
 
@@ -47,7 +46,7 @@ def build_launch_plan(
     return LaunchPlan(
         run_plan=run_plan,
         nproc=detected,
-        distributed=should_launch_distributed(run_plan.settings, detected),
+        distributed=detected > 1 and run_plan.distributed_intent,
     )
 
 

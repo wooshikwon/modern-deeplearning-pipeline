@@ -46,15 +46,24 @@ Training runtime setup is represented as an explicit plan-to-execution chain:
 
 ```
 Raw YAML / artifact snapshot / CLI args
+  -> SettingsLoader
+  -> Settings
+  -> RunPlanBuilder
   -> RunPlan
+  -> AssemblyPlanner
   -> AssemblyPlan
   -> ExecutionEngine
 ```
 
-`RunPlan` is the validated command intent. It contains the assembled
-`Settings`, validation scope, command/mode, source paths, override list,
-callback configs, artifact source, and distributed intent. It does not preserve
-raw YAML dictionaries as the runtime source of truth.
+`SettingsLoader` owns source loading only: it reads recipe/config/artifact
+sources, applies overrides, performs environment substitution, and returns a
+validated `Settings` object.
+
+`RunPlanBuilder` combines `Settings` with command/runtime metadata to create
+`RunPlan`, the validated command intent. It contains validation scope,
+command/mode, source paths, override list, callback configs, artifact source,
+and distributed intent. It does not preserve raw YAML dictionaries as the
+runtime source of truth.
 
 `AssemblyPlan` is the component graph derived from `RunPlan`. It records
 model roles, data, trainer kind, strategy, and callbacks as node/spec objects,
@@ -65,17 +74,19 @@ torchrun workers.
 `ExecutionEngine` owns SFT/RL dispatch for training. It builds the assembly
 plan, materializes callbacks and training bundles, then invokes
 `Trainer.from_bundle(...).train()` or `RLTrainer.from_bundle(...).train()`.
-The public facades over this path are stable: `SettingsLoader.load_training_settings()`
-returns the planner's `Settings`, `AssemblyMaterializer(AssemblyPlan).materialize_*` preserves the
-component creation/cache API, and direct `Trainer(...)` / `RLTrainer(...)`
-constructors remain supported low-level loop APIs for tests and users that
-inject already materialized components. The runtime path itself uses
-`Trainer.from_bundle(...)` and `RLTrainer.from_bundle(...)`.
+`SettingsLoader.load_training_settings()` is a source-loading API that returns
+validated `Settings`; it does not wrap runtime planning. `RunPlanBuilder`
+combines those settings with command/runtime metadata to create the `RunPlan`.
+`AssemblyMaterializer(AssemblyPlan).materialize_*` preserves the component
+creation/cache API, and direct `Trainer(...)` / `RLTrainer(...)` constructors
+remain supported low-level loop APIs for tests and users that inject already
+materialized components. The runtime path itself uses `Trainer.from_bundle(...)`
+and `RLTrainer.from_bundle(...)`.
 
 `mdp.runtime.training.run_training(...)` is the shared
 current-process training helper. It applies Liger patches before
-materialization, infers SFT vs RL from `Settings`, builds the matching
-`RunPlan`, and enters `ExecutionEngine`.
+materialization and enters `ExecutionEngine` with the provided validated
+`RunPlan`; it does not build a `RunPlan` from `Settings`.
 
 `mdp.cli._torchrun_entry` is a process-entry adapter for torchrun workers.
 Its `run_training(...)` wrapper delegates to the runtime helper with the

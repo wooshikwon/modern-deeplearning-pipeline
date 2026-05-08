@@ -5,9 +5,10 @@ from __future__ import annotations
 import os
 
 from mdp.runtime.context import RuntimeContext
+from mdp.settings.run_plan import RunPlan
 
 
-def init_distributed_if_torchrun(settings) -> RuntimeContext:
+def init_distributed_if_torchrun(run_plan: RunPlan) -> RuntimeContext:
     """Initialize torch.distributed before any dataloader materialization."""
     context = RuntimeContext.from_env()
     if not context.is_torchrun:
@@ -19,6 +20,7 @@ def init_distributed_if_torchrun(settings) -> RuntimeContext:
     if dist.is_initialized():
         return context
 
+    settings = run_plan.settings
     if torch.cuda.is_available():
         torch.cuda.set_device(context.local_rank)
 
