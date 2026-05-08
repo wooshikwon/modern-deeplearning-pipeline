@@ -18,9 +18,11 @@ from typing import Any, Iterator
 import pytest
 import yaml
 
+from mdp.factory.planner import AssemblyPlanner
+from mdp.settings.plan import SettingsPlan
 from mdp.settings.factory import SettingsFactory
 from mdp.settings.resolver import ComponentResolver
-from mdp.settings.schema import Recipe
+from mdp.settings.schema import Config, Recipe, Settings
 from mdp.task_taxonomy import TASK_PRESETS
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "recipes"
@@ -115,6 +117,23 @@ def _iter_component_dicts(node: Any) -> Iterator[dict[str, Any]]:
     elif isinstance(node, list):
         for item in node:
             yield from _iter_component_dicts(item)
+
+
+def _training_plan_for_recipe(recipe: Recipe) -> SettingsPlan:
+    is_rl = recipe.rl is not None
+    settings = Settings(recipe=recipe, config=Config())
+    return SettingsPlan(
+        command="rl-train" if is_rl else "train",
+        mode="rl" if is_rl else "sft",
+        settings=settings,
+        recipe_path=None,
+        config_path=None,
+        artifact_dir=None,
+        overrides=(),
+        callback_configs=(),
+        validation_scope="training",
+        distributed_intent=False,
+    )
 
 
 @pytest.mark.parametrize("recipe_path", _all_recipe_paths(), ids=lambda p: p.name)
@@ -273,6 +292,27 @@ def test_fixture_recipe_pydantic_load(recipe_path: Path) -> None:
     assert isinstance(recipe.data.collator, dict)
     # ModelSpec 제거 확인 — model이 dict로 노출되어야 한다 (S2 변경의 회귀 방지)
     assert isinstance(recipe.model, dict)
+
+
+@pytest.mark.parametrize("recipe_path", _all_recipe_paths(), ids=lambda p: p.name)
+def test_fixture_recipe_builds_assembly_plan(recipe_path: Path) -> None:
+    """모든 recipe fixture가 component instance 없는 AssemblyPlan으로 변환된다."""
+    raw = yaml.safe_load(recipe_path.read_text())
+    recipe = Recipe(**raw)
+
+    plan = AssemblyPlanner.from_settings_plan(_training_plan_for_recipe(recipe))
+    plan_dict = plan.to_dict()
+
+    assert plan.kind == ("rl_training" if recipe.rl is not None else "sft_training")
+    assert plan.models
+    assert plan.data.dataset.config == recipe.data.dataset
+    assert plan.data.collator.config == recipe.data.collator
+    assert isinstance(plan_dict, dict)
+    assert plan_dict["models"]
+    assert plan_dict["data"]["dataloader_config"] == recipe.data.dataloader.model_dump()
+    for model_node in plan.models:
+        assert isinstance(model_node.model.config, dict)
+        assert not hasattr(model_node.model, "parameters")
 
 
 # ---------------------------------------------------------------------------

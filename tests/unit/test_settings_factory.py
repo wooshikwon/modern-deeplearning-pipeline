@@ -59,6 +59,29 @@ def test_from_artifact_uses_config_snapshot_by_default(tmp_path: Path) -> None:
     assert settings.config.serving.max_memory == {"0": "24GiB"}
 
 
+def test_settings_planner_artifact_plan_preserves_snapshot_source(
+    tmp_path: Path,
+) -> None:
+    from mdp.settings.planner import SettingsPlanner
+
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    _write_recipe(artifact_dir)
+    config_path = artifact_dir / "config.yaml"
+    config_path.write_text(yaml.dump({"serving": {"device_map": "auto"}}))
+
+    plan = SettingsPlanner().load_artifact(str(artifact_dir))
+
+    assert plan.artifact_dir == artifact_dir
+    assert plan.recipe_path == artifact_dir / "recipe.yaml"
+    assert plan.config_path == config_path
+    assert plan.validation_scope == "artifact"
+    assert plan.command == "serve"
+    assert plan.mode == "serving"
+    assert plan.settings.config.serving is not None
+    assert plan.settings.config.serving.device_map == "auto"
+
+
 def test_from_artifact_can_ignore_config_snapshot(tmp_path: Path) -> None:
     from mdp.settings.factory import SettingsFactory
 
@@ -75,6 +98,29 @@ def test_from_artifact_can_ignore_config_snapshot(tmp_path: Path) -> None:
     )
 
     assert settings.config.serving is None
+
+
+def test_settings_planner_artifact_plan_records_absent_config_snapshot(
+    tmp_path: Path,
+) -> None:
+    from mdp.settings.planner import SettingsPlanner
+
+    artifact_dir = tmp_path / "artifact"
+    artifact_dir.mkdir()
+    _write_recipe(artifact_dir)
+    (artifact_dir / "config.yaml").write_text(
+        yaml.dump({"serving": {"device_map": "auto"}})
+    )
+
+    plan = SettingsPlanner().load_artifact(
+        str(artifact_dir),
+        use_config_snapshot=False,
+    )
+
+    assert plan.artifact_dir == artifact_dir
+    assert plan.config_path is None
+    assert plan.validation_scope == "artifact"
+    assert plan.settings.config.serving is None
 
 
 def test_from_artifact_manifest_config_file_and_override_precedence(

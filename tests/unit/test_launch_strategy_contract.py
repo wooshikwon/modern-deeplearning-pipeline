@@ -5,6 +5,7 @@ from __future__ import annotations
 from unittest import mock
 
 from mdp.factory.factory import Factory
+from mdp.runtime.launcher import LaunchPlan, build_launch_plan
 from mdp.settings.schema import RLSpec
 from mdp.settings.distributed import has_distributed_intent, should_launch_distributed
 from tests.e2e.conftest import make_test_settings
@@ -28,6 +29,27 @@ def test_should_launch_distributed_ignores_gpu_count_without_intent() -> None:
     assert should_launch_distributed(_settings({"strategy": "none"}), detected_gpu_count=2) is False
     assert should_launch_distributed(_settings({"strategy": "ddp"}), detected_gpu_count=1) is False
     assert should_launch_distributed(_settings({"strategy": "ddp"}), detected_gpu_count=2) is True
+
+
+def test_build_launch_plan_captures_parent_launch_decision() -> None:
+    settings = _settings({"strategy": "ddp"})
+    cb_configs = [{"_component_": "EarlyStopping", "patience": 1}]
+
+    plan = build_launch_plan(settings, nproc=2, cb_configs=cb_configs)
+
+    assert plan == LaunchPlan(
+        settings=settings,
+        nproc=2,
+        distributed=True,
+        cb_configs=tuple(cb_configs),
+    )
+
+
+def test_build_launch_plan_keeps_single_path_without_intent() -> None:
+    plan = build_launch_plan(_settings(None), nproc=2)
+
+    assert plan.distributed is False
+    assert plan.nproc == 2
 
 
 def test_train_cli_uses_single_path_when_multi_gpu_has_no_distributed_intent(monkeypatch) -> None:

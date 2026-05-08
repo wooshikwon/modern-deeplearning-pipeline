@@ -21,7 +21,16 @@ import pytest
 from torch import nn
 
 from mdp.factory.factory import Factory
-from mdp.settings.schema import Settings
+from mdp.factory.planner import AssemblyPlanner
+from mdp.settings.plan import SettingsPlan
+from mdp.settings.schema import (
+    Config,
+    DataSpec,
+    MetadataSpec,
+    Recipe,
+    Settings,
+    TrainingSpec,
+)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -50,6 +59,21 @@ def _make_factory() -> Factory:
     """최소 Settings으로 Factory 인스턴스를 생성한다."""
     settings = MagicMock(spec=Settings)
     return Factory(settings)
+
+
+def _settings_plan_for_recipe(recipe: Recipe) -> SettingsPlan:
+    return SettingsPlan(
+        command="train",
+        mode="sft",
+        settings=Settings(recipe=recipe, config=Config()),
+        recipe_path=None,
+        config_path=None,
+        artifact_dir=None,
+        overrides=(),
+        callback_configs=(),
+        validation_scope="training",
+        distributed_intent=False,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -234,6 +258,68 @@ class TestResolveSemantic:
         assert set(adapter_out["target_modules"]) == {
             "q_proj", "k_proj", "v_proj", "o_proj",
         }
+
+
+class TestAssemblyPlanSemanticBoundary:
+    """AssemblyPlanner keeps semantic config unresolved for materialization."""
+
+    def test_sft_head_and_adapter_semantic_keys_are_preserved(self) -> None:
+        recipe = Recipe(
+            name="semantic-plan",
+            task="image_classification",
+            model={
+                "_component_": "transformers.AutoModel",
+                "pretrained": "hf://google/vit-base-patch16-224",
+            },
+            head={"_component_": "ClassificationHead", "slot": "head.cls"},
+            adapter={"_component_": "LoRA", "target": ["attn.q", "attn.v"]},
+            data=DataSpec(
+                dataset={"_component_": "ImageClassificationDataset", "source": "cifar10"},
+                collator={"_component_": "VisionCollator"},
+            ),
+            training=TrainingSpec(epochs=1),
+            metadata=MetadataSpec(author="test", description="semantic plan"),
+        )
+
+        plan = AssemblyPlanner.from_settings_plan(_settings_plan_for_recipe(recipe))
+        model_node = plan.models[0]
+
+        assert model_node.head is not None
+        assert model_node.adapter is not None
+        assert model_node.head.config["slot"] == "head.cls"
+        assert "_target_attr" not in model_node.head.config
+        assert model_node.adapter.config["target"] == ["attn.q", "attn.v"]
+        assert "target_modules" not in model_node.adapter.config
+
+    def test_qlora_semantic_keys_are_not_family_resolved(self) -> None:
+        recipe = Recipe(
+            name="qlora-plan",
+            task="text_generation",
+            model={
+                "_component_": "mdp.models.language.CausalLM",
+                "pretrained": "hf://Qwen/Qwen2.5-7B",
+            },
+            adapter={
+                "_component_": "QLoRA",
+                "target": "all-linear",
+                "save": ["head.lm"],
+            },
+            data=DataSpec(
+                dataset={"_component_": "HuggingFaceDataset", "source": "wikitext"},
+                collator={"_component_": "CausalLMCollator", "tokenizer": "gpt2"},
+            ),
+            training=TrainingSpec(epochs=1),
+            metadata=MetadataSpec(author="test", description="qlora plan"),
+        )
+
+        plan = AssemblyPlanner.from_settings_plan(_settings_plan_for_recipe(recipe))
+        adapter = plan.models[0].adapter
+
+        assert adapter is not None
+        assert adapter.config["target"] == "all-linear"
+        assert adapter.config["save"] == ["head.lm"]
+        assert "target_modules" not in adapter.config
+        assert "modules_to_save" not in adapter.config
 
 
 # ──────────────────────────────────────────────────────────────────────

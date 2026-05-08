@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 
+from mdp.factory.bundles import build_sft_training_bundle
 from mdp.settings.schema import Settings
 from mdp.training.trainer import Trainer
 from tests.e2e.conftest import make_test_settings
@@ -109,6 +110,26 @@ class TestLanguageTrainer:
         metrics = trainer.train()
         # 4 batches per epoch, grad_accum=2 -> 2 steps per epoch, 2 epochs -> 4 total
         assert trainer.global_step == 4, f"Expected 4, got {trainer.global_step}"
+
+    def test_language_trainer_from_bundle_trains(self) -> None:
+        """Bundle-oriented path preserves the SFT training loop."""
+        settings = _make_settings(task="text_generation", epochs=2)
+        model = TinyLanguageModel(vocab_size=128, hidden_dim=32)
+
+        batches = make_language_batches(num_batches=4, batch_size=4, seq_len=16, vocab_size=128)
+        train_loader = ListDataLoader(batches)
+        bundle = build_sft_training_bundle(
+            settings=settings,
+            model=model,
+            train_loader=train_loader,
+        )
+
+        trainer = Trainer.from_bundle(bundle)
+        trainer.device = torch.device("cpu")
+        trainer.amp_enabled = False
+
+        trainer.train()
+        assert trainer.global_step == 4 * 2
 
 
 class TestTokenClassTrainer:

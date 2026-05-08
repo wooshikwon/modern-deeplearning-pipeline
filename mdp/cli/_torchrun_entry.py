@@ -6,65 +6,20 @@ import argparse
 import json
 import logging
 import os
-from typing import Any
 
 
 def _init_distributed_if_torchrun(settings) -> None:
-    """torchrun 워커로 실행 중이면 process group을 초기화한다.
+    """torchrun 워커로 실행 중이면 process group을 초기화한다."""
+    from mdp.runtime.worker import init_distributed_if_torchrun
 
-    분산 환경 초기화는 프로세스 생명주기의 문제이지 Trainer 생명주기의
-    문제가 아니다. ``Factory.create_dataloaders()``가 ``DistributedSampler``를
-    만들 때 ``dist.get_world_size()``를 호출하는데, 이 시점에 process group이
-    이미 초기화되어 있어야 한다.
-
-    기존에는 FSDPStrategy/Trainer 내부에서 ``init_process_group()``을 호출했으나,
-    그 호출은 create_dataloaders 이후에 발생하므로 DataLoader 생성이 실패했다.
-    이 함수는 entry point에서 먼저 초기화를 수행하고, 기존 trainer/strategy의
-    중복 호출은 ``is_initialized()`` 가드로 no-op이 된다.
-
-    torchrun이 아닌 단일 프로세스 실행(예: 라이브러리 import)에서는
-    RANK/WORLD_SIZE 환경변수가 없으므로 조기 return한다.
-    """
-    if "RANK" not in os.environ or "WORLD_SIZE" not in os.environ:
-        return
-
-    import torch
-    import torch.distributed as dist
-
-    if dist.is_initialized():
-        return
-
-    # CUDA current-device를 LOCAL_RANK에 고정. 이 호출이 없으면 모든 rank의
-    # ``torch.cuda.current_device()``가 기본값 0을 반환하고, Triton 커널(Liger FLCE
-    # 등)을 포함해 current device를 참조하는 CUDA 라이브러리가 rank 1~N의 텐서
-    # 포인터를 "다른 device"로 간주해 ``ValueError: Pointer argument (at 0) cannot
-    # be accessed from Triton (cpu tensor?)``를 던진다. ``.to(f"cuda:{local_rank}")``
-    # 로 만들어 둔 실제 텐서 device와 current device를 맞추기 위한 필수 1줄
-    # (2026-04-18 U6 sanity v2~v6 실패의 근본 원인, review-c3 §H9 확정).
-    if torch.cuda.is_available():
-        local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-        torch.cuda.set_device(local_rank)
-
-    # backend: Config.compute.distributed.backend → fallback nccl(cuda)/gloo(cpu)
-    dist_cfg = settings.config.compute.distributed
-    backend = None
-    if isinstance(dist_cfg, dict):
-        backend = dist_cfg.get("backend")
-    if backend is None:
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-
-    dist.init_process_group(backend=backend)
+    init_distributed_if_torchrun(settings)
 
 
 def _is_main_process() -> bool:
     """rank-0 여부를 반환한다. torchrun 환경이 아니면 항상 True."""
-    try:
-        import torch.distributed as dist
-        if dist.is_initialized():
-            return dist.get_rank() == 0
-    except Exception:
-        pass
-    return int(os.environ.get("RANK", "0")) == 0
+    from mdp.runtime.worker import is_main_process
+
+    return is_main_process()
 
 
 def _print_callbacks_log(
@@ -116,80 +71,39 @@ def _print_callbacks_log(
                 print(line)
 
 
-def _resolve_cb_configs(cb_configs: list[dict[str, Any]]) -> list:
-    """cb_configs list[dict]를 실제 callback 인스턴스 리스트로 resolve한다."""
-    from mdp.settings.resolver import ComponentResolver
-    from mdp.training._common import create_callbacks
-
-    resolver = ComponentResolver()
-    return create_callbacks(cb_configs, resolver)
-
-
 def run_training(settings, cb_configs: list[dict] | None = None) -> dict:
-    """Settings 객체를 받아 Factory -> Trainer -> train() 파이프라인을 실행한다.
-
-    RL recipe(settings.recipe.rl이 존재)이면 RLTrainer로, 아니면 SFT Trainer로 디스패치한다.
-
-    Args:
-        settings: 학습 Settings 객체.
-        cb_configs: CLI --callbacks에서 로드된 list[dict[str, Any]]. None이면 빈 리스트로 처리.
-    """
+    """Settings 객체를 받아 ExecutionEngine으로 training lifecycle을 실행한다."""
     # Liger-Kernel monkey-patch는 HF `from_pretrained`(Factory.create_model 내부)
-    # 이전에 수행되어야 효과가 있다. 단일 GPU 실행 경로와 torchrun worker subprocess
-    # 양쪽에서 이 함수를 공통으로 거치므로 여기에 배치한다. Idempotent.
+    # 이전에 수행되어야 효과가 있다. Engine이 AssemblyMaterializer를 호출하기
+    # 직전에 공통 적용해 single/torchrun worker 양쪽 순서를 맞춘다. Idempotent.
     # 상세: mdp/_liger_patch.py, spec-algorithm-hidden-states-support §U2.
-    from mdp._liger_patch import apply_liger_patches
-    apply_liger_patches()
+    from mdp.runtime.context import training_settings_plan_from_settings
+    from mdp.runtime.engine import ExecutionEngine
+    from mdp.runtime.worker import apply_liger_patches_for_training
 
-    if getattr(settings.recipe, "rl", None) is not None:
-        return run_rl_training(settings, cb_configs=cb_configs)
+    apply_liger_patches_for_training()
 
-    from mdp.factory.factory import Factory
-    from mdp.training.trainer import Trainer
-
-    # cb_configs를 실제 callback 인스턴스로 resolve (torchrun worker 프로세스 내부에서 수행)
-    callbacks = _resolve_cb_configs(cb_configs) if cb_configs else []
-
-    # 실행 시작 로그 (rank-0, non-JSON 모드만)
-    _print_callbacks_log(callbacks, settings)
-
-    factory = Factory(settings)
-    model = factory.create_model()
-    dataloaders = factory.create_dataloaders()
-
-    trainer = Trainer(
-        settings=settings,
-        model=model,
-        train_loader=dataloaders["train"],
-        val_loader=dataloaders.get("val"),
-        callbacks=callbacks if callbacks else None,
+    settings_plan = training_settings_plan_from_settings(
+        settings,
+        cb_configs=cb_configs,
     )
-    return trainer.train()
+    return ExecutionEngine(callbacks_observer=_print_callbacks_log).run(settings_plan)
 
 
 def run_rl_training(settings, cb_configs: list[dict] | None = None) -> dict:
-    """Settings 객체를 받아 Factory -> RLTrainer -> train() 파이프라인을 실행한다."""
-    from mdp.factory.factory import Factory
-    from mdp.training.rl_trainer import RLTrainer
+    """Compatibility wrapper for callers that still enter through RL training."""
+    from mdp.runtime.context import training_settings_plan_from_settings
+    from mdp.runtime.engine import ExecutionEngine
+    from mdp.runtime.worker import apply_liger_patches_for_training
 
-    # cb_configs를 실제 callback 인스턴스로 resolve
-    callbacks = _resolve_cb_configs(cb_configs) if cb_configs else []
+    apply_liger_patches_for_training()
 
-    # 실행 시작 로그 (rank-0, non-JSON 모드만)
-    _print_callbacks_log(callbacks, settings)
-
-    factory = Factory(settings)
-    models = factory.create_models()
-    dataloaders = factory.create_dataloaders()
-
-    trainer = RLTrainer(
-        settings=settings,
-        models=models,
-        train_loader=dataloaders["train"],
-        val_loader=dataloaders.get("val"),
-        callbacks=callbacks if callbacks else None,
+    settings_plan = training_settings_plan_from_settings(
+        settings,
+        command="rl-train",
+        cb_configs=cb_configs,
     )
-    return trainer.train()
+    return ExecutionEngine(callbacks_observer=_print_callbacks_log).run(settings_plan)
 
 
 def main() -> None:
@@ -242,12 +156,13 @@ def main() -> None:
     # silent 하게 운영 기본값으로 돌아간다 (cycle 1 review 1-2 의 근본 문제).
     bootstrap_logging(settings)
 
-    # DistributedSampler가 dataloader 생성 시 분산 통신을 요구하므로,
-    # create_dataloaders 이전에 process group을 초기화한다.
+    # Worker-side order: logging bootstrap → settings load →
+    # bootstrap_logging(settings) → dist init → Liger patch(run_training) →
+    # assembly materialization(ExecutionEngine).
     _init_distributed_if_torchrun(settings)
 
-    # Liger monkey-patch는 run_training() 내부에서 수행된다 (Factory.create_model
-    # 호출 이전). 여기서는 dist init만 보장.
+    # Liger monkey-patch와 materialization은 run_training() 내부 ExecutionEngine
+    # 경로에서 수행된다. 여기서는 dist init 선행만 보장한다.
     result = run_training(settings, cb_configs=cb_configs)
 
     # rank-0만 결과를 저장한다

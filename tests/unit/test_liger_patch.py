@@ -170,17 +170,26 @@ def test_cli_entries_call_apply_liger_patches():
     import mdp
 
     mdp_root = Path(mdp.__file__).parent
-    targets = {
-        "_torchrun_entry": mdp_root / "cli" / "_torchrun_entry.py",
+    direct_import_targets = {
+        "runtime.worker": mdp_root / "runtime" / "worker.py",
         "train": mdp_root / "cli" / "train.py",
         "rl_train": mdp_root / "cli" / "rl_train.py",
     }
+    delegated_targets = {
+        "_torchrun_entry": mdp_root / "cli" / "_torchrun_entry.py",
+    }
 
-    for name, path in targets.items():
+    for name, path in direct_import_targets.items():
         text = path.read_text()
         assert "apply_liger_patches" in text, (
             f"{name} ({path}) does not reference apply_liger_patches"
         )
         assert "from mdp._liger_patch import" in text, (
             f"{name} ({path}) does not import from mdp._liger_patch"
+        )
+
+    for name, path in delegated_targets.items():
+        text = path.read_text()
+        assert "apply_liger_patches_for_training" in text, (
+            f"{name} ({path}) does not delegate Liger patch application"
         )

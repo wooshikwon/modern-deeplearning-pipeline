@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from mdp.settings.factory import SettingsFactory
+from mdp.settings.planner import SettingsPlanner
 
 
 @pytest.fixture
@@ -97,6 +98,54 @@ def test_env_var_substitution_with_auto_cast(tmp_path, monkeypatch):
 
     assert settings.recipe.training.epochs == 4
     assert settings.config.compute.gpus == 0
+
+
+def test_settings_planner_preserves_callback_configs_without_resolving(
+    recipe_and_config,
+    tmp_path,
+):
+    """planner는 callbacks YAML을 raw config로 보존하고 instance resolve는 하지 않는다."""
+    recipe_path, config_path = recipe_and_config
+    callbacks_path = tmp_path / "callbacks.yaml"
+    callbacks_path.write_text(
+        yaml.dump([
+            {"_component_": "ModelCheckpoint", "monitor": "val_loss", "save_top_k": 1}
+        ])
+    )
+
+    plan = SettingsPlanner().load_training(
+        recipe_path,
+        config_path,
+        callbacks_file=str(callbacks_path),
+    )
+
+    assert plan.callback_configs == (
+        {"_component_": "ModelCheckpoint", "monitor": "val_loss", "save_top_k": 1},
+    )
+    assert plan.command == "train"
+    assert plan.mode == "sft"
+
+
+def test_settings_plan_distributed_intent_ignores_gpu_count_without_strategy(
+    recipe_and_config,
+):
+    """distributed_intent는 compute.gpus가 아니라 compute.distributed를 기준으로 한다."""
+    recipe_path, config_path = recipe_and_config
+
+    multi_gpu_plan = SettingsPlanner().load_inference(
+        recipe_path,
+        config_path,
+        overrides=["config.compute.gpus=4"],
+    )
+    distributed_plan = SettingsPlanner().load_training(
+        recipe_path,
+        config_path,
+        overrides=["config.compute.gpus=4", "config.compute.distributed.strategy=ddp"],
+    )
+
+    assert multi_gpu_plan.settings.config.compute.gpus == 4
+    assert multi_gpu_plan.distributed_intent is False
+    assert distributed_plan.distributed_intent is True
 
 
 def test_no_overrides(recipe_and_config):

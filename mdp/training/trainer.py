@@ -22,14 +22,19 @@ from torch.amp import autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
+from mdp.factory.bundles import (
+    SFTTrainingBundle,
+    build_sft_training_bundle,
+    create_loss,
+    create_sft_optimizer,
+    create_sft_scheduler,
+)
 from mdp.models.forward import make_forward_fn
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
     aggregate_checkpoint_stats,
     backward_and_step,
-    create_expert_parallel,
-    create_strategy,
     detect_device,
     set_epoch_on_loader,
     setup_amp,
@@ -47,13 +52,7 @@ from mdp.training._mlflow_logging import (
     log_step_metrics,
     log_summary,
 )
-from mdp.training._schedulers import (
-    create_scheduler_with_warmup,
-    parse_warmup_config,
-)
 from mdp.training.callbacks.base import BaseCallback
-from mdp.training.callbacks.early_stopping import EarlyStopping
-from mdp.training.callbacks.ema import EMACallback
 
 logger = logging.getLogger(__name__)
 
@@ -69,13 +68,37 @@ class Trainer(BaseTrainer):
         val_loader: DataLoader | None = None,
         callbacks: list[BaseCallback] | None = None,
     ) -> None:
-        self.settings = settings
-        self.model = model
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.resolver = ComponentResolver()
+        resolver = ComponentResolver()
+        bundle = build_sft_training_bundle(
+            settings=settings,
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            callbacks=callbacks,
+            resolver=resolver,
+        )
+        self._init_from_bundle(bundle, resolver=resolver)
 
-        recipe = settings.recipe
+    @classmethod
+    def from_bundle(cls, bundle: SFTTrainingBundle) -> "Trainer":
+        """Construct a Trainer from a materialized SFTTrainingBundle."""
+        trainer = cls.__new__(cls)
+        trainer._init_from_bundle(bundle)
+        return trainer
+
+    def _init_from_bundle(
+        self,
+        bundle: SFTTrainingBundle,
+        *,
+        resolver: ComponentResolver | None = None,
+    ) -> None:
+        self.settings = bundle.settings
+        self.model = bundle.model
+        self.train_loader = bundle.train_loader
+        self.val_loader = bundle.val_loader
+        self.resolver = resolver or ComponentResolver()
+
+        recipe = self.settings.recipe
         training = recipe.training
 
         # Device
@@ -95,22 +118,23 @@ class Trainer(BaseTrainer):
         self.amp_enabled, self.amp_dtype, self.scaler = setup_amp(training.precision, self.device)
 
         # Components
-        self.optimizer = self._create_optimizer(recipe.optimizer)
-        self.scheduler, self.scheduler_interval = self._create_scheduler(
-            recipe.scheduler
-        )
-        self.loss_fn = self._create_loss(recipe.loss)
-        self.callbacks = list(callbacks) if callbacks else []
-        if training.early_stopping is not None:
-            self.callbacks.append(EarlyStopping(**training.early_stopping.model_dump()))
-        if training.ema is not None:
-            self.callbacks.append(EMACallback(**training.ema.model_dump()))
-        self.strategy = create_strategy(settings, self.resolver)
-        self.expert_parallel = create_expert_parallel(settings)
+        self.optimizer = bundle.optimizer or self._create_optimizer(recipe.optimizer)
+        if bundle.scheduler is None and recipe.scheduler is not None:
+            self.scheduler, self.scheduler_interval = self._create_scheduler(recipe.scheduler)
+        else:
+            self.scheduler = bundle.scheduler
+            self.scheduler_interval = bundle.scheduler_interval
+        if bundle.loss_fn is None and recipe.loss is not None:
+            self.loss_fn = self._create_loss(recipe.loss)
+        else:
+            self.loss_fn = bundle.loss_fn
+        self.callbacks = list(bundle.callbacks) if bundle.callbacks else []
+        self.strategy = bundle.strategy
+        self.expert_parallel = bundle.expert_parallel
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Recipe snapshot (체크포인트에 내장용)
-        self._recipe_dict = settings.recipe.model_dump()
+        self._recipe_dict = self.settings.recipe.model_dump()
 
         # State
         self.global_step = 0
@@ -129,53 +153,22 @@ class Trainer(BaseTrainer):
     # ── Component creation ──
 
     def _create_optimizer(self, config: dict[str, Any]) -> torch.optim.Optimizer:
-        # Model-defined optimizer takes priority
-        custom = self.model.configure_optimizers() if hasattr(self.model, "configure_optimizers") else None
-        if custom and isinstance(custom, dict) and "optimizer" in custom:
-            return custom["optimizer"]
-
-        klass, kwargs = self.resolver.resolve_partial(config)
-        weight_decay = kwargs.get("weight_decay", 0.0)
-
-        if weight_decay > 0:
-            # bias, LayerNorm, Embedding은 weight decay에서 제외
-            decay_params = []
-            no_decay_params = []
-            for name, param in self.model.named_parameters():
-                if not param.requires_grad:
-                    continue
-                if "bias" in name or "norm" in name or "layernorm" in name or "ln_" in name:
-                    no_decay_params.append(param)
-                else:
-                    decay_params.append(param)
-            param_groups = [
-                {"params": decay_params, "weight_decay": weight_decay},
-                {"params": no_decay_params, "weight_decay": 0.0},
-            ]
-            kwargs.pop("weight_decay", None)
-            return klass(param_groups, **kwargs)
-
-        return klass(self.model.parameters(), **kwargs)
+        return create_sft_optimizer(self.model, config, self.resolver)
 
     def _create_scheduler(
         self, config: dict[str, Any] | None
     ) -> tuple[Any, str] | tuple[None, str]:
         if config is None:
             return None, "step"
-
-        config = dict(config)  # copy — parse_warmup_config는 in-place pop 수행
-        warmup = parse_warmup_config(config, self._estimate_total_steps())
-        klass, kwargs = self.resolver.resolve_partial(config)
-        base_scheduler = klass(self.optimizer, **kwargs)
-        scheduler = create_scheduler_with_warmup(
-            self.optimizer, base_scheduler, warmup
+        return create_sft_scheduler(
+            self.optimizer,
+            config,
+            total_steps=self._estimate_total_steps(),
+            resolver=self.resolver,
         )
-        return scheduler, warmup.interval
 
     def _create_loss(self, config: dict[str, Any] | None) -> nn.Module | None:
-        if config is None:
-            return None
-        return self.resolver.resolve(config)
+        return create_loss(config, self.resolver)
 
     def _optimizer_dict(self) -> dict[str, torch.optim.Optimizer]:
         """공용 로깅 헬퍼(``_mlflow_logging``)용 optimizer dict 시그니처.

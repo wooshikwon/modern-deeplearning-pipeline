@@ -54,6 +54,34 @@ def test_yaml_parsing(recipe_file: str, config_file: str) -> None:
     assert settings.recipe.task
 
 
+def test_settings_planner_training_plan_keeps_validated_settings_and_sources() -> None:
+    """SettingsPlanner returns SettingsPlan without making raw YAML the source."""
+    from mdp.settings.plan import SettingsPlan
+    from mdp.settings.planner import SettingsPlanner
+
+    recipe_path = RECIPES / "gpt2-finetune-text.yaml"
+    config_path = CONFIGS / "remote-4gpu-ddp.yaml"
+
+    plan = SettingsPlanner().load_training(
+        recipe_path,
+        config_path,
+        overrides=["training.epochs=0.25"],
+        command="rl-train",
+    )
+
+    assert isinstance(plan, SettingsPlan)
+    assert isinstance(plan.settings, Settings)
+    assert not hasattr(plan, "recipe_dict")
+    assert plan.recipe_path == recipe_path
+    assert plan.config_path == config_path
+    assert plan.artifact_dir is None
+    assert plan.overrides == ("training.epochs=0.25",)
+    assert plan.validation_scope == "training"
+    assert plan.command == "rl-train"
+    assert plan.mode == "rl"
+    assert plan.distributed_intent is True
+
+
 # ---------------------------------------------------------------------------
 # ComponentResolver
 # ---------------------------------------------------------------------------

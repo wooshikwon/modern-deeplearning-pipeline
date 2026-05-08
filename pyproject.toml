@@ -90,7 +90,7 @@ source_modules = ["mdp.data"]
 forbidden_modules = ["mdp.training", "mdp.factory"]
 
 [[tool.importlinter.contracts]]
-name = "Serving must not import training"
+name = "Serving and settings must not import runtime engine"
 type = "forbidden"
-source_modules = ["mdp.serving"]
-forbidden_modules = ["mdp.training"]
+source_modules = ["mdp.serving", "mdp.settings"]
+forbidden_modules = ["mdp.runtime.engine"]

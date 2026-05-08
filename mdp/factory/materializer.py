@@ -1,57 +1,80 @@
-"""Factory 파사드 — Settings를 받아 모든 컴포넌트를 생성하는 중앙 관리자."""
+"""AssemblyPlan materialization into concrete factory components."""
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable
+from enum import Enum
+from typing import Any
 
 import torch.nn as nn
 
 from mdp.factory.assembly_plan import AssemblyPlan
-from mdp.factory.materializer import (
-    AssemblyMaterializer,
-    _ModelLoadRoute,
-    _decide_model_load_route,
-    _is_qlora_adapter_config,
+from mdp.factory.bundles import (
+    RLTrainingBundle,
+    SFTTrainingBundle,
+    build_rl_training_bundle,
+    build_sft_training_bundle,
 )
-from mdp.factory.planner import AssemblyPlanner
-from mdp.settings.distributed import has_distributed_intent
-from mdp.settings.plan import SettingsPlan
+from mdp.factory.specs import ComponentSpec, DataNode, ModelNode
 from mdp.settings.resolver import ComponentResolver
-from mdp.settings.schema import Settings
+from mdp.training.callbacks.base import BaseCallback
 
 logger = logging.getLogger(__name__)
 
-__all__ = [
-    "Factory",
-    "_ModelLoadRoute",
-    "_decide_model_load_route",
-    "_is_qlora_adapter_config",
-]
+
+class _ModelLoadRoute(Enum):
+    COMPONENT_FROM_PRETRAINED = "component_from_pretrained"
+    COMPONENT_CONSTRUCTOR = "component_constructor"
+    PRETRAINED_RESOLVER = "pretrained_resolver"
+    QLORA = "qlora"
 
 
-class Factory:
-    """컴포넌트 생성 중앙 파사드.
+def _decide_model_load_route(
+    model_config: dict[str, Any],
+    adapter_config: dict[str, Any] | None,
+) -> _ModelLoadRoute:
+    component = model_config.get("_component_")
+    pretrained = model_config.get("pretrained")
 
-    모든 create_* 메서드는 동일한 Settings에서 동일한 컴포넌트를 요청하면
-    캐싱된 인스턴스를 반환한다 (싱글턴 보장).
-    """
+    if adapter_config is not None and _is_qlora_adapter_config(adapter_config):
+        return _ModelLoadRoute.QLORA
+    if component is not None and pretrained is not None:
+        return _ModelLoadRoute.COMPONENT_FROM_PRETRAINED
+    if component is not None:
+        return _ModelLoadRoute.COMPONENT_CONSTRUCTOR
+    if pretrained is not None:
+        return _ModelLoadRoute.PRETRAINED_RESOLVER
+    raise ValueError("model에 _component_ 또는 pretrained가 필요합니다")
 
-    def __init__(self, settings: Settings | AssemblyPlan) -> None:
-        if isinstance(settings, AssemblyPlan):
-            self.assembly_plan: AssemblyPlan | None = settings
-            self.settings = settings.settings_plan.settings
-        else:
-            self.assembly_plan = None
-            self.settings = settings
-        self.resolver = ComponentResolver()
-        self._cache: dict[str, Any] = {}
-        self._materializer: AssemblyMaterializer | None = None
+
+def _is_qlora_adapter_config(adapter_config: dict[str, Any]) -> bool:
+    component = adapter_config.get("_component_", "")
+    return component in {"QLoRA", "mdp.models.adapters.qlora.apply_qlora"}
+
+
+class AssemblyMaterializer:
+    """Materialize model/data nodes from an AssemblyPlan."""
 
     _SENTINEL = object()
 
-    def _get_or_create(self, key: str, creator: Callable) -> Any:
-        """캐시에서 key를 찾고, 없으면 creator()를 호출하여 캐싱한다."""
+    def __init__(
+        self,
+        assembly_plan: AssemblyPlan | None = None,
+        *,
+        resolver: ComponentResolver | None = None,
+        cache: dict[str, Any] | None = None,
+    ) -> None:
+        self.assembly_plan = assembly_plan
+        self.resolver = resolver or ComponentResolver()
+        self._cache = cache if cache is not None else {}
+
+    @property
+    def settings(self):
+        if self.assembly_plan is None:
+            raise ValueError("AssemblyMaterializer에는 AssemblyPlan이 필요합니다")
+        return self.assembly_plan.settings_plan.settings
+
+    def _get_or_create(self, key: str, creator):
         cached = self._cache.get(key, self._SENTINEL)
         if cached is not self._SENTINEL:
             return cached
@@ -60,47 +83,137 @@ class Factory:
             self._cache[key] = instance
         return instance
 
-    def _assembly_plan(self) -> AssemblyPlan:
-        if self.assembly_plan is None:
-            settings_plan = SettingsPlan(
-                command="rl-train" if self.settings.recipe.rl is not None else "train",
-                mode="rl" if self.settings.recipe.rl is not None else "sft",
-                settings=self.settings,
-                recipe_path=None,
-                config_path=None,
-                artifact_dir=None,
-                overrides=(),
-                callback_configs=(),
-                validation_scope="training",
-                distributed_intent=has_distributed_intent(self.settings),
-            )
-            self.assembly_plan = AssemblyPlanner.from_settings_plan(settings_plan)
-        return self.assembly_plan
+    def materialize_policy_model(self, skip_base_check: bool = False) -> nn.Module:
+        """Materialize the SFT policy node while preserving Factory cache semantics."""
+        def _create() -> nn.Module:
+            policy = self._model_node("policy")
+            return self.materialize_model_node(policy, skip_base_check=skip_base_check)
 
-    def _assembly_materializer(self) -> AssemblyMaterializer:
-        plan = self._assembly_plan()
-        if self._materializer is None or self._materializer.assembly_plan is not plan:
-            self._materializer = AssemblyMaterializer(
-                plan,
-                resolver=self.resolver,
-                cache=self._cache,
-            )
-        return self._materializer
+        return self._get_or_create("model", _create)
 
-    # ── Phase 2: 모델 생성 ──
+    def materialize_models(self, skip_base_check: bool = False) -> dict[str, nn.Module]:
+        """Materialize RL role models with the legacy role->model output shape."""
+        def _create() -> dict[str, nn.Module]:
+            if self.assembly_plan is None or self.assembly_plan.kind != "rl_training":
+                raise ValueError("create_models()는 recipe.rl이 필요합니다")
+            return {
+                node.role: self.materialize_model_node(
+                    node, skip_base_check=skip_base_check,
+                )
+                for node in self.assembly_plan.models
+            }
 
-    def create_model(self, skip_base_check: bool = False) -> nn.Module:
-        """Recipe의 model 설정에 따라 모델을 생성한다.
+        return self._get_or_create("models", _create)
 
-        순서: pretrained 로딩 → MoE 감지 → head 교체 → BaseModel 검증 → adapter 적용.
-        QLoRA는 양자화+로딩+어댑터가 결합된 특수 경로를 탄다.
-        """
-        return self._assembly_materializer().materialize_policy_model(
+    def materialize_dataloaders(self) -> dict:
+        """Materialize train/val dataloaders from the plan DataNode."""
+        return self._get_or_create(
+            "dataloaders",
+            lambda: self.materialize_data_node(self._data_node()),
+        )
+
+    def materialize_callbacks(self) -> list[BaseCallback]:
+        """Materialize callback nodes from the plan's raw callback configs."""
+        def _create() -> list[BaseCallback]:
+            if self.assembly_plan is None:
+                raise ValueError("AssemblyMaterializer에는 AssemblyPlan이 필요합니다")
+            from mdp.training._common import create_callbacks
+
+            configs = [
+                node.config.to_dict()
+                for node in self.assembly_plan.callbacks
+            ]
+            return create_callbacks(configs, self.resolver)
+
+        return self._get_or_create("callbacks", _create)
+
+    def materialize_sft_training_bundle(
+        self,
+        *,
+        callbacks: list[BaseCallback] | None = None,
+        skip_base_check: bool = False,
+    ) -> SFTTrainingBundle:
+        """Materialize an SFTTrainingBundle for Trainer.from_bundle()."""
+        if self.assembly_plan is None or self.assembly_plan.kind != "sft_training":
+            raise ValueError("SFTTrainingBundle에는 sft_training AssemblyPlan이 필요합니다")
+        dataloaders = self.materialize_dataloaders()
+        callback_instances = callbacks
+        if callback_instances is None:
+            callback_instances = self.materialize_callbacks()
+        return build_sft_training_bundle(
+            settings=self.settings,
+            model=self.materialize_policy_model(skip_base_check=skip_base_check),
+            train_loader=dataloaders["train"],
+            val_loader=dataloaders.get("val"),
+            callbacks=callback_instances,
+            resolver=self.resolver,
+        )
+
+    def materialize_rl_training_bundle(
+        self,
+        *,
+        callbacks: list[BaseCallback] | None = None,
+        skip_base_check: bool = False,
+    ) -> RLTrainingBundle:
+        """Materialize an RLTrainingBundle for RLTrainer.from_bundle()."""
+        if self.assembly_plan is None or self.assembly_plan.kind != "rl_training":
+            raise ValueError("RLTrainingBundle에는 rl_training AssemblyPlan이 필요합니다")
+        dataloaders = self.materialize_dataloaders()
+        callback_instances = callbacks
+        if callback_instances is None:
+            callback_instances = self.materialize_callbacks()
+        return build_rl_training_bundle(
+            settings=self.settings,
+            models=self.materialize_models(skip_base_check=skip_base_check),
+            train_loader=dataloaders["train"],
+            val_loader=dataloaders.get("val"),
+            callbacks=callback_instances,
+            resolver=self.resolver,
+        )
+
+    def materialize_model_node(
+        self,
+        node: ModelNode,
+        *,
+        skip_base_check: bool = False,
+    ) -> nn.Module:
+        """Materialize a single ModelNode."""
+        return self._assemble_model(
+            model_config=node.model.to_dict(),
+            head_config=self._optional_dict(node.head),
+            adapter_config=self._optional_dict(node.adapter),
             skip_base_check=skip_base_check,
         )
 
-    def _build_model(self, skip_base_check: bool = False) -> nn.Module:
-        return self.create_model(skip_base_check=skip_base_check)
+    def materialize_data_node(self, node: DataNode) -> dict:
+        """Materialize dataloaders from a DataNode."""
+        from mdp.data.dataloader import create_dataloaders
+
+        return create_dataloaders(
+            dataset_config=node.dataset.to_dict(),
+            collator_config=node.collator.to_dict(),
+            dataloader_config=dict(node.dataloader_config),
+            val_dataset_config=self._optional_dict(node.val_dataset),
+            sampler_config=self._optional_dict(node.sampler),
+            distributed=node.distributed_intent,
+        )
+
+    def _model_node(self, role: str) -> ModelNode:
+        if self.assembly_plan is None:
+            raise ValueError("AssemblyMaterializer에는 AssemblyPlan이 필요합니다")
+        for node in self.assembly_plan.models:
+            if node.role == role:
+                return node
+        raise ValueError(f"AssemblyPlan에 {role!r} model node가 없습니다")
+
+    def _data_node(self) -> DataNode:
+        if self.assembly_plan is None:
+            raise ValueError("AssemblyMaterializer에는 AssemblyPlan이 필요합니다")
+        return self.assembly_plan.data
+
+    @staticmethod
+    def _optional_dict(spec: ComponentSpec | None) -> dict[str, Any] | None:
+        return spec.to_dict() if spec is not None else None
 
     def _assemble_model(
         self,
@@ -109,33 +222,21 @@ class Factory:
         adapter_config: dict[str, Any] | None = None,
         skip_base_check: bool = False,
     ) -> nn.Module:
-        """모델 dict로부터 5단계 조립을 수행한다.
-
-        1. 모델 로딩 (_component_ 유무에 따라 경로 결정)
-        2. MoE 감지 + moe_info 모델 인스턴스 부착
-        3. Head 교체 (head_config가 있을 때)
-        4. BaseModel 검증 (커스텀 모델은 BaseModel 필수)
-        5. Adapter 적용 (adapter_config가 있을 때)
-
-        QLoRA는 1+5를 한 번에 수행하는 특수 경로를 탄다.
-        """
+        """Assemble a model from model/head/adapter config dicts."""
         route = _decide_model_load_route(model_config, adapter_config)
 
-        # QLoRA 특수 경로: 양자화 + 로딩 + 어댑터가 한 번에
         if route is _ModelLoadRoute.QLORA:
-            adapter_config = self._resolve_semantic_from_config(model_config, adapter_config)
+            adapter_config = self._resolve_semantic_from_config(
+                model_config, adapter_config,
+            )
             return self._build_qlora_model(model_config, adapter_config)
 
-        # 일반 경로
-        # 단계 1: pretrained 로딩
         model = self._load_pretrained(model_config, route)
 
-        # 단계 1.5: semantic resolve (일방향 — 여기서 한 번만, 이후 raw만 흐름)
         head_config, adapter_config = self._resolve_semantic(
             model, head_config, adapter_config,
         )
 
-        # 단계 2: MoE 감지
         if self._is_moe_model(model):
             moe_info = self._extract_moe_info(model)
             model._moe_info = moe_info
@@ -146,18 +247,18 @@ class Factory:
                 moe_info.get("top_k", "?"),
             )
 
-        # 단계 3: head 교체 (설정이 있을 때만)
         if head_config is not None:
             hc = dict(head_config)
             target_attr = hc.pop("_target_attr", None)
             head = self.resolver.resolve(hc)
             self._attach_head(model, head, target_attr)
 
-        # 단계 4: BaseModel 검증 (커스텀 모델은 BaseModel 필수)
-        # HF 모델(from_pretrained 보유)은 자체 인터페이스를 가지므로 면제.
-        # 커스텀 모델은 pretrained 유무와 무관하게 BaseModel을 상속해야 한다.
         from mdp.models.base import BaseModel
-        if not skip_base_check and not hasattr(model, "from_pretrained") and not isinstance(model, BaseModel):
+        if (
+            not skip_base_check
+            and not hasattr(model, "from_pretrained")
+            and not isinstance(model, BaseModel)
+        ):
             raise TypeError(
                 f"{model.__class__.__name__}이 BaseModel을 상속하지 않습니다. "
                 "커스텀 모델은 BaseModel을 상속하여 forward를 구현하고, "
@@ -165,7 +266,6 @@ class Factory:
                 "HF 모델이라면 pretrained: hf://... 를 사용하세요."
             )
 
-        # 단계 5: adapter 적용 (설정이 있을 때만, QLoRA는 위에서 처리)
         if adapter_config is not None:
             model = self.resolver.resolve(adapter_config, model)
 
@@ -177,19 +277,12 @@ class Factory:
         head_config: dict[str, Any] | None,
         adapter_config: dict[str, Any] | None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-        """semantic 키를 raw 키로 번역한다. model 생성 후, head/adapter 적용 전 1회 호출.
-
-        변환:
-        - head_config["slot"] → head_config["_target_attr"]
-        - adapter_config["target"] → adapter_config["target_modules"]
-        - adapter_config["save"] → adapter_config["modules_to_save"]
-
-        semantic 키가 없으면 config를 그대로 반환 (기존 경로 호환).
-        semantic 키와 대응하는 raw 키가 동시에 존재하면 ValueError.
-        """
         needs_resolve = (
             (head_config is not None and "slot" in head_config)
-            or (adapter_config is not None and ("target" in adapter_config or "save" in adapter_config))
+            or (
+                adapter_config is not None
+                and ("target" in adapter_config or "save" in adapter_config)
+            )
         )
         if not needs_resolve:
             return head_config, adapter_config
@@ -234,17 +327,12 @@ class Factory:
     def _resolve_semantic_from_config(
         self, model_config: dict[str, Any], adapter_config: dict[str, Any],
     ) -> dict[str, Any]:
-        """QLoRA 분기 전용: model 없이 config 기반 family 추정 후 semantic resolve.
-
-        QLoRA는 model 인스턴스가 resolve 시점에 존재하지 않으므로,
-        pretrained URI에서 AutoConfig로 family를 추정한다.
-        """
         ac = dict(adapter_config)
         target = ac.pop("target", None)
         save = ac.pop("save", None)
 
         if target is None and save is None:
-            return ac  # semantic 키 없음 → 기존 경로
+            return ac
 
         from mdp.models.family_routing import (
             detect_family_from_pretrained_uri, resolve_targets, resolve_save_modules,
@@ -275,13 +363,6 @@ class Factory:
         model_config: dict[str, Any],
         route: _ModelLoadRoute | None = None,
     ) -> nn.Module:
-        """_component_와 pretrained 조합에 따라 모델을 로딩한다.
-
-        분기 기준은 _component_ 유무이다:
-        - _component_ 있음: 그 클래스가 인스턴스화를 소유한다.
-          duck typing(hasattr from_pretrained)으로 HF 클래스와 커스텀 클래스를 구분.
-        - _component_ 없음: PretrainedResolver가 URI에서 클래스까지 추론한다.
-        """
         from mdp.models.pretrained import PretrainedResolver
 
         config = dict(model_config)
@@ -290,7 +371,7 @@ class Factory:
         torch_dtype_str = config.pop("torch_dtype", None)
         attn_impl = config.pop("attn_implementation", None)
 
-        kwargs = config  # 나머지는 전부 kwargs
+        kwargs = config
 
         if torch_dtype_str is not None:
             import torch
@@ -300,7 +381,6 @@ class Factory:
 
         route = route or _decide_model_load_route(model_config, None)
 
-        # _component_ 명시: 그 클래스가 인스턴스화를 소유한다
         if route in {
             _ModelLoadRoute.COMPONENT_FROM_PRETRAINED,
             _ModelLoadRoute.COMPONENT_CONSTRUCTOR,
@@ -312,41 +392,32 @@ class Factory:
                 route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED
                 and hasattr(klass, "from_pretrained")
             ):
-                # HF 호환 클래스: URI에서 identifier를 추출하고 from_pretrained
                 _, identifier = PretrainedResolver._parse_uri(pretrained)
                 return klass.from_pretrained(identifier, **kwargs)
-            elif route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED:
-                # 커스텀 클래스: pretrained는 생성자 인자
+            if route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED:
                 return klass(pretrained=pretrained, **kwargs)
-            else:
-                return klass(**kwargs)
+            return klass(**kwargs)
 
-        # _component_ 없음: PretrainedResolver가 클래스까지 추론
         if route is _ModelLoadRoute.PRETRAINED_RESOLVER:
             return PretrainedResolver.load(pretrained, **kwargs)
 
         raise ValueError(f"지원하지 않는 모델 로딩 경로입니다: {route.value}")
 
     def _build_qlora_model(self, model_config: dict[str, Any], adapter_config: dict[str, Any]) -> nn.Module:
-        """QLoRA 특수 경로: 양자화 + 로딩 + 어댑터를 한 번에 수행한다."""
-        # pretrained URI에서 identifier 추출
         uri = model_config.get("pretrained")
         if uri is None:
             raise ValueError("QLoRA에는 pretrained 모델 URI가 필요합니다")
 
-        # hf:// 접두사 제거
         if uri.startswith("hf://"):
             model_name = uri[len("hf://"):]
         else:
             model_name = uri
 
         ac = dict(adapter_config)
-        # _component_ 키 제거 — apply_qlora를 직접 호출하므로
         ac.pop("_component_", None)
         ac["model_name_or_path"] = model_name
         ac["class_path"] = model_config.get("_component_", "transformers.AutoModelForCausalLM")
 
-        # torch_dtype, attn_implementation 전달
         torch_dtype_str = model_config.get("torch_dtype")
         if torch_dtype_str is not None:
             import torch
@@ -362,13 +433,6 @@ class Factory:
     def _attach_head(
         model: nn.Module, head: nn.Module, target_attr: str | None = None
     ) -> None:
-        """모델에 새 head를 부착한다.
-
-        Args:
-            model: 기반 모델.
-            head: 부착할 head 모듈.
-            target_attr: head를 부착할 모델 속성명. None이면 ValueError.
-        """
         if target_attr is None:
             raise ValueError(
                 "head 설정에 '_target_attr'이 지정되지 않았습니다. "
@@ -386,7 +450,6 @@ class Factory:
 
     @staticmethod
     def _is_moe_model(model: nn.Module) -> bool:
-        """모델이 MoE 아키텍처인지 감지한다."""
         config = getattr(model, "config", None)
         if config is None:
             return False
@@ -394,31 +457,9 @@ class Factory:
 
     @staticmethod
     def _extract_moe_info(model: nn.Module) -> dict:
-        """MoE 모델의 expert 정보를 추출한다."""
         config = model.config
         return {
             "num_experts": getattr(config, "num_local_experts", None)
             or getattr(config, "num_experts", None),
             "top_k": getattr(config, "num_experts_per_tok", None),
         }
-
-    # ── Phase 3: 데이터 ──
-
-    def create_dataloaders(self) -> dict:
-        """train/val DataLoader를 생성한다.
-
-        DataSpec의 dataset/collator/val_dataset을 _component_로 resolve한다.
-        """
-        return self._assembly_materializer().materialize_dataloaders()
-
-    # ── RL: 복수 모델 생성 ──
-
-    def create_models(self, skip_base_check: bool = False) -> dict[str, nn.Module]:
-        """RL Recipe의 models 설정에 따라 역할별 모델을 생성한다.
-
-        각 모델은 SFT와 동일한 5단계 조립을 거친다:
-        pretrained 로딩 → MoE 감지 → head 교체 → BaseModel 검증 → adapter 적용.
-        """
-        return self._assembly_materializer().materialize_models(
-            skip_base_check=skip_base_check,
-        )

@@ -13,8 +13,11 @@ mdp/
 │   └── interventions/    # ResidualAdd, LogitBias
 ├── cli/                  # CLI entry points (typer)
 ├── data/                 # Data pipeline (Dataset, DataLoader, transforms)
-├── factory/              # Component assembly facade
-│   └── factory.py        # Factory (caching + delegation)
+├── factory/              # Component assembly planning/materialization
+│   ├── factory.py        # Factory compatibility facade (caching + delegation)
+│   ├── assembly_plan.py  # AssemblyPlan graph
+│   ├── planner.py        # SettingsPlan -> AssemblyPlan
+│   └── materializer.py   # AssemblyPlan -> concrete training bundles/components
 ├── models/               # Model layer
 │   ├── base.py           # BaseModel ABC
 │   ├── pretrained.py     # PretrainedResolver (hf://, timm://, ...)
@@ -24,12 +27,54 @@ mdp/
 │   └── catalog/          # YAML model metadata
 ├── monitoring/           # Data distribution monitoring
 ├── serving/              # Serving layer (FastAPI)
-├── settings/             # Settings system (schema, validation, resolver)
+├── runtime/              # Training runtime launcher/worker/engine
+├── settings/             # Settings system (schema, validation, planner)
 ├── training/             # Training engine (see below)
 └── utils/
     ├── estimator.py      # GPU memory estimator
     ├── sanitize.py       # Config masking
     └── logging.py        # System logging setup (setup_logging, Rank0Filter)
+```
+
+## Runtime Control Plane
+
+Training execution is explicit across three planning/execution objects:
+
+```
+Raw YAML / artifact snapshot / CLI args
+  -> SettingsPlan
+  -> AssemblyPlan
+  -> ExecutionEngine
+```
+
+`SettingsPlanner` owns environment substitution, override application,
+validation scope, callback config loading, and command intent. The compatibility
+methods on `SettingsFactory` still return `Settings`, but internally they pass
+through the planner and return `plan.settings`.
+
+`AssemblyPlanner` converts the validated `SettingsPlan` into an
+`AssemblyPlan`, a serializable graph of model, data, strategy, callback, and
+trainer nodes. `AssemblyPlan` does not hold live model, optimizer, dataloader,
+or callback instances.
+
+`AssemblyMaterializer` turns the graph into concrete bundles after worker-side
+runtime setup has completed. `ExecutionEngine` owns the final SFT/RL dispatch:
+it builds the assembly plan, materializes callbacks and bundles, then invokes
+`Trainer.from_bundle(...).train()` or `RLTrainer.from_bundle(...).train()`.
+
+`mdp/runtime/__init__.py` intentionally performs no eager imports. Consumers
+must import concrete runtime modules directly so importing `mdp.runtime` never
+pulls in the training stack as a side effect.
+
+### Runtime modules
+
+```
+runtime/
+├── __init__.py     # no eager imports
+├── launcher.py     # parent-process single/torchrun launch decision
+├── worker.py       # worker-side setup order
+├── context.py      # RuntimeContext
+└── engine.py       # ExecutionEngine
 ```
 
 ## training/ Internal Layers
@@ -139,11 +184,12 @@ BaseTrainer(ABC)
 
 ```
 Tier 3 (Orchestrator)
-  CLI commands and _torchrun_entry
-  Load settings, callbacks, source plans, and launch Trainer/RLTrainer or serving paths
+  CLI commands, runtime launcher/worker, and ExecutionEngine
+  Load SettingsPlan, launch workers, and dispatch training bundles or serving paths
   ↓
 Tier 2 (Composite)
-  Factory        — component creation facade, singleton caching
+  SettingsPlanner, AssemblyPlanner, AssemblyMaterializer
+  Factory        — compatibility component creation facade, singleton caching
   Trainer/RLTrainer — training loop execution
   (Factory and Trainer are both Tier 2 but do not create each other)
   ↓
@@ -151,7 +197,11 @@ Tier 1 (Atomic)
   Dataset, Transform, Optimizer, Scheduler, Loss, Head, Callback, Evaluator
 ```
 
-Import direction flows top-to-bottom only. `import-linter` enforces this in CI. `Serving must not import training` is a hard contract — `BaseInferenceCallback` lives in `mdp/callbacks/base.py` (not `training/`) to satisfy this constraint.
+Import direction flows top-to-bottom only. `import-linter` enforces the stable
+module boundaries in CI. `mdp.runtime.engine` is allowed to import
+`mdp.training` because it owns training dispatch. `mdp.serving` and
+`mdp.settings` must not import `mdp.runtime.engine`; serving/inference paths
+must not accidentally depend on the training execution engine.
 
 ## Key Design Decisions
 

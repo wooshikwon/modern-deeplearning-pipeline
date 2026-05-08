@@ -129,6 +129,45 @@ def _make_trainer(settings, batches, models=None):
     return trainer
 
 
+def test_rl_trainer_from_bundle_preserves_per_model_optimizers() -> None:
+    """Bundle-oriented path keeps RL optimizer/scheduler ownership per model."""
+    from mdp.factory.bundles import build_rl_training_bundle
+    from mdp.training.rl_trainer import RLTrainer
+
+    recipe = Recipe(
+        name="rl-bundle-test",
+        task="text_generation",
+        rl=RLSpec(
+            algorithm={"_component_": "PPO", "mini_epochs": 1},
+            models={
+                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
+                "value": {"optimizer": {"_component_": "AdamW", "lr": 2e-3}},
+                "reference": {},
+            },
+        ),
+        data=DataSpec(
+            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "/tmp/fake", "split": "train"},
+            collator={"_component_": "mdp.data.collators.PreferenceCollator", "tokenizer": "gpt2", "max_length": 2048},
+        ),
+        training=TrainingSpec(max_steps=1),
+        metadata=MetadataSpec(author="test", description="test"),
+    )
+    settings = Settings(recipe=recipe, config=Config())
+    models = {name: TinyLM() for name in settings.recipe.rl.models}
+
+    bundle = build_rl_training_bundle(
+        settings=settings,
+        models=models,
+        train_loader=ListDataLoader(_prompt_batches(2, 2)),
+    )
+    trainer = RLTrainer.from_bundle(bundle)
+
+    assert set(trainer.optimizers) == {"policy", "value"}
+    assert trainer.optimizers["policy"] is not trainer.optimizers["value"]
+    assert set(trainer.trainable) == {"policy", "value"}
+    assert set(trainer.frozen) == {"reference"}
+
+
 # ── 1. bf16 precision ──
 
 

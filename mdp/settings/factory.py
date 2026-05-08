@@ -1,24 +1,19 @@
-"""SettingsFactory — YAML 파일을 Settings 객체로 조립한다."""
+"""SettingsFactory compatibility facade."""
 
 from __future__ import annotations
 
-import logging
-import os
-import re
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from mdp.settings.schema import Config, Recipe, Settings
-
-logger = logging.getLogger(__name__)
-
-ENV_PATTERN = re.compile(r"\$\{(\w+)(?::([^}]*))?\}")
+from mdp.settings.planner import SettingsPlanner
+from mdp.settings.schema import Settings
 
 
 class SettingsFactory:
     """YAML 파일 경로를 받아 Settings 객체를 조립한다."""
+
+    def __init__(self, planner: SettingsPlanner | None = None) -> None:
+        self._planner = planner or SettingsPlanner()
 
     def for_training(
         self,
@@ -26,53 +21,20 @@ class SettingsFactory:
         config_path: str,
         overrides: list[str] | None = None,
     ) -> Settings:
-        """학습용 Settings를 조립한다.
-
-        Args:
-            overrides: dotted key=value 오버라이드. recipe가 기본 네임스페이스.
-                       ``config.`` 접두사로 Config 필드를 오버라이드할 수 있다.
-        """
-        recipe_dict = self._load_yaml(recipe_path)
-        config_dict = self._load_yaml(config_path)
-
-        recipe_dict = self._substitute_env_vars(recipe_dict)
-        config_dict = self._substitute_env_vars(config_dict)
-
-        if overrides:
-            recipe_dict, config_dict = self._split_and_apply_overrides(
-                recipe_dict, config_dict, overrides,
-            )
-
-        recipe = Recipe(**recipe_dict)
-        config = Config(**config_dict)
-        settings = Settings(recipe=recipe, config=config)
-        self._validate(settings)
-        return settings
+        """학습용 Settings를 조립한다."""
+        return self._planner.load_training(
+            recipe_path,
+            config_path,
+            overrides=overrides,
+        ).settings
 
     def for_estimation(self, recipe_path: str) -> Settings:
         """추정용 Settings를 조립한다. Recipe만 로딩하고 기본 Config를 사용한다."""
-        recipe_dict = self._load_yaml(recipe_path)
-        recipe_dict = self._substitute_env_vars(recipe_dict)
-
-        recipe = Recipe(**recipe_dict)
-        config = Config()
-        settings = Settings(recipe=recipe, config=config)
-        self._validate_recipe(settings)
-        return settings
+        return self._planner.load_estimation(recipe_path).settings
 
     def for_inference(self, recipe_path: str, config_path: str) -> Settings:
         """추론용 Settings를 조립한다. 분산 학습 전용 검증은 수행하지 않는다."""
-        recipe_dict = self._load_yaml(recipe_path)
-        config_dict = self._load_yaml(config_path)
-
-        recipe_dict = self._substitute_env_vars(recipe_dict)
-        config_dict = self._substitute_env_vars(config_dict)
-
-        recipe = Recipe(**recipe_dict)
-        config = Config(**config_dict)
-        settings = Settings(recipe=recipe, config=config)
-        self._validate_recipe(settings)
-        return settings
+        return self._planner.load_inference(recipe_path, config_path).settings
 
     def from_artifact(
         self,
@@ -81,62 +43,16 @@ class SettingsFactory:
         *,
         use_config_snapshot: bool = True,
     ) -> Settings:
-        """artifact 디렉토리의 recipe/config snapshot에서 Settings를 조립한다.
-
-        model/ artifact와 checkpoint/ artifact 모두 사용 가능.
-        분산 학습 전용 검증은 수행하지 않는다. config snapshot이 있으면
-        base Config로 사용하고, 없거나 비활성화하면 기본 Config를 사용한다.
-        """
-        artifact_path = Path(artifact_dir)
-        recipe_path = artifact_path / "recipe.yaml"
-        if not recipe_path.exists():
-            raise FileNotFoundError(
-                f"artifact에 recipe.yaml이 없습니다: {artifact_dir}\n"
-                "이 artifact는 recipe 내장 이전에 생성되었을 수 있습니다."
-            )
-        recipe_dict = self._load_yaml(str(recipe_path))
-        recipe_dict = self._substitute_env_vars(recipe_dict)
-
-        config_dict: dict[str, Any] = {}
-        if use_config_snapshot:
-            config_snapshot = self._find_artifact_config_snapshot(artifact_path)
-            if config_snapshot is not None:
-                config_dict = self._load_yaml(str(config_snapshot))
-                config_dict = self._substitute_env_vars(config_dict)
-
-        if overrides:
-            recipe_dict, config_dict = self._split_and_apply_overrides(
-                recipe_dict, config_dict, overrides,
-            )
-
-        recipe = Recipe(**recipe_dict)
-        config = Config(**config_dict) if config_dict else Config()
-        settings = Settings(recipe=recipe, config=config)
-        self._validate_recipe(settings)
-        return settings
+        """artifact 디렉토리의 recipe/config snapshot에서 Settings를 조립한다."""
+        return self._planner.load_artifact(
+            artifact_dir,
+            overrides=overrides,
+            use_config_snapshot=use_config_snapshot,
+        ).settings
 
     @staticmethod
     def _find_artifact_config_snapshot(artifact_dir: Path) -> Path | None:
-        """artifact manifest 또는 표준 파일명에서 config snapshot을 찾는다."""
-        import json
-
-        manifest_path = artifact_dir / "manifest.json"
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(manifest_path.read_text())
-            except json.JSONDecodeError:
-                manifest = {}
-            config_file = manifest.get("config_file")
-            if isinstance(config_file, str) and config_file:
-                candidate = artifact_dir / config_file
-                if candidate.exists():
-                    return candidate
-
-        for name in ("config.yaml", "config.yml"):
-            candidate = artifact_dir / name
-            if candidate.exists():
-                return candidate
-        return None
+        return SettingsPlanner.find_artifact_config_snapshot(artifact_dir)
 
     @staticmethod
     def _split_and_apply_overrides(
@@ -144,154 +60,26 @@ class SettingsFactory:
         config_dict: dict[str, Any],
         overrides: list[str],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """overrides를 recipe/config로 분리하여 적용한다.
-
-        recipe가 기본 네임스페이스. ``config.`` 접두사로 Config 필드를 오버라이드.
-        """
-        from mdp.cli._override import apply_overrides
-
-        # Config 최상위 필드명 — recipe에 동일 키가 없으면 config. 접두사 누락 의심
-        _CONFIG_TOP_KEYS = {
-            "environment", "compute",
-            "mlflow", "storage", "serving", "job",
-        }
-
-        recipe_ovr: list[str] = []
-        config_ovr: list[str] = []
-        for o in overrides:
-            key = o.partition("=")[0]
-            if key.startswith("config."):
-                config_ovr.append(o[len("config."):])
-            else:
-                recipe_ovr.append(o)
-
-        # config. 접두사 누락 경고
-        for o in recipe_ovr:
-            top_key = o.partition("=")[0].split(".")[0]
-            if top_key in _CONFIG_TOP_KEYS and top_key not in recipe_dict:
-                logger.warning(
-                    "Override '%s'의 키 '%s'는 Config 필드입니다. "
-                    "'config.%s'를 사용하세요.",
-                    o, top_key, o,
-                )
-
-        if recipe_ovr:
-            apply_overrides(recipe_dict, recipe_ovr)
-        if config_ovr:
-            apply_overrides(config_dict, config_ovr)
-        return recipe_dict, config_dict
+        return SettingsPlanner._split_and_apply_overrides(
+            recipe_dict,
+            config_dict,
+            overrides,
+        )
 
     @staticmethod
-    def _load_yaml(path: str) -> dict:
-        """YAML 파일을 딕셔너리로 로딩한다."""
-        with open(path, "r") as f:
-            return yaml.safe_load(f)
+    def _load_yaml(path: str) -> Any:
+        return SettingsPlanner._load_yaml(path)
 
     @classmethod
     def _substitute_env_vars(cls, obj: Any) -> Any:
-        """재귀적으로 ${VAR:default} 패턴을 환경변수 값으로 치환한다."""
-        if isinstance(obj, dict):
-            return {k: cls._substitute_env_vars(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [cls._substitute_env_vars(item) for item in obj]
-        if isinstance(obj, str):
-            return cls._substitute_string(obj)
-        return obj
-
-    @classmethod
-    def _substitute_string(cls, s: str) -> Any:
-        """문자열 내 환경변수 패턴을 치환한다."""
-        match = ENV_PATTERN.fullmatch(s)
-        if match:
-            # 전체 매칭: 타입 변환 적용
-            var_name, default = match.group(1), match.group(2)
-            value = os.environ.get(var_name)
-            if value is None:
-                if default is not None:
-                    return cls._auto_cast(default)
-                raise ValueError(
-                    f"환경변수 '{var_name}'이(가) 설정되지 않았고 기본값도 없습니다"
-                )
-            return cls._auto_cast(value)
-
-        # 부분 매칭: 문자열 내 치환 (타입 변환 없음)
-        def replacer(m: re.Match) -> str:
-            var_name, default = m.group(1), m.group(2)
-            value = os.environ.get(var_name)
-            if value is None:
-                if default is not None:
-                    return default
-                raise ValueError(
-                    f"환경변수 '{var_name}'이(가) 설정되지 않았고 기본값도 없습니다"
-                )
-            return value
-
-        return ENV_PATTERN.sub(replacer, s)
+        return SettingsPlanner._substitute_env_vars(obj)
 
     @staticmethod
     def _auto_cast(value: str) -> int | float | bool | str:
-        """문자열을 가능한 타입으로 변환한다."""
-        if value.lower() == "true":
-            return True
-        if value.lower() == "false":
-            return False
-        try:
-            return int(value)
-        except ValueError:
-            pass
-        try:
-            return float(value)
-        except ValueError:
-            pass
-        return value
+        return SettingsPlanner._auto_cast(value)
 
     def _validate_recipe(self, settings: Settings) -> None:
-        """모델/adapter 관련 검증만 실행한다.
-
-        학습 전용 검증(task-fields, distributed batch, GPU 호환성)은 생략한다.
-        """
-        from mdp.settings.validation import ValidationResult
-        from mdp.settings.validation.catalog_validator import CatalogValidator
-        from mdp.settings.validation.business_validator import BusinessValidator
-
-        result = ValidationResult()
-
-        # Catalog: 모델이 catalog과 호환되는지
-        cat_result = CatalogValidator().validate(settings)
-        for w in cat_result.warnings:
-            logger.warning(w)
-        result.errors.extend(cat_result.errors)
-
-        # Business: head-task 호환성 + adapter 제약 (data/distributed 제외)
-        biz_result = BusinessValidator.validate_partial(
-            settings, checks=["head_task", "adapter", "rl_models", "component_imports"],
-        )
-        result.errors.extend(biz_result.errors)
-        for w in biz_result.warnings:
-            logger.warning(w)
-
-        if result.errors:
-            raise ValueError(
-                "Settings 검증 실패:\n" + "\n".join(f"  - {e}" for e in result.errors)
-            )
+        self._planner._validate_recipe(settings)
 
     def _validate(self, settings: Settings) -> None:
-        """CatalogValidator, BusinessValidator, CompatValidator를 순서대로 실행한다.
-
-        warnings는 로깅하고, errors가 있으면 ValueError를 발생시킨다.
-        """
-        from mdp.settings.validation.catalog_validator import CatalogValidator
-        from mdp.settings.validation.business_validator import BusinessValidator
-        from mdp.settings.validation.compat_validator import CompatValidator
-
-        all_errors: list[str] = []
-        for validator_cls in (CatalogValidator, BusinessValidator, CompatValidator):
-            result = validator_cls().validate(settings)
-            for w in result.warnings:
-                logger.warning(w)
-            all_errors.extend(result.errors)
-
-        if all_errors:
-            raise ValueError(
-                "Settings 검증 실패:\n" + "\n".join(f"  - {e}" for e in all_errors)
-            )
+        self._planner._validate(settings)

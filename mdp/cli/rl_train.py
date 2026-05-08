@@ -2,12 +2,7 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import subprocess
-import sys
-import tempfile
-from pathlib import Path
 
 import typer
 
@@ -19,57 +14,23 @@ logger = logging.getLogger(__name__)
 
 def _detect_gpu_count() -> int:
     """사용 가능한 GPU 수를 반환한다."""
-    try:
-        import torch
+    from mdp.runtime.launcher import detect_gpu_count
 
-        return torch.cuda.device_count()
-    except Exception:
-        return 0
+    return detect_gpu_count()
 
 
 def _run_single(settings, cb_configs: list[dict] | None = None) -> dict:
     """단일 GPU/CPU RL 학습을 실행한다."""
-    from mdp.cli._torchrun_entry import run_training
+    from mdp.runtime.launcher import run_single
 
-    return run_training(settings, cb_configs=cb_configs)
+    return run_single(settings, cb_configs=cb_configs)
 
 
 def _run_distributed(settings, nproc: int, cb_configs: list[dict] | None = None) -> dict:
     """torchrun을 사용하여 분산 RL 학습을 실행한다."""
-    settings_dict = settings.model_dump()
-    if cb_configs:
-        settings_dict["__cb_configs"] = cb_configs
+    from mdp.runtime.launcher import run_distributed
 
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".json", delete=False,
-    ) as f:
-        json.dump(settings_dict, f, ensure_ascii=False, default=str)
-        settings_path = f.name
-
-    result_path = str(Path(settings_path).with_suffix("")) + "_result.json"
-    entry_script = Path(__file__).resolve().parent / "_torchrun_entry.py"
-
-    cmd = [
-        sys.executable, "-m", "torch.distributed.run",
-        f"--nproc_per_node={nproc}",
-        str(entry_script),
-        "--settings-path", settings_path,
-        "--result-path", result_path,
-    ]
-    logger.info("torchrun command: %s", " ".join(cmd))
-
-    try:
-        subprocess.run(cmd, check=True)
-
-        # rank-0이 저장한 결과를 읽는다
-        result_file = Path(result_path)
-        if result_file.exists():
-            with open(result_file) as f:
-                return json.load(f)
-        return {}
-    finally:
-        Path(settings_path).unlink(missing_ok=True)
-        Path(result_path).unlink(missing_ok=True)
+    return run_distributed(settings, nproc, cb_configs=cb_configs)
 
 
 def run_rl_train(
@@ -138,17 +99,25 @@ def run_rl_train(
         typer.echo(f"알고리즘: {algo_name}")
         typer.echo(f"모델: {list(settings.recipe.rl.models.keys())}")
 
-    nproc = _detect_gpu_count()
+    from mdp.runtime.launcher import build_launch_plan
+
+    launch_plan = build_launch_plan(
+        settings,
+        nproc=_detect_gpu_count(),
+        cb_configs=cb_configs or None,
+    )
     if not is_json_mode():
-        typer.echo(f"GPU count: {nproc}")
+        typer.echo(f"GPU count: {launch_plan.nproc}")
 
     try:
-        from mdp.settings.distributed import should_launch_distributed
-
-        if should_launch_distributed(settings, nproc):
+        if launch_plan.distributed:
             if not is_json_mode():
-                typer.echo(f"분산 RL 학습 시작 (nproc={nproc})...")
-            train_result = _run_distributed(settings, nproc, cb_configs=cb_configs or None)
+                typer.echo(f"분산 RL 학습 시작 (nproc={launch_plan.nproc})...")
+            train_result = _run_distributed(
+                settings,
+                launch_plan.nproc,
+                cb_configs=cb_configs or None,
+            )
         else:
             if not is_json_mode():
                 typer.echo("RL 학습 시작...")

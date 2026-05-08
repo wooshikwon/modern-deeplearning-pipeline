@@ -19,7 +19,9 @@ import torch
 from torch import Tensor, nn
 
 from mdp.factory.factory import Factory, _ModelLoadRoute, _decide_model_load_route
+from mdp.factory.planner import AssemblyPlanner
 from mdp.models.base import BaseModel
+from mdp.settings.plan import SettingsPlan
 from mdp.settings.schema import (
     Config,
     DataSpec,
@@ -93,6 +95,21 @@ def _make_settings(model_config: dict[str, Any]) -> Settings:
     return Settings(recipe=recipe, config=Config())
 
 
+def _make_settings_plan(settings: Settings) -> SettingsPlan:
+    return SettingsPlan(
+        command="train",
+        mode="sft",
+        settings=settings,
+        recipe_path=None,
+        config_path=None,
+        artifact_dir=None,
+        overrides=(),
+        callback_configs=(),
+        validation_scope="training",
+        distributed_intent=False,
+    )
+
+
 # ── 경우 ④: 커스텀 BaseModel + pretrained → 생성자 호출 ──
 
 
@@ -128,6 +145,83 @@ class TestModelLoadRouteDecision:
     def test_missing_model_source_raises_value_error(self) -> None:
         with pytest.raises(ValueError, match="_component_ 또는 pretrained"):
             _decide_model_load_route({}, None)
+
+
+class TestAssemblyPlanModelRouteShape:
+    """AssemblyPlanner preserves model route inputs without materializing them."""
+
+    def test_component_with_pretrained_stays_in_model_node(self) -> None:
+        settings = _make_settings({
+            "_component_": "tests.unit.test_load_pretrained_routing.TinyCustomWithPretrained",
+            "pretrained": "hf://fake-org/fake-model",
+            "hidden_dim": 16,
+        })
+
+        plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
+
+        assert plan.kind == "sft_training"
+        assert len(plan.models) == 1
+        model_node = plan.models[0]
+        assert model_node.role == "policy"
+        assert model_node.trainable is True
+        assert model_node.model.config == settings.recipe.model
+        assert model_node.model.component == (
+            "tests.unit.test_load_pretrained_routing.TinyCustomWithPretrained"
+        )
+
+    def test_pretrained_only_route_stays_pretrained_only(self) -> None:
+        settings = _make_settings({"pretrained": "hf://some-org/some-model"})
+
+        plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
+
+        assert plan.models[0].model.config == {"pretrained": "hf://some-org/some-model"}
+        assert plan.models[0].model.component is None
+
+    def test_qlora_route_keeps_adapter_as_owned_spec(self) -> None:
+        settings = _make_settings({
+            "pretrained": "hf://Qwen/Qwen2.5-7B",
+            "torch_dtype": "bfloat16",
+        })
+        settings.recipe.adapter = {
+            "_component_": "QLoRA",
+            "target": ["attn.q", "attn.v"],
+        }
+
+        plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
+
+        assert plan.models[0].model.config == settings.recipe.model
+        assert plan.models[0].adapter is not None
+        assert plan.models[0].adapter.config == settings.recipe.adapter
+
+    def test_data_and_strategy_nodes_capture_distributed_intent(self) -> None:
+        base_settings = _make_settings({"pretrained": "hf://some-org/some-model"})
+        settings = Settings(
+            recipe=base_settings.recipe,
+            config=Config(compute={"distributed": {"strategy": "ddp"}}),
+        )
+        settings_plan = SettingsPlan(
+            command="train",
+            mode="sft",
+            settings=settings,
+            recipe_path=None,
+            config_path=None,
+            artifact_dir=None,
+            overrides=(),
+            callback_configs=(),
+            validation_scope="training",
+            distributed_intent=True,
+        )
+
+        plan = AssemblyPlanner.from_settings_plan(settings_plan)
+
+        assert plan.data.dataset.config == settings.recipe.data.dataset
+        assert plan.data.val_dataset is None
+        assert plan.data.sampler is None
+        assert plan.data.dataloader_config == settings.recipe.data.dataloader.model_dump()
+        assert plan.data.distributed_intent is True
+        assert plan.strategy is not None
+        assert plan.strategy.strategy == "ddp"
+        assert "setup_models" in plan.strategy.capability_boundary
 
 
 class TestCustomBaseModelWithPretrained:

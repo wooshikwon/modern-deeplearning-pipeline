@@ -126,8 +126,8 @@ class TestCallbacksInjectToTrainer:
         # cb_configs=None이거나 [] (falsy) 이면 됨
         assert not captured.get("cb_configs")
 
-    def test_run_training_resolves_and_injects_callbacks(self):
-        """run_training()이 cb_configs를 resolve하여 Trainer(callbacks=...)에 주입한다."""
+    def test_run_training_delegates_to_engine_with_callback_plan(self):
+        """run_training()은 SettingsPlan을 만들고 ExecutionEngine에 위임한다."""
         from unittest import mock
         from tests.e2e.conftest import make_test_settings
         import mdp.cli._torchrun_entry as entry_mod
@@ -135,28 +135,106 @@ class TestCallbacksInjectToTrainer:
         settings = make_test_settings()
         cb_configs = [{"_component_": "ModelCheckpoint", "monitor": "val_loss", "save_top_k": 1}]
 
-        captured_trainer_kwargs = {}
-
-        class FakeTrainer:
-            def __init__(self, **kwargs):
-                captured_trainer_kwargs.update(kwargs)
-            def train(self):
-                return {}
-
-        def fake_run_rl(settings, cb_configs=None):
-            return {}
-
-        with mock.patch.object(entry_mod, "_resolve_cb_configs", return_value=["resolved_cb"]), \
-             mock.patch.object(entry_mod, "_print_callbacks_log"), \
-             mock.patch("mdp.factory.factory.Factory") as MockFactory, \
-             mock.patch("mdp.training.trainer.Trainer", FakeTrainer):
-            MockFactory.return_value.create_model.return_value = mock.MagicMock()
-            MockFactory.return_value.create_dataloaders.return_value = {"train": mock.MagicMock()}
-
+        engine = mock.Mock()
+        engine.run.return_value = {"ok": True}
+        with mock.patch("mdp.runtime.worker.apply_liger_patches_for_training"), \
+             mock.patch("mdp.runtime.engine.ExecutionEngine", return_value=engine):
             entry_mod.run_training(settings, cb_configs=cb_configs)
 
-        assert "callbacks" in captured_trainer_kwargs
-        assert captured_trainer_kwargs["callbacks"] == ["resolved_cb"]
+        plan = engine.run.call_args.args[0]
+        assert plan.mode == "sft"
+        assert plan.command == "train"
+        assert plan.callback_configs == tuple(cb_configs)
+
+    def test_execution_engine_materializes_callbacks_into_sft_bundle(self):
+        """ExecutionEngine이 callback resolve와 SFT Trainer dispatch를 소유한다."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from mdp.runtime.engine import ExecutionEngine
+        from mdp.runtime.context import training_settings_plan_from_settings
+        from tests.e2e.conftest import make_test_settings
+
+        settings = make_test_settings()
+        settings_plan = training_settings_plan_from_settings(
+            settings,
+            cb_configs=[{"_component_": "ModelCheckpoint"}],
+        )
+        assembly_plan = SimpleNamespace(kind="sft_training")
+        captured = {}
+
+        class FakeMaterializer:
+            def __init__(self, plan):
+                captured["plan"] = plan
+
+            def materialize_callbacks(self):
+                return ["resolved_cb"]
+
+            def materialize_sft_training_bundle(self, *, callbacks=None):
+                captured["callbacks"] = callbacks
+                return "sft_bundle"
+
+        fake_trainer = mock.Mock()
+        fake_trainer.train.return_value = {"trained": True}
+
+        class FakePlanner:
+            @classmethod
+            def from_settings_plan(cls, plan):
+                captured["settings_plan"] = plan
+                return assembly_plan
+
+        with mock.patch("mdp.training.trainer.Trainer.from_bundle", return_value=fake_trainer) as from_bundle:
+            result = ExecutionEngine(
+                assembly_planner=FakePlanner,
+                materializer_cls=FakeMaterializer,
+                callbacks_observer=lambda callbacks, settings: captured.setdefault("observed", callbacks),
+            ).run(settings_plan)
+
+        assert result == {"trained": True}
+        assert captured["plan"] is assembly_plan
+        assert captured["callbacks"] == ["resolved_cb"]
+        assert captured["observed"] == ["resolved_cb"]
+        from_bundle.assert_called_once_with("sft_bundle")
+
+    def test_execution_engine_dispatches_rl_by_assembly_kind(self):
+        """ExecutionEngine의 SFT/RL 분기는 AssemblyPlan kind를 따른다."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from mdp.runtime.engine import ExecutionEngine
+        from mdp.runtime.context import training_settings_plan_from_settings
+        from tests.e2e.conftest import make_test_settings
+
+        settings = make_test_settings()
+        settings_plan = training_settings_plan_from_settings(settings, command="rl-train")
+        assembly_plan = SimpleNamespace(kind="rl_training")
+
+        class FakeMaterializer:
+            def __init__(self, plan):
+                self.plan = plan
+
+            def materialize_callbacks(self):
+                return []
+
+            def materialize_rl_training_bundle(self, *, callbacks=None):
+                return "rl_bundle"
+
+        fake_trainer = mock.Mock()
+        fake_trainer.train.return_value = {"rl": True}
+
+        class FakePlanner:
+            @classmethod
+            def from_settings_plan(cls, plan):
+                return assembly_plan
+
+        with mock.patch("mdp.training.rl_trainer.RLTrainer.from_bundle", return_value=fake_trainer) as from_bundle:
+            result = ExecutionEngine(
+                assembly_planner=FakePlanner,
+                materializer_cls=FakeMaterializer,
+            ).run(settings_plan)
+
+        assert result == {"rl": True}
+        from_bundle.assert_called_once_with("rl_bundle")
 
 
 class TestCallbacksInference:

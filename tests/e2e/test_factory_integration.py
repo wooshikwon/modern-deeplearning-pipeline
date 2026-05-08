@@ -9,14 +9,19 @@
 
 from __future__ import annotations
 
+from unittest import mock
+
 import torch
 
 from mdp.factory.factory import Factory
+from mdp.factory.planner import AssemblyPlanner
+from mdp.settings.plan import SettingsPlan
 from mdp.settings.schema import (
     Config,
     DataSpec,
     MetadataSpec,
     Recipe,
+    RLSpec,
     Settings,
     TrainingSpec,
 )
@@ -43,6 +48,21 @@ def _make_factory_settings(
     config = Config()
     config.job.resume = "disabled"
     return Settings(recipe=recipe, config=config)
+
+
+def _make_settings_plan(settings: Settings) -> SettingsPlan:
+    return SettingsPlan(
+        command="train",
+        mode="sft",
+        settings=settings,
+        recipe_path=None,
+        config_path=None,
+        artifact_dir=None,
+        overrides=(),
+        callback_configs=(),
+        validation_scope="training",
+        distributed_intent=bool(settings.config.compute.distributed),
+    )
 
 
 def test_factory_model_with_head_and_lora() -> None:
@@ -74,6 +94,63 @@ def test_factory_model_with_head_and_lora() -> None:
     model.train()
     loss = model(batch)["loss"]
     assert torch.isfinite(loss)
+
+
+def test_factory_accepts_assembly_plan_and_keeps_model_cache() -> None:
+    """Factory can consume an AssemblyPlan while preserving create_model cache."""
+    settings = _make_factory_settings()
+    assembly_plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
+
+    factory = Factory(assembly_plan)
+    model = factory.create_model()
+
+    assert factory.settings is settings
+    assert factory.create_model() is model
+
+
+def test_factory_create_dataloaders_materializes_data_node() -> None:
+    """Factory dataloader path consumes AssemblyPlan.data and keeps public shape."""
+    settings = _make_factory_settings()
+    settings.config.compute.distributed = {"strategy": "ddp"}
+    settings_plan = _make_settings_plan(settings)
+    assembly_plan = AssemblyPlanner.from_settings_plan(settings_plan)
+    loaders = {"train": object(), "val": object()}
+
+    with mock.patch(
+        "mdp.data.dataloader.create_dataloaders",
+        return_value=loaders,
+    ) as create_dataloaders:
+        result = Factory(assembly_plan).create_dataloaders()
+
+    assert result == loaders
+    assert create_dataloaders.call_args.kwargs["dataset_config"] == settings.recipe.data.dataset
+    assert create_dataloaders.call_args.kwargs["val_dataset_config"] is None
+    assert create_dataloaders.call_args.kwargs["distributed"] is True
+
+
+def test_factory_create_models_materializes_rl_role_nodes() -> None:
+    """Factory.create_models materializes RL ModelNodes and keeps role dict output."""
+    settings = _make_factory_settings()
+    settings.recipe.rl = RLSpec(
+        algorithm={"_component_": "DPO"},
+        models={
+            "policy": {
+                "_component_": "tests.e2e.models.TinyVisionModel",
+                "optimizer": {"_component_": "AdamW"},
+            },
+            "reference": {
+                "_component_": "tests.e2e.models.TinyVisionModel",
+                "freeze": True,
+            },
+        },
+    )
+
+    factory = Factory(settings)
+    models = factory.create_models()
+
+    assert set(models) == {"policy", "reference"}
+    assert models["policy"] is not models["reference"]
+    assert factory.create_models() is models
 
 
 def test_factory_model_without_head() -> None:

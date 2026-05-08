@@ -14,6 +14,41 @@ serving, checkpointing, and configuration validation.
 
 Recipe uses `extra="forbid"`. A legacy `callbacks:` block in Recipe is invalid.
 
+## Training Runtime Control Plane
+
+Training runtime setup is represented as an explicit plan-to-execution chain:
+
+```
+Raw YAML / artifact snapshot / CLI args
+  -> SettingsPlan
+  -> AssemblyPlan
+  -> ExecutionEngine
+```
+
+`SettingsPlan` is the validated command intent. It contains the assembled
+`Settings`, validation scope, command/mode, source paths, override list,
+callback configs, artifact source, and distributed intent. It does not preserve
+raw YAML dictionaries as the runtime source of truth.
+
+`AssemblyPlan` is the component graph derived from `SettingsPlan`. It records
+model roles, data, trainer kind, strategy, and callbacks as node/spec objects,
+not live Python component instances. This keeps process-group initialization,
+Liger patching, and device setup ahead of model/dataloader materialization in
+torchrun workers.
+
+`ExecutionEngine` owns SFT/RL dispatch for training. It builds the assembly
+plan, materializes callbacks and training bundles, then invokes
+`Trainer.from_bundle(...).train()` or `RLTrainer.from_bundle(...).train()`.
+Compatibility wrappers such as `SettingsFactory.for_training()`,
+`Factory(settings).create_*`, and `_torchrun_entry.run_training(...)` remain as
+facades over this path.
+
+Import boundary:
+
+- `mdp.runtime.engine` may import `mdp.training`; training dispatch is its job.
+- `mdp.serving` and `mdp.settings` must not import `mdp.runtime.engine`.
+- `mdp.runtime.__init__` performs no eager imports.
+
 ## Model Source Plan
 
 CLI source flags are resolved once into `ModelSourcePlan`.

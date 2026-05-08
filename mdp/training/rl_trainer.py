@@ -22,14 +22,13 @@ from torch.amp import autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
+from mdp.factory.bundles import RLTrainingBundle, build_rl_training_bundle
 from mdp.settings.distributed import get_strategy_name
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
     aggregate_checkpoint_stats,
     backward_and_step,
-    create_expert_parallel,
-    create_strategy,
     detect_device,
     set_epoch_on_loader,
     setup_amp,
@@ -51,13 +50,7 @@ from mdp.training._features import (
     extract_hidden_states_and_head,
     forward_model as _features_forward_model,
 )
-from mdp.training._schedulers import (
-    create_scheduler_with_warmup,
-    parse_warmup_config,
-)
 from mdp.training.callbacks.base import BaseCallback
-from mdp.training.callbacks.early_stopping import EarlyStopping
-from mdp.training.callbacks.ema import EMACallback
 
 logger = logging.getLogger(__name__)
 
@@ -76,16 +69,43 @@ class RLTrainer(BaseTrainer):
         val_loader: DataLoader | None = None,
         callbacks: list[BaseCallback] | None = None,
     ) -> None:
-        self.settings = settings
-        self.train_loader = train_loader
-        self.val_loader = val_loader
-        self.resolver = ComponentResolver()
+        self.compile_mode = settings.recipe.training.compile
+        resolver = ComponentResolver()
+        bundle = build_rl_training_bundle(
+            settings=settings,
+            models=models,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            callbacks=callbacks,
+            resolver=resolver,
+        )
+        self._init_from_bundle(bundle, resolver=resolver)
 
-        recipe = settings.recipe
+    @classmethod
+    def from_bundle(cls, bundle: RLTrainingBundle) -> "RLTrainer":
+        """Construct an RLTrainer from a materialized RLTrainingBundle."""
+        trainer = cls.__new__(cls)
+        trainer._init_from_bundle(bundle)
+        return trainer
+
+    def _init_from_bundle(
+        self,
+        bundle: RLTrainingBundle,
+        *,
+        resolver: ComponentResolver | None = None,
+    ) -> None:
+        self.settings = bundle.settings
+        self.train_loader = bundle.train_loader
+        self.val_loader = bundle.val_loader
+        self.resolver = resolver or ComponentResolver()
+
+        recipe = self.settings.recipe
+        if recipe.rl is None:
+            raise ValueError("RLTrainer에는 recipe.rl이 필요합니다")
         training = recipe.training
 
         # algorithm을 _component_ 패턴으로 resolve
-        self.algorithm = self.resolver.resolve(recipe.rl.algorithm)
+        self.algorithm = bundle.algorithm or self.resolver.resolve(recipe.rl.algorithm)
 
         # Device
         self.device = detect_device()
@@ -101,46 +121,37 @@ class RLTrainer(BaseTrainer):
         self.amp_enabled, self.amp_dtype, self.scaler = setup_amp(training.precision, self.device)
 
         # 모델 분리: trainable vs frozen
-        self.trainable: dict[str, nn.Module] = {}
-        self.frozen: dict[str, nn.Module] = {}
-        self.optimizers: dict[str, torch.optim.Optimizer] = {}
-        self.schedulers: dict[str, Any] = {}
-        self.scheduler_intervals: dict[str, str] = {}
-
-        for name, spec in recipe.rl.models.items():
-            model = models[name]
-            if spec.get("optimizer") is not None:
-                self.trainable[name] = model
-                klass, kwargs = self.resolver.resolve_partial(spec["optimizer"])
-                self.optimizers[name] = klass(model.parameters(), **kwargs)
-                if spec.get("scheduler") is not None:
-                    sched_config = dict(spec["scheduler"])
-                    warmup = parse_warmup_config(sched_config, self._estimate_total_steps())
-                    s_klass, s_kwargs = self.resolver.resolve_partial(sched_config)
-                    base_scheduler = s_klass(self.optimizers[name], **s_kwargs)
-                    self.schedulers[name] = create_scheduler_with_warmup(
-                        self.optimizers[name], base_scheduler, warmup
-                    )
-                    self.scheduler_intervals[name] = warmup.interval
-            else:
-                model.eval()
-                for p in model.parameters():
-                    p.requires_grad = False
-                self.frozen[name] = model
+        if (
+            bundle.trainable is None
+            or bundle.frozen is None
+            or bundle.optimizers is None
+            or bundle.schedulers is None
+            or bundle.scheduler_intervals is None
+        ):
+            prepared = build_rl_training_bundle(
+                settings=self.settings,
+                models=bundle.models,
+                train_loader=self.train_loader,
+                val_loader=self.val_loader,
+                callbacks=bundle.callbacks,
+                resolver=self.resolver,
+            )
+            bundle = prepared
+        self.trainable = dict(bundle.trainable or {})
+        self.frozen = dict(bundle.frozen or {})
+        self.optimizers = dict(bundle.optimizers or {})
+        self.schedulers = dict(bundle.schedulers or {})
+        self.scheduler_intervals = dict(bundle.scheduler_intervals or {})
 
         self.policy = self.trainable["policy"]
 
         # Strategy
-        self.strategy = create_strategy(settings, self.resolver)
-        self.expert_parallel = create_expert_parallel(settings)
+        self.strategy = bundle.strategy
+        self.expert_parallel = bundle.expert_parallel
         self._is_main_process = int(os.environ.get("RANK", "0")) == 0
 
         # Callbacks
-        self.callbacks = list(callbacks) if callbacks else []
-        if training.early_stopping is not None:
-            self.callbacks.append(EarlyStopping(**training.early_stopping.model_dump()))
-        if training.ema is not None:
-            self.callbacks.append(EMACallback(**training.ema.model_dump()))
+        self.callbacks = list(bundle.callbacks) if bundle.callbacks else []
 
         # Validation
         self.val_check_interval = getattr(training, "val_check_interval", 0)
@@ -150,7 +161,7 @@ class RLTrainer(BaseTrainer):
         self.global_step = 0
         self.epoch_counter = 0
         self.last_metrics: dict[str, float] = {}
-        self._recipe_dict = settings.recipe.model_dump()
+        self._recipe_dict = self.settings.recipe.model_dump()
         self._generation_kwargs: dict[str, Any] = {}
 
         # Signal handling — Trainer와 동일한 패턴.
