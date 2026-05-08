@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import torch
 
-from mdp.callbacks.inference import DefaultOutputCallback, _postprocess, _to_numpy
+from mdp.callbacks.inference import DefaultOutputCallback, _to_numpy
 
 
 # ---------------------------------------------------------------------------

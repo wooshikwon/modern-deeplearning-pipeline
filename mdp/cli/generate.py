@@ -14,7 +14,6 @@ from mdp.cli.output import (
     build_result,
     emit_result,
     is_json_mode,
-    resolve_model_source,
     resolve_model_source_plan,
 )
 

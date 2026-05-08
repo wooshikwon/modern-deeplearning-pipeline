@@ -32,4 +32,4 @@ optimizer:
 
 metadata:
   author: test
-  description: "Tiny vision model for pipeline E2E test"
+  description: "Tiny vision model for runtime E2E test"

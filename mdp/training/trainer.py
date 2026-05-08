@@ -22,7 +22,7 @@ from torch.amp import autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
-from mdp.factory.bundles import (
+from mdp.assembly.bundles import (
     SFTTrainingBundle,
     build_sft_training_bundle,
     create_loss,
@@ -30,6 +30,7 @@ from mdp.factory.bundles import (
     create_sft_scheduler,
 )
 from mdp.models.forward import make_forward_fn
+from mdp.settings.components import ComponentSpec
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import (
@@ -152,11 +153,11 @@ class Trainer(BaseTrainer):
 
     # ── Component creation ──
 
-    def _create_optimizer(self, config: dict[str, Any]) -> torch.optim.Optimizer:
+    def _create_optimizer(self, config: ComponentSpec) -> torch.optim.Optimizer:
         return create_sft_optimizer(self.model, config, self.resolver)
 
     def _create_scheduler(
-        self, config: dict[str, Any] | None
+        self, config: ComponentSpec | None
     ) -> tuple[Any, str] | tuple[None, str]:
         if config is None:
             return None, "step"
@@ -167,7 +168,7 @@ class Trainer(BaseTrainer):
             resolver=self.resolver,
         )
 
-    def _create_loss(self, config: dict[str, Any] | None) -> nn.Module | None:
+    def _create_loss(self, config: ComponentSpec | None) -> nn.Module | None:
         return create_loss(config, self.resolver)
 
     def _optimizer_dict(self) -> dict[str, torch.optim.Optimizer]:

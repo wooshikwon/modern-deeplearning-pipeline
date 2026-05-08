@@ -6,7 +6,6 @@ All data is random and deterministic (seeded) for reproducibility.
 
 from __future__ import annotations
 
-from typing import Any
 
 import torch
 from torch import Tensor

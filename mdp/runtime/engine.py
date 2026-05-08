@@ -2,19 +2,18 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import Any, Callable, Sequence
+from typing import Any, Callable
 
-from mdp.factory.materializer import AssemblyMaterializer
-from mdp.factory.planner import AssemblyPlanner
-from mdp.settings.plan import SettingsPlan
+from mdp.assembly.materializer import AssemblyMaterializer
+from mdp.assembly.planner import AssemblyPlanner
+from mdp.settings.run_plan import RunPlan
 from mdp.training.callbacks.base import BaseCallback
 
 CallbacksObserver = Callable[[list[BaseCallback], Any], None]
 
 
 class ExecutionEngine:
-    """Own SettingsPlan -> AssemblyPlan -> TrainingBundle -> trainer execution."""
+    """Own RunPlan -> AssemblyPlan -> TrainingBundle -> trainer execution."""
 
     def __init__(
         self,
@@ -29,17 +28,15 @@ class ExecutionEngine:
 
     def run(
         self,
-        settings_plan: SettingsPlan,
-        cb_configs: Sequence[dict[str, Any]] | None = None,
+        run_plan: RunPlan,
     ) -> dict:
-        """Run SFT or RL training from a validated SettingsPlan."""
-        plan = self._with_callback_configs(settings_plan, cb_configs)
-        assembly_plan = self._assembly_planner.from_settings_plan(plan)
+        """Run SFT or RL training from a validated RunPlan."""
+        assembly_plan = self._assembly_planner.from_run_plan(run_plan)
         materializer = self._materializer_cls(assembly_plan)
         callbacks = materializer.materialize_callbacks()
 
         if self._callbacks_observer is not None:
-            self._callbacks_observer(callbacks, plan.settings)
+            self._callbacks_observer(callbacks, run_plan.settings)
 
         if assembly_plan.kind == "sft_training":
             from mdp.training.trainer import Trainer
@@ -54,15 +51,3 @@ class ExecutionEngine:
             return RLTrainer.from_bundle(bundle).train()
 
         raise ValueError(f"지원하지 않는 AssemblyPlan kind: {assembly_plan.kind!r}")
-
-    @staticmethod
-    def _with_callback_configs(
-        settings_plan: SettingsPlan,
-        cb_configs: Sequence[dict[str, Any]] | None,
-    ) -> SettingsPlan:
-        if cb_configs is None:
-            return settings_plan
-        return replace(
-            settings_plan,
-            callback_configs=tuple(dict(config) for config in cb_configs),
-        )

@@ -36,9 +36,36 @@ optimizer:
 - 나머지 키는 `kwargs`로 생성자에 전달
 - 중첩된 `_component_` dict도 재귀적으로 해석
 
+YAML은 `_component_` dict 문법을 유지하지만, schema validation 이후 내부 runtime은 typed component envelope를 사용한다. 따라서 `_component_` 누락, 문자열이 아닌 `_component_`, non-model component의 `pretrained`, `target`/`target_modules` 또는 `save`/`modules_to_save` 동시 지정은 component constructor까지 내려가기 전에 실패한다.
+
 내장 alias 목록은 `mdp list callbacks`, `mdp list strategies` 등으로 조회할 수 있다.
 
 **`_component_`를 쓰지 않는 영역**: `training`, `generation`, `data.dataloader`, `metadata`, `evaluation` — 이들은 순수 설정값 묶음이다.
+
+### Closed zone / open zone
+
+Schema validation separates MDP-owned settings from user component kwargs.
+Closed zones reject unknown fields immediately, while open zones keep arbitrary
+kwargs under a typed `_component_` envelope.
+
+| Zone | YAML area | Rule |
+|---|---|---|
+| Closed | `training`, `generation`, `rl.generation`, `data.dataloader`, `metadata`, `evaluation`, `monitoring` | Unknown fields are errors. Example: `training.val_check_units` fails because the supported field is `val_check_unit`. |
+| Closed | `config.compute`, `config.mlflow`, `config.storage`, `config.serving`, `config.job` | Infrastructure typos are errors before runtime starts. |
+| Open | `model`, `head`, `adapter`, `data.dataset`, `data.val_dataset`, `data.collator`, `data.sampler` | `_component_` or model `pretrained` route is validated; remaining keys are passed as component kwargs. |
+| Open | `optimizer`, `scheduler`, `loss`, `rl.algorithm`, `rl.models.*`, callback YAML items | Component envelope is validated; component-specific kwargs remain open. |
+
+YAML loader also rejects empty files, non-mapping Recipe/Config roots, non-list callback roots, and duplicate keys with a YAML dot-path in the error message.
+
+### Schema migration table
+
+| Legacy/error form | Current form |
+|---|---|
+| `data.source` at `data` top level | Move it under `data.dataset.source`; dataset-specific fields live inside `data.dataset`. |
+| `callbacks:` in Recipe | Put callback blocks in a separate file and pass `--callbacks callbacks.yaml`. |
+| Catalog `adapter: qlora` shorthand | Generated/public Recipe YAML uses `adapter: {_component_: QLoRA, ...}`. Catalog defaults should store the expanded block. |
+| `model.pretrained: timm://...` plus `_component_` | Use protocol-specific model routing. `timm://` and `ultralytics://` pretrained routes omit `_component_`; generic/HF routes may include `_component_`. |
+| `target` plus `target_modules` | Choose one: semantic `target` or raw backend `target_modules`. The same rule applies to `save` and `modules_to_save`. |
 
 ---
 
@@ -384,6 +411,19 @@ compute:
 ```
 
 지원 전략의 런타임 경계는 [Runtime Contracts](runtime-contracts.md#strategy-capability)를 참조한다.
+
+`compute.distributed` is a closed config block. Unknown keys such as `stratgey` fail before runtime starts. The `strategy` slot accepts either a string alias or a `_component_` block:
+
+```yaml
+compute:
+  gpus: auto
+  distributed:
+    strategy:
+      _component_: DDPStrategy
+      backend: gloo
+```
+
+Do not repeat the same strategy kwarg in both places. For example, `strategy.backend` and top-level `distributed.backend` together are rejected because the effective constructor value would be ambiguous.
 
 **MoE Expert Parallelism**:
 ```yaml

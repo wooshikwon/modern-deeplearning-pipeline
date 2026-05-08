@@ -10,13 +10,14 @@ import inspect
 import importlib
 import json
 import pkgutil
+import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
 from mdp.settings.schema import Config, Recipe
-from mdp.settings.factory import SettingsFactory
+from mdp.settings.loader import SettingsLoader
 from scripts.prepare_test_fixtures import DATASETS, TINY_MODELS, cache_dataset_slice
 
 
@@ -27,6 +28,8 @@ DATASET_FIXTURE_NAMES = {
     "prompt-tiny": "prompt_tiny",
     "classification-text-tiny": "classification_text_tiny",
 }
+
+CLOUD_TEST_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "cloud_test.sh"
 
 
 def _fixture_name(local_model_name: str) -> str:
@@ -81,6 +84,71 @@ def test_gpu_tests_only_request_produced_fixtures() -> None:
         f"GPU tests request fixtures not produced by prepare_test_fixtures: "
         f"{sorted(requested_model_fixtures - produced_fixtures)}"
     )
+
+
+def test_marker_skip_reasons_preserve_hardware_boundaries() -> None:
+    """GPU/cloud markers skip only when their declared boundary is unavailable."""
+    import tests.conftest as conftest
+
+    laptop = conftest._marker_skip_reasons(
+        has_cuda=False,
+        n_cuda=0,
+        fixtures_set=False,
+        memory_profile=None,
+        run_distributed_cpu=False,
+    )
+    cloud_single_gpu = conftest._marker_skip_reasons(
+        has_cuda=True,
+        n_cuda=1,
+        fixtures_set=True,
+        memory_profile="cuda_24gb",
+        run_distributed_cpu=True,
+    )
+    cloud_multi_gpu = conftest._marker_skip_reasons(
+        has_cuda=True,
+        n_cuda=2,
+        fixtures_set=True,
+        memory_profile="cuda_24gb",
+        run_distributed_cpu=True,
+    )
+
+    assert laptop == {
+        "gpu": "requires CUDA GPU (none available)",
+        "distributed": "requires >=2 CUDA GPUs (have 0)",
+        "fixtures": "MDP_TEST_FIXTURES env var not set",
+        "memory": "MDP_MEMORY_BUDGET_PROFILE env var not set",
+        "distributed_cpu": "MDP_RUN_DISTRIBUTED_CPU=1 not set",
+    }
+    assert cloud_single_gpu == {"distributed": "requires >=2 CUDA GPUs (have 1)"}
+    assert cloud_multi_gpu == {}
+
+
+@pytest.mark.parametrize(
+    ("args", "expected"),
+    [
+        (
+            ["--dry-run"],
+            "tests/unit/test_gpu_fixture_contract.py tests/e2e/test_gpu_sft.py "
+            "tests/e2e/test_gpu_inference.py -m not distributed and not memory",
+        ),
+        (["--suite", "gpu", "--dry-run"], "-m gpu and fixtures and not distributed and not memory"),
+        (["--suite", "distributed", "--dry-run"], "-m distributed and fixtures"),
+        (["--suite", "memory", "--memory-profile", "cuda_24gb", "--dry-run"], "-m memory"),
+    ],
+)
+def test_cloud_test_suite_dry_run_preserves_pytest_selection(args: list[str], expected: str) -> None:
+    """cloud_test.sh suite names keep selecting the documented hardware boundary."""
+    result = subprocess.run(
+        ["bash", str(CLOUD_TEST_SCRIPT), *args],
+        cwd=CLOUD_TEST_SCRIPT.parents[1],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert expected in result.stdout
 
 
 def test_tiny_model_families_are_supported_by_verify_models() -> None:
@@ -158,14 +226,14 @@ def _assert_gpu_sft_yaml_contract(recipe_path: str, config_path: str) -> None:
 
     recipe = Recipe(**raw_recipe)
     config = Config(**raw_config)
-    settings = SettingsFactory().for_training(recipe_path, config_path)
+    settings = SettingsLoader().load_training_settings(recipe_path, config_path)
 
     assert recipe.loss is None
     assert settings.recipe.loss is None
-    assert recipe.model["_component_"] == "AutoModelForCausalLM"
-    assert recipe.data.dataset["padding"] == "max_length"
-    assert recipe.data.dataset["truncation"] is True
-    assert recipe.data.collator["_component_"] == "CausalLMCollator"
+    assert recipe.model.component == "AutoModelForCausalLM"
+    assert recipe.data.dataset.kwargs["padding"] == "max_length"
+    assert recipe.data.dataset.kwargs["truncation"] is True
+    assert recipe.data.collator.component == "CausalLMCollator"
     assert config.storage.checkpoint_dir
 
 

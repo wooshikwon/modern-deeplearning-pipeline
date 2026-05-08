@@ -1,6 +1,6 @@
 """RLTrainer — RL alignment 학습 루프.
 
-SFT Trainer와 독립된 학습 루프. 내장 DPO/GRPO/PPO 외에도 `_component_` 패턴으로
+SFT Trainer와 독립된 학습 루프. 내장 DPO/GRPO/PPO 외에도 component spec으로
 외부 알고리즘(compute_loss + needs_generation/mini_epochs 규약)을 주입할 수 있다.
 복수 모델(policy + frozen reference/critic/reward/value)을 관리하며,
 optimizer는 trainable 모델별로 독립 운용한다.
@@ -22,7 +22,7 @@ from torch.amp import autocast
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
-from mdp.factory.bundles import RLTrainingBundle, build_rl_training_bundle
+from mdp.assembly.bundles import RLTrainingBundle, build_rl_training_bundle
 from mdp.settings.distributed import get_strategy_name
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
@@ -104,7 +104,7 @@ class RLTrainer(BaseTrainer):
             raise ValueError("RLTrainer에는 recipe.rl이 필요합니다")
         training = recipe.training
 
-        # algorithm을 _component_ 패턴으로 resolve
+        # algorithm component spec resolve
         self.algorithm = bundle.algorithm or self.resolver.resolve(recipe.rl.algorithm)
 
         # Device

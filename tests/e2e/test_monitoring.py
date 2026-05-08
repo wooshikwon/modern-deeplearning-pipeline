@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
-from torch import Tensor
 
 from mdp.monitoring.baseline import compare_baselines, compute_baseline
 from tests.e2e.datasets import ListDataLoader, make_vision_batches

@@ -6,7 +6,6 @@ _inherit_block_classes helper의 동작을 검증한다.
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
 
 import pytest
 import torch
@@ -200,7 +199,7 @@ class TestInheritBlockClasses:
             def validation_step(self, batch: dict[str, Tensor]) -> dict[str, float]:
                 return {}
 
-        model = PlainWrapperModel()
+        PlainWrapperModel()
         assert PlainWrapperModel._block_classes is None
 
     def test_inherit_sets_instance_attribute_not_class(self) -> None:

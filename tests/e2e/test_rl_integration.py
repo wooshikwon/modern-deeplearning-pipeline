@@ -5,10 +5,6 @@ SFT 테스트와 대등한 수준으로 RL 인프라를 검증한다.
 
 from __future__ import annotations
 
-import json
-import tempfile
-from pathlib import Path
-
 import pytest
 import torch
 import torch.nn as nn
@@ -17,7 +13,6 @@ import yaml
 from mdp.settings.schema import (
     Config,
     DataSpec,
-    GenerationSpec,
     RLGenerationSpec,
     MetadataSpec,
     RLSpec,
@@ -68,14 +63,18 @@ def _prompt_batches(n, bs, seq=4, vocab=32):
 
 
 def _dpo_settings(max_steps=3, precision="fp32", **overrides):
+    model_component = "tests.e2e.test_rl_integration.TinyLM"
     recipe = Recipe(
         name="rl-test",
         task="text_generation",
         rl=RLSpec(
             algorithm={"_component_": "DPO", "beta": 0.1},
             models={
-                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
-                "reference": {},
+                "policy": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "reference": {"_component_": model_component},
             },
         ),
         data=DataSpec(
@@ -91,15 +90,19 @@ def _dpo_settings(max_steps=3, precision="fp32", **overrides):
 
 
 def _grpo_settings(max_steps=3):
+    model_component = "tests.e2e.test_rl_integration.TinyLM"
     recipe = Recipe(
         name="rl-test",
         task="text_generation",
         rl=RLSpec(
             algorithm={"_component_": "GRPO", "clip_range": 0.2, "kl_coeff": 0.01},
             models={
-                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
-                "reference": {},
-                "reward": {},
+                "policy": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "reference": {"_component_": model_component},
+                "reward": {"_component_": model_component},
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
@@ -131,18 +134,25 @@ def _make_trainer(settings, batches, models=None):
 
 def test_rl_trainer_from_bundle_preserves_per_model_optimizers() -> None:
     """Bundle-oriented path keeps RL optimizer/scheduler ownership per model."""
-    from mdp.factory.bundles import build_rl_training_bundle
+    from mdp.assembly.bundles import build_rl_training_bundle
     from mdp.training.rl_trainer import RLTrainer
 
+    model_component = "tests.e2e.test_rl_integration.TinyLM"
     recipe = Recipe(
         name="rl-bundle-test",
         task="text_generation",
         rl=RLSpec(
             algorithm={"_component_": "PPO", "mini_epochs": 1},
             models={
-                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
-                "value": {"optimizer": {"_component_": "AdamW", "lr": 2e-3}},
-                "reference": {},
+                "policy": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "value": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 2e-3},
+                },
+                "reference": {"_component_": model_component},
             },
         ),
         data=DataSpec(
@@ -286,16 +296,24 @@ def test_grpo_reward_from_model() -> None:
 
 def test_ppo_multi_loss() -> None:
     """PPO에서 policy loss와 value loss가 동시에 계산되는지."""
+    model_component = "tests.e2e.test_rl_integration.TinyLM"
     recipe = Recipe(
         name="ppo-test",
         task="text_generation",
         rl=RLSpec(
             algorithm={"_component_": "PPO", "clip_range": 0.2, "mini_epochs": 1},
             models={
-                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
-                "value": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}, "freeze": False},
-                "reference": {},
-                "reward": {},
+                "policy": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "value": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                    "freeze": False,
+                },
+                "reference": {"_component_": model_component},
+                "reward": {"_component_": model_component},
             },
             generation=RLGenerationSpec(max_new_tokens=4),
         ),
@@ -361,8 +379,8 @@ def test_rl_policy_optimizer_required() -> None:
             rl=RLSpec(
                 algorithm={"_component_": "DPO"},
                 models={
-                    "policy": {},  # optimizer 없음
-                    "reference": {},
+                    "policy": {"_component_": "tests.e2e.test_rl_integration.TinyLM"},  # optimizer 없음
+                    "reference": {"_component_": "tests.e2e.test_rl_integration.TinyLM"},
                 },
             ),
             data=DataSpec(
@@ -379,14 +397,13 @@ def test_rl_policy_optimizer_required() -> None:
 
 def test_custom_algorithm_causal_data() -> None:
     """커스텀 알고리즘이 causal(input_ids) 데이터로 동작하는지."""
-    from tests.e2e.test_rl_custom_algorithm import SimpleWeightedCELoss
-
     causal_batches = [{
         "input_ids": torch.randint(1, 32, (4, 8)),
         "attention_mask": torch.ones(4, 8, dtype=torch.long),
         "labels": torch.randint(1, 32, (4, 8)),
     } for _ in range(5)]
 
+    model_component = "tests.e2e.test_rl_integration.TinyLM"
     recipe = Recipe(
         name="custom-test",
         task="text_generation",
@@ -396,8 +413,11 @@ def test_custom_algorithm_causal_data() -> None:
                 "weight_scale": 1.0,
             },
             models={
-                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
-                "critic": {},
+                "policy": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "critic": {"_component_": model_component},
             },
         ),
         data=DataSpec(

@@ -20,6 +20,29 @@ import torch
 # Marker auto-skip (gpu / distributed / fixtures / memory / distributed_cpu)
 # ────────────────────────────────────────────────────────────
 
+def _marker_skip_reasons(
+    *,
+    has_cuda: bool,
+    n_cuda: int,
+    fixtures_set: bool,
+    memory_profile: str | None,
+    run_distributed_cpu: bool,
+) -> dict[str, str]:
+    """Return marker skip reasons for the current host boundary."""
+    reasons: dict[str, str] = {}
+    if not has_cuda:
+        reasons["gpu"] = "requires CUDA GPU (none available)"
+    if n_cuda < 2:
+        reasons["distributed"] = f"requires >=2 CUDA GPUs (have {n_cuda})"
+    if not fixtures_set:
+        reasons["fixtures"] = "MDP_TEST_FIXTURES env var not set"
+    if not memory_profile:
+        reasons["memory"] = "MDP_MEMORY_BUDGET_PROFILE env var not set"
+    if not run_distributed_cpu:
+        reasons["distributed_cpu"] = "MDP_RUN_DISTRIBUTED_CPU=1 not set"
+    return reasons
+
+
 def pytest_collection_modifyitems(config, items):
     """Add skip markers based on the host environment.
 
@@ -37,23 +60,18 @@ def pytest_collection_modifyitems(config, items):
     memory_profile = os.environ.get("MDP_MEMORY_BUDGET_PROFILE")
     run_distributed_cpu = os.environ.get("MDP_RUN_DISTRIBUTED_CPU") == "1"
 
-    skip_no_gpu = pytest.mark.skip(reason="requires CUDA GPU (none available)")
-    skip_no_multigpu = pytest.mark.skip(reason=f"requires >=2 CUDA GPUs (have {n_cuda})")
-    skip_no_fixtures = pytest.mark.skip(reason="MDP_TEST_FIXTURES env var not set")
-    skip_no_memory_profile = pytest.mark.skip(reason="MDP_MEMORY_BUDGET_PROFILE env var not set")
-    skip_no_distributed_cpu = pytest.mark.skip(reason="MDP_RUN_DISTRIBUTED_CPU=1 not set")
+    skip_reasons = _marker_skip_reasons(
+        has_cuda=has_cuda,
+        n_cuda=n_cuda,
+        fixtures_set=fixtures_set,
+        memory_profile=memory_profile,
+        run_distributed_cpu=run_distributed_cpu,
+    )
 
     for item in items:
-        if "gpu" in item.keywords and not has_cuda:
-            item.add_marker(skip_no_gpu)
-        if "distributed" in item.keywords and n_cuda < 2:
-            item.add_marker(skip_no_multigpu)
-        if "fixtures" in item.keywords and not fixtures_set:
-            item.add_marker(skip_no_fixtures)
-        if "memory" in item.keywords and not memory_profile:
-            item.add_marker(skip_no_memory_profile)
-        if "distributed_cpu" in item.keywords and not run_distributed_cpu:
-            item.add_marker(skip_no_distributed_cpu)
+        for marker_name, reason in skip_reasons.items():
+            if marker_name in item.keywords:
+                item.add_marker(pytest.mark.skip(reason=reason))
 
 
 # ────────────────────────────────────────────────────────────
@@ -109,7 +127,7 @@ def smollm2(fixtures_dir):
 
 @pytest.fixture(scope="session")
 def gpt2(fixtures_dir):
-    """gpt2 — classic 124M causal LM, second causal-LM family for factory routing."""
+    """gpt2 — classic 124M causal LM, second causal-LM family for materializer routing."""
     return _model_dir(fixtures_dir, "gpt2")
 
 

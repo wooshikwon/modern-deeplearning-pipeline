@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Sequence
 
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 
+from mdp.settings.components import ComponentSpec
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
 from mdp.training._common import create_expert_parallel, create_strategy
@@ -88,7 +89,7 @@ def promote_training_callbacks(
 
 def create_sft_optimizer(
     model: nn.Module,
-    config: dict[str, Any],
+    config: ComponentSpec,
     resolver: ComponentResolver,
 ) -> torch.optim.Optimizer:
     """Create the single SFT optimizer while preserving model override priority."""
@@ -130,7 +131,7 @@ def create_sft_optimizer(
 
 def create_sft_scheduler(
     optimizer: torch.optim.Optimizer,
-    config: dict[str, Any] | None,
+    config: ComponentSpec | None,
     *,
     total_steps: int,
     resolver: ComponentResolver,
@@ -139,16 +140,16 @@ def create_sft_scheduler(
     if config is None:
         return None, "step"
 
-    config = dict(config)
-    warmup = parse_warmup_config(config, total_steps)
-    klass, kwargs = resolver.resolve_partial(config)
+    scheduler_kwargs = dict(config.kwargs)
+    warmup = parse_warmup_config(scheduler_kwargs, total_steps)
+    klass, kwargs = resolver.resolve_partial(replace(config, kwargs=scheduler_kwargs))
     base_scheduler = klass(optimizer, **kwargs)
     scheduler = create_scheduler_with_warmup(optimizer, base_scheduler, warmup)
     return scheduler, warmup.interval
 
 
 def create_loss(
-    config: dict[str, Any] | None,
+    config: ComponentSpec | None,
     resolver: ComponentResolver,
 ) -> nn.Module | None:
     """Resolve an optional SFT loss component."""
@@ -227,14 +228,16 @@ def build_rl_training_bundle(
 
     for name, spec in settings.recipe.rl.models.items():
         model = models[name]
-        if spec.get("optimizer") is not None:
+        if spec.optimizer is not None:
             trainable[name] = model
-            klass, kwargs = resolver.resolve_partial(spec["optimizer"])
+            klass, kwargs = resolver.resolve_partial(spec.optimizer)
             optimizers[name] = klass(model.parameters(), **kwargs)
-            if spec.get("scheduler") is not None:
-                sched_config = dict(spec["scheduler"])
-                warmup = parse_warmup_config(sched_config, total_steps)
-                s_klass, s_kwargs = resolver.resolve_partial(sched_config)
+            if spec.scheduler is not None:
+                scheduler_kwargs = dict(spec.scheduler.kwargs)
+                warmup = parse_warmup_config(scheduler_kwargs, total_steps)
+                s_klass, s_kwargs = resolver.resolve_partial(
+                    replace(spec.scheduler, kwargs=scheduler_kwargs)
+                )
                 base_scheduler = s_klass(optimizers[name], **s_kwargs)
                 schedulers[name] = create_scheduler_with_warmup(
                     optimizers[name], base_scheduler, warmup

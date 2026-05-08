@@ -1,4 +1,4 @@
-"""``create_dataloaders``의 sampler_config 통합 + Factory end-to-end 통합 테스트.
+"""``create_dataloaders``의 sampler_config 통합 + AssemblyMaterializer end-to-end 통합 테스트.
 
 spec-length-bucketed-sampler.md U5의 통합 테스트 4건:
 
@@ -9,8 +9,8 @@ spec-length-bucketed-sampler.md U5의 통합 테스트 4건:
 3. ``test_dataloader_with_sampler_overrides_dl_kwargs``
    — sampler 주입 시 ``batch_size``/``shuffle``/``drop_last``가 자동 무시되어
      DataLoader가 ValueError를 일으키지 않음
-4. ``test_factory_creates_dataloader_with_sampler_from_recipe``
-   — Factory.create_dataloaders() 가 ``data.sampler``를 그대로 전달하여
+4. ``test_materializer_creates_dataloader_with_sampler_from_recipe``
+   — AssemblyMaterializer.create_dataloaders() 가 ``data.sampler``를 그대로 전달하여
      end-to-end 경로가 작동
 
 설계 결정:
@@ -19,7 +19,7 @@ spec-length-bucketed-sampler.md U5의 통합 테스트 4건:
   HF datasets 다운로드를 동반하므로 단위 비용이 크다. 본 통합 테스트는 fake
   dataset/collator 클래스를 모듈 레벨에 정의하고, ``_component_`` 경로로 그대로
   resolve되도록 하여 ``create_dataloaders`` 조립 경로 자체만 격리 검증한다.
-- Factory 경로 테스트는 ``Settings``를 실제 Pydantic 인스턴스로 빌드한다 —
+- AssemblyMaterializer 경로 테스트는 ``Settings``를 실제 Pydantic 인스턴스로 빌드한다 —
   ``DataSpec.sampler`` 필드 추가가 schema 단계에서 정상 통과함을 함께 보장.
 """
 
@@ -27,12 +27,13 @@ from __future__ import annotations
 
 from typing import Any
 
-import pytest
 from torch.utils.data import DataLoader
 
 from mdp.data.dataloader import create_dataloaders
 from mdp.data.samplers import LengthGroupedBatchSampler
-from mdp.factory.factory import Factory
+from mdp.assembly.materializer import AssemblyMaterializer
+from mdp.assembly.planner import AssemblyPlanner
+from mdp.settings.run_plan import RunPlan, RunSources
 from mdp.settings.schema import (
     Config,
     DataloaderSpec,
@@ -265,7 +266,7 @@ def test_dataloader_with_sampler_overrides_dl_kwargs() -> None:
 
 
 # ──────────────────────────────────────────────────────────────────────
-# 통합 테스트 4) Factory.create_dataloaders() end-to-end
+# 통합 테스트 4) AssemblyMaterializer.create_dataloaders() end-to-end
 # ──────────────────────────────────────────────────────────────────────
 
 
@@ -292,10 +293,24 @@ def _build_settings_with_sampler(lengths: list[int]) -> Settings:
     return Settings(recipe=recipe, config=config)
 
 
-def test_factory_creates_dataloader_with_sampler_from_recipe() -> None:
-    """Factory.create_dataloaders() 가 Recipe.data.sampler를 그대로 전달한다.
+def _materializer(settings: Settings) -> AssemblyMaterializer:
+    run_plan = RunPlan(
+        command="train",
+        mode="sft",
+        settings=settings,
+        sources=RunSources(),
+        overrides=(),
+        callback_configs=(),
+        validation_scope="training",
+        distributed_intent=False,
+    )
+    return AssemblyMaterializer(AssemblyPlanner.from_run_plan(run_plan))
 
-    Settings → Factory → create_dataloaders → DataLoader(batch_sampler=...) 경로
+
+def test_materializer_creates_dataloader_with_sampler_from_recipe() -> None:
+    """AssemblyMaterializer.create_dataloaders() 가 Recipe.data.sampler를 그대로 전달한다.
+
+    Settings → AssemblyMaterializer → create_dataloaders → DataLoader(batch_sampler=...) 경로
     전체가 작동함을 end-to-end로 검증. 본 테스트가 통과하면 사용자가 Recipe의
     ``data.sampler`` 섹션을 추가하는 것만으로 length-bucketed sampler가
     파이프라인에 진입한다.
@@ -305,10 +320,10 @@ def test_factory_creates_dataloader_with_sampler_from_recipe() -> None:
 
     # DataSpec.sampler 필드가 schema 단계에서 정상 보관됨
     assert settings.recipe.data.sampler is not None
-    assert "_component_" in settings.recipe.data.sampler
+    assert settings.recipe.data.sampler.component
 
-    factory = Factory(settings)
-    loaders = factory.create_dataloaders()
+    materializer = _materializer(settings)
+    loaders = materializer.materialize_dataloaders()
 
     train_loader = loaders["train"]
     assert isinstance(train_loader, DataLoader)

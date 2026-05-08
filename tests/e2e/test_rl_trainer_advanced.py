@@ -90,6 +90,7 @@ def _rl_settings_with_per_model_factors(
     DPO는 preference 배치 전용이라 critic을 trainable로 둘 수 없고, 둘 다 trainable
     하려면 optimizer가 붙은 구성이 필요하다.
     """
+    model_component = "tests.e2e.test_rl_trainer_advanced._TinyLM"
     recipe = Recipe(
         name="rl-warmup-per-model",
         task="text_generation",
@@ -100,6 +101,7 @@ def _rl_settings_with_per_model_factors(
             },
             models={
                 "policy": {
+                    "_component_": model_component,
                     "optimizer": {"_component_": "AdamW", "lr": 1e-3},
                     "scheduler": {
                         "_component_": "torch.optim.lr_scheduler.CosineAnnealingLR",
@@ -110,6 +112,7 @@ def _rl_settings_with_per_model_factors(
                     },
                 },
                 "critic": {
+                    "_component_": model_component,
                     "optimizer": {"_component_": "AdamW", "lr": 5e-4},
                     "scheduler": {
                         "_component_": "torch.optim.lr_scheduler.CosineAnnealingLR",
@@ -205,6 +208,7 @@ def test_trainer_rl_trainer_symmetric_factors() -> None:
     trainer_linear = _linear_warmup_from_sequential(trainer.scheduler)
 
     # ── RLTrainer 쪽 (single-trainable: policy만) ──
+    model_component = "tests.e2e.test_rl_trainer_advanced._TinyLM"
     recipe = Recipe(
         name="rl-symmetric",
         task="text_generation",
@@ -215,10 +219,11 @@ def test_trainer_rl_trainer_symmetric_factors() -> None:
             },
             models={
                 "policy": {
+                    "_component_": model_component,
                     "optimizer": {"_component_": "AdamW", "lr": 1e-3},
                     "scheduler": dict(sched_config),
                 },
-                "critic": {},  # frozen, scheduler 없음
+                "critic": {"_component_": model_component},  # frozen, scheduler 없음
             },
         ),
         data=DataSpec(
@@ -287,14 +292,18 @@ def _dpo_rl_trainer_for_logging(
     multi-group 테스트에서는 호출 직후 `trainer.optimizers["policy"]`를 수동으로
     교체한다.
     """
+    model_component = "tests.e2e.test_rl_trainer_advanced._TinyLM"
     recipe = Recipe(
         name="rl-logging-test",
         task="text_generation",
         rl=RLSpec(
             algorithm={"_component_": "DPO", "beta": 0.1},
             models={
-                "policy": {"optimizer": {"_component_": "AdamW", "lr": policy_lr}},
-                "reference": {},
+                "policy": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": policy_lr},
+                },
+                "reference": {"_component_": model_component},
             },
         ),
         data=DataSpec(
@@ -520,14 +529,18 @@ def test_rl_trainer_step_logging_at_grad_accum_boundary_only() -> None:
     from unittest.mock import MagicMock, patch
 
     # grad_accum_steps=2, max_steps=2 → 총 4 batch를 소비한 뒤 종료.
+    model_component = "tests.e2e.test_rl_trainer_advanced._TinyLM"
     recipe = Recipe(
         name="rl-step-log-timing",
         task="text_generation",
         rl=RLSpec(
             algorithm={"_component_": "DPO", "beta": 0.1},
             models={
-                "policy": {"optimizer": {"_component_": "AdamW", "lr": 1e-3}},
-                "reference": {},
+                "policy": {
+                    "_component_": model_component,
+                    "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+                },
+                "reference": {"_component_": model_component},
             },
         ),
         data=DataSpec(

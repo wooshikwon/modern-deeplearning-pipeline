@@ -6,6 +6,7 @@ import logging
 import math
 from typing import Any
 
+from mdp.settings.components import ComponentSpec, ModelComponentSpec
 from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
@@ -61,7 +62,8 @@ class MemoryEstimator:
         recipe = settings.recipe
 
         # 파라미터 수 추정
-        param_count = self._estimate_param_count(recipe.model.get("_component_", "unknown"))
+        model_name = self._extract_model_name(recipe.model)
+        param_count = self._estimate_param_count(model_name)
         bytes_per_param = self._bytes_per_param(recipe.training.precision)
 
         # 1. 모델 메모리
@@ -120,6 +122,11 @@ class MemoryEstimator:
         }
 
     # ── Internal ──
+
+    @staticmethod
+    def _extract_model_name(model_config: ModelComponentSpec) -> str:
+        """메모리 추정에 사용할 모델 식별자를 추출한다."""
+        return model_config.component or model_config.pretrained or "unknown"
 
     @staticmethod
     def _estimate_param_count(class_path: str) -> int:
@@ -193,12 +200,11 @@ class MemoryEstimator:
         return precision_map.get(precision, 4)
 
     @staticmethod
-    def _extract_optimizer_name(optimizer_config: dict[str, Any] | None) -> str:
+    def _extract_optimizer_name(optimizer_config: ComponentSpec | None) -> str:
         """옵티마이저 설정에서 이름을 추출한다."""
         if optimizer_config is None:
             return "adamw"  # safe default
-        component = optimizer_config.get("_component_", "")
-        name = component.rsplit(".", 1)[-1].lower()
+        name = optimizer_config.component.rsplit(".", 1)[-1].lower()
         return name
 
     @staticmethod

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -15,8 +19,22 @@ from mdp.cli.init import (
     init_project,
 )
 from mdp.cli.list_cmd import run_list
+from mdp.settings.components import ComponentSpec, ModelComponentSpec
 from mdp.settings.schema import Recipe
 from mdp.task_taxonomy import TASK_PRESETS
+
+
+def _run_mdp(args: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(Path.cwd())
+    return subprocess.run(
+        [sys.executable, "-m", "mdp", *args],
+        cwd=cwd or Path.cwd(),
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
 
 
 def _catalog_task_model_cases() -> list[tuple[str, str]]:
@@ -37,6 +55,8 @@ def _catalog_task_model_cases() -> list[tuple[str, str]]:
 
 def test_init_project(tmp_path: Path, monkeypatch) -> None:
     """init_project creates the expected directory structure."""
+    from mdp.settings.loader import SettingsLoader
+
     monkeypatch.chdir(tmp_path)
     project_name = "my-test-project"
 
@@ -56,6 +76,30 @@ def test_init_project(tmp_path: Path, monkeypatch) -> None:
     assert (root / "configs" / "local.yaml").stat().st_size > 0
     assert (root / "recipes" / "example.yaml").stat().st_size > 0
 
+    settings = SettingsLoader().load_estimation_settings(str(root / "recipes" / "example.yaml"))
+    assert settings.recipe.name
+    assert settings.recipe.task
+    assert settings.recipe.model.component is not None
+    assert settings.recipe.model.pretrained is None
+    assert settings.recipe.data.dataset.component
+    assert settings.recipe.data.collator.component
+
+
+def test_cli_entry_init_json_creates_project(tmp_path: Path) -> None:
+    result = _run_mdp(
+        ["--format", "json", "init", "entry-project", "--task", "image_classification", "--model", "resnet18"],
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    assert payload["command"] == "init"
+    assert payload["project_name"] == "entry-project"
+    assert payload["task"] == "image_classification"
+    assert payload["model"] == "resnet18"
+    assert (tmp_path / "entry-project" / "recipes" / "example.yaml").is_file()
+
 
 @pytest.mark.parametrize(
     ("task", "model_name"),
@@ -69,6 +113,18 @@ def test_init_project_catalog_matrix_parseable(
     model_name: str,
 ) -> None:
     """Every catalog-backed task/model init output is parseable as a Recipe."""
+    expected_collators = {
+        "image_classification": "VisionCollator",
+        "object_detection": "VisionCollator",
+        "semantic_segmentation": "VisionCollator",
+        "text_classification": "ClassificationCollator",
+        "token_classification": "TokenClassificationCollator",
+        "text_generation": "CausalLMCollator",
+        "seq2seq": "Seq2SeqCollator",
+    }
+    expected_datasets = {
+        "image_classification": "ImageClassificationDataset",
+    }
     monkeypatch.chdir(tmp_path)
     project_name = f"proj-{task}-{model_name}".replace(".", "-")
 
@@ -80,9 +136,16 @@ def test_init_project_catalog_matrix_parseable(
 
     assert recipe.task == task
     assert recipe.name
-    assert isinstance(recipe.model, dict)
-    assert isinstance(recipe.data.dataset, dict)
-    assert isinstance(recipe.data.collator, dict)
+    assert isinstance(recipe.model, ModelComponentSpec)
+    assert isinstance(recipe.data.dataset, ComponentSpec)
+    assert isinstance(recipe.data.collator, ComponentSpec)
+
+    expected_collator = expected_collators.get(task)
+    if expected_collator is not None:
+        assert recipe.data.collator.component.rsplit(".", 1)[-1] == expected_collator
+    expected_dataset = expected_datasets.get(task)
+    if expected_dataset is not None:
+        assert recipe.data.dataset.component.rsplit(".", 1)[-1] == expected_dataset
 
 
 @pytest.mark.parametrize(
@@ -96,7 +159,7 @@ def test_init_project_catalog_model_routing_contract(
     task: str,
     model_name: str,
 ) -> None:
-    """Generated model blocks keep URI routing compatible with Factory."""
+    """Generated model blocks keep URI routing compatible with AssemblyMaterializer."""
     monkeypatch.chdir(tmp_path)
     project_name = f"route-{task}-{model_name}".replace(".", "-")
 
@@ -151,6 +214,36 @@ def test_list_models(capsys) -> None:
     """run_list('models') executes without error."""
     run_list("models")
     # No assertion on output content -- just verify it doesn't crash
+
+
+def test_cli_entry_version_json() -> None:
+    result = _run_mdp(["--format", "json", "version"])
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    assert payload["command"] == "version"
+    assert isinstance(payload["version"], str)
+
+
+@pytest.mark.parametrize(
+    ("target", "expected_key"),
+    [
+        ("tasks", "tasks"),
+        ("models", "models"),
+        ("callbacks", "callbacks"),
+        ("strategies", "strategies"),
+    ],
+)
+def test_cli_entry_list_discovery_json(target: str, expected_key: str) -> None:
+    result = _run_mdp(["--format", "json", "list", target])
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "success"
+    assert payload["command"] == "list"
+    assert isinstance(payload[expected_key], list)
+    assert payload[expected_key]
 
 
 def test_list_tasks(capsys) -> None:

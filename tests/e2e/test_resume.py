@@ -10,6 +10,7 @@ import json
 
 import torch
 
+from mdp.settings.components import ComponentSpec
 from mdp.settings.schema import Settings
 from tests.e2e.conftest import make_test_settings
 from mdp.training.callbacks.base import BaseCallback
@@ -146,11 +147,14 @@ class TestResume:
 
         # Phase 1: CosineAnnealingLR로 3 에폭 학습 (lr이 감소)
         settings1 = _make_settings(epochs=3, checkpoint_dir=str(ckpt_dir))
-        settings1.recipe.scheduler = {
-            "_component_": "torch.optim.lr_scheduler.CosineAnnealingLR",
-            "T_max": 5,
-            "interval": "epoch",
-        }
+        settings1.recipe.scheduler = ComponentSpec.from_yaml_dict(
+            {
+                "_component_": "torch.optim.lr_scheduler.CosineAnnealingLR",
+                "T_max": 5,
+                "interval": "epoch",
+            },
+            path="recipe.scheduler",
+        )
         model1 = TinyVisionModel(num_classes=2, hidden_dim=16)
 
         batches = make_vision_batches(3, 4, 2, 8)
@@ -286,7 +290,7 @@ class TestResume:
         trainer2.amp_enabled = False
         trainer2.callbacks.append(BatchCounter())
 
-        result2 = trainer2.train()
+        trainer2.train()
 
         # The first epoch after resume should have skipped `saved_step_in_epoch` batches.
         # Total batches in first resumed epoch = num_batches - saved_step_in_epoch

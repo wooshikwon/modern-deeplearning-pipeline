@@ -56,7 +56,12 @@ recipe_defaults:
         batch_size: 1
         num_workers: 4
         drop_last: true
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attn.q, attn.v]
+      r: 8
+      alpha: 16
+      task_type: CAUSAL_LM
     training:
       epochs: 3
       precision: bf16

@@ -369,7 +369,7 @@ class TestHiddenOnlyPath:
         monkeypatch.setattr(rl_trainer_module, "extract_hidden_states_and_head", _grad_extract)
         monkeypatch.setattr(rl_trainer_module, "_features_forward_model", lambda *a, **kw: {})
 
-        stub = SimpleNamespace(
+        SimpleNamespace(
             algorithm=algo,
             trainable={"policy": object()},
             frozen={},

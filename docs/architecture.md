@@ -13,10 +13,10 @@ mdp/
 │   └── interventions/    # ResidualAdd, LogitBias
 ├── cli/                  # CLI entry points (typer)
 ├── data/                 # Data pipeline (Dataset, DataLoader, transforms)
-├── factory/              # Component assembly planning/materialization
-│   ├── factory.py        # Factory compatibility facade (caching + delegation)
+├── materializer/              # Component assembly planning/materialization
+│   ├── materializer.py        # Stable AssemblyMaterializer facade (caching + delegation)
 │   ├── assembly_plan.py  # AssemblyPlan graph
-│   ├── planner.py        # SettingsPlan -> AssemblyPlan
+│   ├── planner.py        # RunPlan -> AssemblyPlan
 │   └── materializer.py   # AssemblyPlan -> concrete training bundles/components
 ├── models/               # Model layer
 │   ├── base.py           # BaseModel ABC
@@ -42,17 +42,18 @@ Training execution is explicit across three planning/execution objects:
 
 ```
 Raw YAML / artifact snapshot / CLI args
-  -> SettingsPlan
+  -> RunPlan
   -> AssemblyPlan
   -> ExecutionEngine
 ```
 
-`SettingsPlanner` owns environment substitution, override application,
-validation scope, callback config loading, and command intent. The compatibility
-methods on `SettingsFactory` still return `Settings`, but internally they pass
-through the planner and return `plan.settings`.
+`RunPlanner` owns environment substitution, override application,
+validation scope, callback config loading, and command intent. `SettingsLoader`
+is the stable path-oriented facade over this planner: public methods such as
+`for_training()` return `plan.settings`, while `RunPlan` remains the
+runtime source of truth.
 
-`AssemblyPlanner` converts the validated `SettingsPlan` into an
+`AssemblyPlanner` converts the validated `RunPlan` into an
 `AssemblyPlan`, a serializable graph of model, data, strategy, callback, and
 trainer nodes. `AssemblyPlan` does not hold live model, optimizer, dataloader,
 or callback instances.
@@ -86,7 +87,7 @@ training/
 ├── trainer.py          # Trainer(BaseTrainer)  — SFT epoch loop
 ├── rl_trainer.py       # RLTrainer(BaseTrainer) — RL step loop
 │
-├── _base.py            # BaseTrainer(ABC) — shared lifecycle + observability shim
+├── _base.py            # BaseTrainer(ABC) — shared lifecycle + observability wrappers
 ├── _checkpoint.py      # Checkpoint I/O free functions
 ├── _features.py        # Feature extractor dispatcher free functions
 │
@@ -105,7 +106,7 @@ training/
 `class BaseTrainer(ABC)` is the common abstract base for `Trainer` and `RLTrainer`. It consolidates lifecycle infrastructure that was previously duplicated in both trainers.
 
 **Responsibilities:**
-- Common shim methods: `_fire`, `_move_to_device`, `_should_stop`, `_estimate_total_steps`
+- Common wrapper methods: `_fire`, `_move_to_device`, `_should_stop`, `_estimate_total_steps`
 - OOM/memory_history wrappers: `_dump_oom_summary`, `_maybe_start_memory_history`, `_maybe_dump_memory_snapshot` (delegate to `_progress_log` free functions)
 - System logging wrappers: `_fmt_eta`, `_log_step_progress`, `_log_run_banner` (LR lookup delegated to abstract `_optimizer_for_progress_log()`)
 - MLflow lifecycle wrappers: `_start_mlflow_run`, `_log_mlflow_params`, `_log_mlflow_summary`, `_peak_memory_summary_extra` (subclasses implement `_collect_mlflow_params()`)
@@ -130,7 +131,9 @@ Stateless free functions for extracting `(hidden_states, head_weight)` from mode
 | `extract_logits(model_output)` | Logits extraction from model output |
 | `forward_model(model, batch, role)` | Standardized forward pass with role-keyed output |
 
-`RLTrainer` calls these functions directly and keeps thin bound-method shims for backward compatibility with tests.
+`RLTrainer` calls these functions directly. Thin bound-method wrappers remain as
+part of the stable low-level trainer surface for callers that exercise trainer
+internals directly.
 
 ### `_checkpoint.py` — Checkpoint I/O
 
@@ -139,13 +142,19 @@ Manifest-aware checkpoint I/O for training state. Separated from the compute lay
 | Function | Purpose |
 |---|---|
 | `CheckpointManager.save(context, slots, strategy, scaler)` | Write manifest, model weights, optimizer/scheduler/scaler, and trainer state |
-| `CheckpointManager.load(ckpt_dir)` | Read manifest checkpoints or legacy manifestless checkpoints |
-| `save_checkpoint(state, ckpt_dir)` / `load_checkpoint(ckpt_dir)` | Legacy wrapper API retained for existing trainer call sites |
+| `CheckpointManager.load(ckpt_dir)` | Read manifest checkpoints; bounded reader for manifestless checkpoints |
+| `save_checkpoint(state, ckpt_dir)` / `load_checkpoint(ckpt_dir)` | Stable trainer-facing wrapper API over `CheckpointManager` |
 | `gather_fsdp_state_dict(model)` | Collect full state dict via all-rank FSDP collective |
 | `export_model_artifact(model, metadata, mlflow_run, ...)` | Register policy/SFT artifact with MLflow |
 | `find_best_checkpoint(strategy_config)` | Resolve best/latest symlink to checkpoint path |
 
-New checkpoints contain `manifest.json` with `layout_version`, checkpoint kind, trainer state file, optional recipe/config snapshots, scaler path, and per-model records. Each model record declares role, weight format, relative path, trainable flag, and optional optimizer/scheduler files. Manifestless directories are treated as legacy checkpoints and are loaded best-effort from `trainer_state.json` and `scaler.pt`.
+Written checkpoints contain `manifest.json` with `layout_version`, checkpoint
+kind, trainer state file, optional recipe/config snapshots, scaler path, and
+per-model records. Each model record declares role, weight format, relative
+path, trainable flag, and optional optimizer/scheduler files. Manifestless
+directories are a read-only compatibility boundary: `CheckpointManager.load()`
+can read them best-effort from `trainer_state.json` and `scaler.pt`, while
+checkpoint writes use the manifest layout.
 
 Strategies expose `checkpoint_capability`. DDP and FSDP opt in to manager-owned full-state checkpointing; FSDP also declares that save is an all-rank collective. The default strategy capability is unsupported, so DeepSpeed is intentionally fail-fast in the current Trainer/RLTrainer runtime. Its engine owns backward, optimizer step, ZeRO shards, and checkpoint semantics, so DeepSpeed ZeRO checkpoints must not be documented or restored as normal DDP/FSDP checkpoints until a separate engine-contract spec implements that path.
 
@@ -164,7 +173,7 @@ Renamed from `_logging_helpers.py` (spec-training-restructure U2) to distinguish
 ```
 BaseTrainer(ABC)
 ├── _base.py
-│   ├── shim methods (delegating to _progress_log + _mlflow_logging)
+│   ├── wrapper methods (delegating to _progress_log + _mlflow_logging)
 │   └── abstract hooks (_checkpoint_state, _collect_mlflow_params, _optimizer_for_progress_log)
 │
 ├── Trainer(BaseTrainer)          — trainer.py
@@ -185,13 +194,13 @@ BaseTrainer(ABC)
 ```
 Tier 3 (Orchestrator)
   CLI commands, runtime launcher/worker, and ExecutionEngine
-  Load SettingsPlan, launch workers, and dispatch training bundles or serving paths
+  Load RunPlan, launch workers, and dispatch training bundles or serving paths
   ↓
 Tier 2 (Composite)
-  SettingsPlanner, AssemblyPlanner, AssemblyMaterializer
-  Factory        — compatibility component creation facade, singleton caching
+  RunPlanner, AssemblyPlanner, AssemblyMaterializer
+  AssemblyMaterializer        — stable component creation facade, singleton caching
   Trainer/RLTrainer — training loop execution
-  (Factory and Trainer are both Tier 2 but do not create each other)
+  (AssemblyMaterializer and Trainer are both Tier 2 but do not create each other)
   ↓
 Tier 1 (Atomic)
   Dataset, Transform, Optimizer, Scheduler, Loss, Head, Callback, Evaluator
@@ -205,7 +214,11 @@ must not accidentally depend on the training execution engine.
 
 ## Key Design Decisions
 
-**`_component_` pattern**: All pluggable components use `_component_: <alias or full.path>` in YAML. `ComponentResolver` dynamically imports and instantiates. No registry classes needed.
+**`_component_` pattern**: Pluggable slots use `_component_: <alias or
+full.path>` in YAML. MDP-owned settings stay in closed schema blocks, and
+component-specific kwargs remain open only inside typed component envelopes.
+Runtime code consumes typed specs and materializer plan specs rather than raw
+`_component_` dictionaries.
 
 **Recipe / Config / Callbacks separation**: Recipe = what to train, Config = where to run it, Callbacks = side-channel observation/intervention. `--callbacks <yaml>` is the only callback injection path; `Recipe` has no `callbacks:` field.
 

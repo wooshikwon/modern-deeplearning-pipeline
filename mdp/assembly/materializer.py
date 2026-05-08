@@ -1,21 +1,22 @@
-"""AssemblyPlan materialization into concrete factory components."""
+"""AssemblyPlan materialization into concrete runtime components."""
 
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from enum import Enum
 from typing import Any
 
 import torch.nn as nn
 
-from mdp.factory.assembly_plan import AssemblyPlan
-from mdp.factory.bundles import (
+from mdp.assembly.assembly_plan import AssemblyPlan
+from mdp.assembly.bundles import (
     RLTrainingBundle,
     SFTTrainingBundle,
     build_rl_training_bundle,
     build_sft_training_bundle,
 )
-from mdp.factory.specs import ComponentSpec, DataNode, ModelNode
+from mdp.assembly.specs import ComponentSpec, DataNode, ModelNode
 from mdp.settings.resolver import ComponentResolver
 from mdp.training.callbacks.base import BaseCallback
 
@@ -30,11 +31,11 @@ class _ModelLoadRoute(Enum):
 
 
 def _decide_model_load_route(
-    model_config: dict[str, Any],
-    adapter_config: dict[str, Any] | None,
+    model_config: ComponentSpec,
+    adapter_config: ComponentSpec | None,
 ) -> _ModelLoadRoute:
-    component = model_config.get("_component_")
-    pretrained = model_config.get("pretrained")
+    component = model_config.resolved_component or model_config.component
+    pretrained = model_config.pretrained
 
     if adapter_config is not None and _is_qlora_adapter_config(adapter_config):
         return _ModelLoadRoute.QLORA
@@ -44,11 +45,11 @@ def _decide_model_load_route(
         return _ModelLoadRoute.COMPONENT_CONSTRUCTOR
     if pretrained is not None:
         return _ModelLoadRoute.PRETRAINED_RESOLVER
-    raise ValueError("model에 _component_ 또는 pretrained가 필요합니다")
+    raise ValueError("model에 component 또는 pretrained가 필요합니다")
 
 
-def _is_qlora_adapter_config(adapter_config: dict[str, Any]) -> bool:
-    component = adapter_config.get("_component_", "")
+def _is_qlora_adapter_config(adapter_config: ComponentSpec) -> bool:
+    component = adapter_config.resolved_component or adapter_config.component or ""
     return component in {"QLoRA", "mdp.models.adapters.qlora.apply_qlora"}
 
 
@@ -72,7 +73,7 @@ class AssemblyMaterializer:
     def settings(self):
         if self.assembly_plan is None:
             raise ValueError("AssemblyMaterializer에는 AssemblyPlan이 필요합니다")
-        return self.assembly_plan.settings_plan.settings
+        return self.assembly_plan.run_plan.settings
 
     def _get_or_create(self, key: str, creator):
         cached = self._cache.get(key, self._SENTINEL)
@@ -84,7 +85,7 @@ class AssemblyMaterializer:
         return instance
 
     def materialize_policy_model(self, skip_base_check: bool = False) -> nn.Module:
-        """Materialize the SFT policy node while preserving Factory cache semantics."""
+        """Materialize the SFT policy node while preserving cache semantics."""
         def _create() -> nn.Module:
             policy = self._model_node("policy")
             return self.materialize_model_node(policy, skip_base_check=skip_base_check)
@@ -179,9 +180,9 @@ class AssemblyMaterializer:
     ) -> nn.Module:
         """Materialize a single ModelNode."""
         return self._assemble_model(
-            model_config=node.model.to_dict(),
-            head_config=self._optional_dict(node.head),
-            adapter_config=self._optional_dict(node.adapter),
+            model_config=node.model,
+            head_config=node.head,
+            adapter_config=node.adapter,
             skip_base_check=skip_base_check,
         )
 
@@ -190,11 +191,11 @@ class AssemblyMaterializer:
         from mdp.data.dataloader import create_dataloaders
 
         return create_dataloaders(
-            dataset_config=node.dataset.to_dict(),
-            collator_config=node.collator.to_dict(),
+            dataset_config=node.dataset,
+            collator_config=node.collator,
             dataloader_config=dict(node.dataloader_config),
-            val_dataset_config=self._optional_dict(node.val_dataset),
-            sampler_config=self._optional_dict(node.sampler),
+            val_dataset_config=node.val_dataset,
+            sampler_config=node.sampler,
             distributed=node.distributed_intent,
         )
 
@@ -211,18 +212,14 @@ class AssemblyMaterializer:
             raise ValueError("AssemblyMaterializer에는 AssemblyPlan이 필요합니다")
         return self.assembly_plan.data
 
-    @staticmethod
-    def _optional_dict(spec: ComponentSpec | None) -> dict[str, Any] | None:
-        return spec.to_dict() if spec is not None else None
-
     def _assemble_model(
         self,
-        model_config: dict[str, Any],
-        head_config: dict[str, Any] | None = None,
-        adapter_config: dict[str, Any] | None = None,
+        model_config: ComponentSpec,
+        head_config: ComponentSpec | None = None,
+        adapter_config: ComponentSpec | None = None,
         skip_base_check: bool = False,
     ) -> nn.Module:
-        """Assemble a model from model/head/adapter config dicts."""
+        """Assemble a model from model/head/adapter component specs."""
         route = _decide_model_load_route(model_config, adapter_config)
 
         if route is _ModelLoadRoute.QLORA:
@@ -245,12 +242,16 @@ class AssemblyMaterializer:
                 "MoE 모델 감지: %s experts, top-%s",
                 moe_info.get("num_experts", "?"),
                 moe_info.get("top_k", "?"),
-            )
+        )
 
         if head_config is not None:
-            hc = dict(head_config)
-            target_attr = hc.pop("_target_attr", None)
-            head = self.resolver.resolve(hc)
+            target_attr = head_config.kwargs.get("_target_attr")
+            head_kwargs = {
+                key: value
+                for key, value in head_config.kwargs.items()
+                if key != "_target_attr"
+            }
+            head = self.resolver.resolve(replace(head_config, kwargs=head_kwargs))
             self._attach_head(model, head, target_attr)
 
         from mdp.models.base import BaseModel
@@ -274,14 +275,17 @@ class AssemblyMaterializer:
     def _resolve_semantic(
         self,
         model: nn.Module,
-        head_config: dict[str, Any] | None,
-        adapter_config: dict[str, Any] | None,
-    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        head_config: ComponentSpec | None,
+        adapter_config: ComponentSpec | None,
+    ) -> tuple[ComponentSpec | None, ComponentSpec | None]:
         needs_resolve = (
-            (head_config is not None and "slot" in head_config)
+            (head_config is not None and "slot" in head_config.kwargs)
             or (
                 adapter_config is not None
-                and ("target" in adapter_config or "save" in adapter_config)
+                and (
+                    "target" in adapter_config.kwargs
+                    or "save" in adapter_config.kwargs
+                )
             )
         )
         if not needs_resolve:
@@ -292,18 +296,19 @@ class AssemblyMaterializer:
         )
         family = detect_family(model)
 
-        if head_config is not None and "slot" in head_config:
-            head_config = dict(head_config)
-            if "_target_attr" in head_config:
+        if head_config is not None and "slot" in head_config.kwargs:
+            head_kwargs = dict(head_config.kwargs)
+            if "_target_attr" in head_kwargs:
                 raise ValueError(
                     "head 설정에 'slot'과 '_target_attr'을 동시에 지정할 수 없습니다. "
                     "semantic 이름('slot')과 raw 이름('_target_attr') 중 하나만 사용하세요."
                 )
-            slot = head_config.pop("slot")
-            head_config["_target_attr"] = resolve_head_slot(slot, family)
+            slot = head_kwargs.pop("slot")
+            head_kwargs["_target_attr"] = resolve_head_slot(slot, family)
+            head_config = replace(head_config, kwargs=head_kwargs)
 
         if adapter_config is not None:
-            ac = dict(adapter_config)
+            ac = dict(adapter_config.kwargs)
             target = ac.pop("target", None)
             if target is not None:
                 if "target_modules" in ac:
@@ -320,25 +325,25 @@ class AssemblyMaterializer:
                         "semantic 이름('save')과 raw 이름('modules_to_save') 중 하나만 사용하세요."
                     )
                 ac["modules_to_save"] = resolve_save_modules(save, family)
-            adapter_config = ac
+            adapter_config = replace(adapter_config, kwargs=ac)
 
         return head_config, adapter_config
 
     def _resolve_semantic_from_config(
-        self, model_config: dict[str, Any], adapter_config: dict[str, Any],
-    ) -> dict[str, Any]:
-        ac = dict(adapter_config)
+        self, model_config: ComponentSpec, adapter_config: ComponentSpec,
+    ) -> ComponentSpec:
+        ac = dict(adapter_config.kwargs)
         target = ac.pop("target", None)
         save = ac.pop("save", None)
 
         if target is None and save is None:
-            return ac
+            return replace(adapter_config, kwargs=ac)
 
         from mdp.models.family_routing import (
             detect_family_from_pretrained_uri, resolve_targets, resolve_save_modules,
         )
-        pretrained = model_config.get("pretrained")
-        component = model_config.get("_component_")
+        pretrained = model_config.pretrained
+        component = model_config.resolved_component or model_config.component
         family = detect_family_from_pretrained_uri(pretrained, component)
 
         if target is not None:
@@ -356,22 +361,20 @@ class AssemblyMaterializer:
                 )
             ac["modules_to_save"] = resolve_save_modules(save, family)
 
-        return ac
+        return replace(adapter_config, kwargs=ac)
 
     def _load_pretrained(
         self,
-        model_config: dict[str, Any],
+        model_config: ComponentSpec,
         route: _ModelLoadRoute | None = None,
     ) -> nn.Module:
         from mdp.models.pretrained import PretrainedResolver
 
-        config = dict(model_config)
-        component = config.pop("_component_", None)
-        pretrained = config.pop("pretrained", None)
-        torch_dtype_str = config.pop("torch_dtype", None)
-        attn_impl = config.pop("attn_implementation", None)
-
-        kwargs = config
+        component = model_config.resolved_component or model_config.component
+        pretrained = model_config.pretrained
+        kwargs = dict(model_config.kwargs)
+        torch_dtype_str = kwargs.pop("torch_dtype", None)
+        attn_impl = kwargs.pop("attn_implementation", None)
 
         if torch_dtype_str is not None:
             import torch
@@ -385,9 +388,9 @@ class AssemblyMaterializer:
             _ModelLoadRoute.COMPONENT_FROM_PRETRAINED,
             _ModelLoadRoute.COMPONENT_CONSTRUCTOR,
         }:
-            klass = self.resolver.import_class(
-                self.resolver._resolve_alias(component)
-            )
+            if component is None:
+                raise ValueError("component model route requires component")
+            klass = self.resolver.import_class(self.resolver._resolve_alias(component))
             if (
                 route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED
                 and hasattr(klass, "from_pretrained")
@@ -403,8 +406,10 @@ class AssemblyMaterializer:
 
         raise ValueError(f"지원하지 않는 모델 로딩 경로입니다: {route.value}")
 
-    def _build_qlora_model(self, model_config: dict[str, Any], adapter_config: dict[str, Any]) -> nn.Module:
-        uri = model_config.get("pretrained")
+    def _build_qlora_model(
+        self, model_config: ComponentSpec, adapter_config: ComponentSpec
+    ) -> nn.Module:
+        uri = model_config.pretrained
         if uri is None:
             raise ValueError("QLoRA에는 pretrained 모델 URI가 필요합니다")
 
@@ -413,16 +418,19 @@ class AssemblyMaterializer:
         else:
             model_name = uri
 
-        ac = dict(adapter_config)
-        ac.pop("_component_", None)
+        ac = dict(adapter_config.kwargs)
         ac["model_name_or_path"] = model_name
-        ac["class_path"] = model_config.get("_component_", "transformers.AutoModelForCausalLM")
+        ac["class_path"] = (
+            model_config.resolved_component
+            or model_config.component
+            or "transformers.AutoModelForCausalLM"
+        )
 
-        torch_dtype_str = model_config.get("torch_dtype")
+        torch_dtype_str = model_config.kwargs.get("torch_dtype")
         if torch_dtype_str is not None:
             import torch
             ac["torch_dtype"] = getattr(torch, torch_dtype_str)
-        attn_impl = model_config.get("attn_implementation")
+        attn_impl = model_config.kwargs.get("attn_implementation")
         if attn_impl is not None:
             ac["attn_implementation"] = attn_impl
 

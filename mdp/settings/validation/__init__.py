@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from mdp.settings.components import ComponentSpec
+
 
 @dataclass
 class ValidationResult:
@@ -16,6 +18,8 @@ class ValidationResult:
 
 def is_qlora(adapter: Any) -> bool:
     """adapter가 QLoRA인지 판별한다."""
+    if isinstance(adapter, ComponentSpec):
+        return adapter.component in ("QLoRA", "mdp.models.adapters.qlora.apply_qlora")
     if isinstance(adapter, dict):
         component = adapter.get("_component_", "")
         return component in ("QLoRA", "mdp.models.adapters.qlora.apply_qlora")

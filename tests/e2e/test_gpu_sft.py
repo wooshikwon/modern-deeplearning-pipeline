@@ -100,7 +100,7 @@ def test_sft_causal_lm_single_gpu(tmp_path, request, smollm2, wikitext_tiny):
 @pytest.mark.gpu
 @pytest.mark.fixtures
 def test_sft_gpt2_single_gpu(tmp_path, request, gpt2, wikitext_tiny):
-    """Same SFT path with a GPT2 architecture — exercises factory family routing."""
+    """Same SFT path with a GPT2 architecture — exercises materializer family routing."""
     from mdp.cli.train import run_train
 
     run_dir = e2e_artifact_dir(tmp_path, request.node.name)

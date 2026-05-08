@@ -175,9 +175,8 @@ def test_cli_entries_call_apply_liger_patches():
         "train": mdp_root / "cli" / "train.py",
         "rl_train": mdp_root / "cli" / "rl_train.py",
     }
-    delegated_targets = {
-        "_torchrun_entry": mdp_root / "cli" / "_torchrun_entry.py",
-    }
+    runtime_training = mdp_root / "runtime" / "training.py"
+    worker_adapter = mdp_root / "cli" / "_torchrun_entry.py"
 
     for name, path in direct_import_targets.items():
         text = path.read_text()
@@ -188,8 +187,12 @@ def test_cli_entries_call_apply_liger_patches():
             f"{name} ({path}) does not import from mdp._liger_patch"
         )
 
-    for name, path in delegated_targets.items():
-        text = path.read_text()
-        assert "apply_liger_patches_for_training" in text, (
-            f"{name} ({path}) does not delegate Liger patch application"
-        )
+    runtime_text = runtime_training.read_text()
+    assert "apply_liger_patches_for_training" in runtime_text, (
+        f"runtime.training ({runtime_training}) does not apply Liger patches"
+    )
+
+    adapter_text = worker_adapter.read_text()
+    assert "run_training(run_plan)" in adapter_text, (
+        f"_torchrun_entry ({worker_adapter}) does not delegate to runtime training"
+    )

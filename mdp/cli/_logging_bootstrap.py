@@ -19,7 +19,7 @@ spec-system-logging-cleanup §U2 의 소비 지점을 하나의 함수로 집약
 - ``mdp/cli/_torchrun_entry.py::main()`` — argparse · settings 로드 전에 env-only,
   settings 로드 후 최종. HF ``from_pretrained`` 첫 호출 이전에 반드시 완료.
 - ``mdp/cli/train.py::run_train()`` / ``mdp/cli/rl_train.py::run_rl_train()`` —
-  settings 로드 직후, Factory 호출 · apply_liger_patches 전후. Liger patch 는
+  settings 로드 직후, AssemblyMaterializer 호출 · apply_liger_patches 전후. Liger patch 는
   `setup_logging` 과 독립이므로 순서는 두 가지 모두 허용되지만, 본 helper 는
   "settings 가 있으면 즉시 호출" 정책으로 통일한다.
 """

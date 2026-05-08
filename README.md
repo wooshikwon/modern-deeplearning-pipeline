@@ -68,8 +68,9 @@ mdp serve --run-id <id> --port 8000
 
 ## Key Features
 
-- **`_component_` 패턴**: 모든 컴포넌트(모델, 어댑터, 옵티마이저, 콜백, sampler 등)를 YAML에서 Python import path로 지정. 레지스트리 없이 커스텀 컴포넌트 즉시 사용
-- **Length-bucketed sampling**: 가변 길이 LM 학습에서 `data.sampler`로 `LengthGroupedBatchSampler`(single-GPU) 또는 `DistributedLengthGroupedBatchSampler`(DDP/FSDP)를 선택하면 batch 내 padding 토큰을 거의 제거 (LLaMA-3 측정 53%→0.2%). 미지정 시 기존 동작 100% 보존
+- **Typed runtime skeleton**: 학습은 `RunPlan -> AssemblyPlan -> ExecutionEngine` 경로로 실행된다. CLI는 설정과 launch를 정리하고, assembly/materialization 계층이 component graph를 소유하며, runtime engine이 `Trainer`/`RLTrainer`로 dispatch한다.
+- **`_component_` 패턴**: 모델, 어댑터, 옵티마이저, 콜백, sampler 같은 pluggable slot은 YAML에서 `_component_` envelope로 지정한다. `training`, `data.dataloader`, `metadata`, `monitoring`, Config 블록처럼 MDP가 소유한 설정 영역은 closed schema로 검증한다.
+- **Length-bucketed sampling**: 가변 길이 LM 학습에서 `data.sampler`로 `LengthGroupedBatchSampler`(single-GPU) 또는 `DistributedLengthGroupedBatchSampler`(DDP/FSDP)를 선택하면 batch 내 padding 토큰을 거의 제거 (LLaMA-3 측정 53%→0.2%). 미지정 시 일반 dataloader sampler 경로를 사용한다.
 - **Recipe/Config 분리**: 실험 정의와 인프라 설정을 분리하여 동일 실험을 다른 환경에서 재현
 - **분산 학습**: DDP, FSDP 지원. DeepSpeed ZeRO-2/3는 현재 fail-fast로 차단되며 별도 engine-contract 구현 후 활성화 예정
 - **RL Alignment**: DPO, GRPO, PPO를 멀티 모델(policy, reference, value, reward)로 지원

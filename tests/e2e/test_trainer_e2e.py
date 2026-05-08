@@ -9,11 +9,10 @@
 
 from __future__ import annotations
 
-from typing import Any
 
 import torch
 
-from mdp.factory.bundles import build_sft_training_bundle
+from mdp.assembly.bundles import build_sft_training_bundle
 from mdp.settings.schema import Settings
 from mdp.training.trainer import Trainer
 from tests.e2e.conftest import make_test_settings
@@ -64,7 +63,7 @@ class TestVisionTrainer:
         trainer.device = torch.device("cpu")
         trainer.amp_enabled = False
 
-        metrics = trainer.train()
+        trainer.train()
         # Trainer completes without error; global_step > 0
         assert trainer.global_step > 0
 
@@ -88,7 +87,7 @@ class TestLanguageTrainer:
         trainer.device = torch.device("cpu")
         trainer.amp_enabled = False
 
-        metrics = trainer.train()
+        trainer.train()
         assert trainer.global_step == 5 * 3  # 5 batches * 3 epochs, grad_accum=1
 
     def test_language_trainer_grad_accum(self) -> None:
@@ -107,7 +106,7 @@ class TestLanguageTrainer:
         trainer.device = torch.device("cpu")
         trainer.amp_enabled = False
 
-        metrics = trainer.train()
+        trainer.train()
         # 4 batches per epoch, grad_accum=2 -> 2 steps per epoch, 2 epochs -> 4 total
         assert trainer.global_step == 4, f"Expected 4, got {trainer.global_step}"
 
@@ -153,7 +152,7 @@ class TestTokenClassTrainer:
         trainer.device = torch.device("cpu")
         trainer.amp_enabled = False
 
-        metrics = trainer.train()
+        trainer.train()
         assert trainer.global_step == 5 * 2
 
 
@@ -178,5 +177,5 @@ class TestMultimodalTrainer:
         trainer.device = torch.device("cpu")
         trainer.amp_enabled = False
 
-        metrics = trainer.train()
+        trainer.train()
         assert trainer.global_step == 5 * 2

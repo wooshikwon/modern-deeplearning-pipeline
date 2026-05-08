@@ -128,7 +128,7 @@ def test_dispatcher_priority_1_override_raising_notimplemented_falls_through() -
 
 def _build_tiny_hf_model():
     """GPT2-like tiny model (v4 매개변수 최소화)."""
-    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers")
     from transformers import GPT2Config, GPT2LMHeadModel
 
     cfg = GPT2Config(
@@ -212,7 +212,7 @@ def test_dispatcher_priority_3_timm_identity_classifier_raises() -> None:
 
 def test_dispatcher_priority_4_torchvision_resnet_shapes() -> None:
     """torchvision ResNet 경로: manual forward + model.fc.weight."""
-    torchvision = pytest.importorskip("torchvision")
+    pytest.importorskip("torchvision")
     from torchvision.models import resnet18
 
     model = resnet18(weights=None)

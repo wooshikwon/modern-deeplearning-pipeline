@@ -52,7 +52,12 @@ recipe_defaults:
         batch_size: 8
         num_workers: 4
         drop_last: true
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attn.q, attn.v]
+      r: 8
+      alpha: 16
+      task_type: SEQ_2_SEQ_LM
     training:
       epochs: 3
       precision: bf16
@@ -97,7 +102,12 @@ recipe_defaults:
       _component_: SequenceClassificationHead
       hidden_dim: 768
       num_classes: "???"
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attn.q, attn.v]
+      r: 8
+      alpha: 16
+      task_type: SEQ_2_SEQ_LM
     training:
       epochs: 3
       precision: bf16

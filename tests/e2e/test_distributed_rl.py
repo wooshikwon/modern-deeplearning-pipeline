@@ -11,12 +11,15 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 import pytest
+
+_IS_MAC = platform.system() == "Darwin"
 
 
 def _find_free_port() -> int:
@@ -34,11 +37,13 @@ def _run_distributed_worker(worker_name: str, nproc: int = 2) -> list[dict]:
         project_root = str(Path(__file__).resolve().parents[2])
         env = os.environ.copy()
         env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
+        env.setdefault("GLOO_SOCKET_IFNAME", "lo0" if _IS_MAC else "lo")
         result = subprocess.run(
             [
                 sys.executable, "-m", "torch.distributed.run",
-                "--standalone",
+                "--nnodes=1",
                 "--nproc_per_node", str(nproc),
+                "--master_addr", "127.0.0.1",
                 "--master_port", str(port),
                 __file__,
                 "--worker", worker_name,

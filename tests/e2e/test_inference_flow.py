@@ -99,12 +99,14 @@ def test_artifact_to_batch_inference(tmp_path: Path) -> None:
     assert all(p in (0, 1) for p in all_preds)
 
 
-def test_settings_factory_from_artifact(tmp_path: Path) -> None:
-    """SettingsFactory.from_artifact()가 recipe.yaml에서 Settings를 복원하는지."""
-    from mdp.settings.factory import SettingsFactory
+def test_run_plan_builder_from_artifact(tmp_path: Path) -> None:
+    """RunPlanBuilder.artifact()가 recipe.yaml에서 Settings를 복원하는지."""
+    from mdp.settings.run_plan_builder import RunPlanBuilder
 
     artifact_dir = _create_artifact(tmp_path)
-    settings = SettingsFactory().from_artifact(str(artifact_dir))
+    plan = RunPlanBuilder().artifact(str(artifact_dir), command="inference")
+    settings = plan.settings
 
+    assert plan.sources.artifact_dir == artifact_dir
     assert settings.recipe.name == "inference-test"
-    assert settings.recipe.model["_component_"] == "tests.e2e.models.TinyVisionModel"
+    assert settings.recipe.model.component == "tests.e2e.models.TinyVisionModel"

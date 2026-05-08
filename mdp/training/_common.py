@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.amp import GradScaler
 from torch.nn.utils import clip_grad_norm_
 
+from mdp.settings.components import ComponentSpec
 from mdp.settings.schema import Settings
 
 logger = logging.getLogger(__name__)
@@ -109,7 +110,7 @@ def setup_amp(
     return amp_enabled, amp_dtype, scaler
 
 
-def load_callbacks_from_file(path: str) -> list[dict[str, Any]]:
+def load_callbacks_from_file(path: str) -> list[ComponentSpec]:
     """콜백 YAML 파일을 읽어 list[dict] 설정을 반환한다.
 
     파일 형식은 CLI callbacks YAML 형식과 동일:
@@ -127,15 +128,22 @@ def load_callbacks_from_file(path: str) -> list[dict[str, Any]]:
             f"콜백 파일은 리스트여야 합니다 (실제: {type(raw).__name__}). "
             "예: [{_component_: EarlyStopping, patience: 3}]"
         )
+    configs: list[ComponentSpec] = []
     for i, item in enumerate(raw):
-        if not isinstance(item, dict) or "_component_" not in item:
+        if not isinstance(item, dict):
             raise ValueError(
                 f"콜백 항목 [{i}]에 _component_ 키가 필요합니다: {item}"
             )
-    return raw
+        try:
+            configs.append(ComponentSpec.from_yaml_dict(item, path=f"callbacks[{i}]"))
+        except ValueError as exc:
+            raise ValueError(
+                f"콜백 항목 [{i}]에 _component_ 키가 필요합니다: {item}"
+            ) from exc
+    return configs
 
 
-def create_callbacks(configs: list[dict[str, Any]], resolver: Any) -> list:
+def create_callbacks(configs: list[ComponentSpec], resolver: Any) -> list:
     """CLI callbacks YAML 설정에서 콜백 리스트를 생성한다."""
     callbacks = []
     for cfg in configs:
@@ -180,15 +188,50 @@ def create_strategy(settings: Settings, resolver: Any) -> Any:
     dist_config = settings.config.compute.distributed
     if dist_config is None:
         return None
-    if not isinstance(dist_config, dict):
+    if not isinstance(dist_config, dict) and not hasattr(dist_config, "strategy"):
         return None
 
-    strategy_name = dist_config.get("strategy", "auto")
+    strategy_name = (
+        dist_config.strategy
+        if hasattr(dist_config, "strategy")
+        else dist_config.get("strategy", "auto")
+    )
     if strategy_name == "none":
         return None
-    if is_deepspeed_strategy(
-        strategy_name.get("_component_", "") if isinstance(strategy_name, dict) else strategy_name
-    ):
+    if isinstance(strategy_name, ComponentSpec):
+        strategy_spec = strategy_name
+    elif isinstance(strategy_name, dict):
+        strategy_spec = ComponentSpec.from_yaml_dict(
+            strategy_name,
+            path="config.compute.distributed.strategy",
+        )
+    else:
+        strategy_spec = ComponentSpec(
+            component=strategy_name,
+            kwargs={},
+            path="config.compute.distributed.strategy",
+        )
+    strategy_kwargs = (
+        dist_config.strategy_kwargs()
+        if hasattr(dist_config, "strategy_kwargs")
+        else {
+            k: v for k, v in dist_config.items()
+            if k not in ("strategy", "moe")
+        }
+    )
+    duplicate_keys = sorted(set(strategy_spec.kwargs) & set(strategy_kwargs))
+    if duplicate_keys:
+        raise ValueError(
+            "config.compute.distributed strategy kwargs duplicated in strategy "
+            f"block and top-level: {duplicate_keys}"
+        )
+    strategy_spec = ComponentSpec(
+        component=strategy_spec.component,
+        kwargs={**strategy_kwargs, **strategy_spec.kwargs},
+        path="config.compute.distributed.strategy",
+    )
+
+    if is_deepspeed_strategy(strategy_spec.component):
         raise ValueError(
             "DeepSpeed strategy is not supported by the current Trainer/RLTrainer "
             "runtime contract. The engine owns backward/step/checkpoint semantics, "
@@ -196,24 +239,30 @@ def create_strategy(settings: Settings, resolver: Any) -> Any:
             "DeepSpeed engine-contract spec before enabling this path."
         )
 
-    # strategy 값이 이미 _component_ dict이면 직접 resolve
-    if isinstance(strategy_name, dict):
-        return resolver.resolve(strategy_name)
+    # strategy 값이 이미 component block이면 typed envelope로 resolve
+    if isinstance(strategy_name, (dict, ComponentSpec)):
+        return resolver.resolve(strategy_spec)
 
     # 문자열이면 aliases.yaml에서 조회
-    strategy_kwargs = {
-        k: v for k, v in dist_config.items()
-        if k not in ("strategy", "moe")
-    }
-    return resolver.resolve({"_component_": strategy_name, **strategy_kwargs})
+    return resolver.resolve(
+        ComponentSpec(
+            component=strategy_name,
+            kwargs=strategy_kwargs,
+            path="config.compute.distributed.strategy",
+        )
+    )
 
 
 def create_expert_parallel(settings: Settings) -> Any:
     """Create ExpertParallel from distributed.moe config, or return None."""
     dist_config = settings.config.compute.distributed
-    if dist_config is None or not isinstance(dist_config, dict):
+    if dist_config is None:
         return None
-    moe_config = dist_config.get("moe")
+    moe_config = (
+        dist_config.moe
+        if hasattr(dist_config, "moe")
+        else dist_config.get("moe") if isinstance(dist_config, dict) else None
+    )
     if moe_config is None or not moe_config.get("enabled", False):
         return None
 

@@ -4,7 +4,7 @@ Phase 0: RL Trainer kwargs 전달 수정 검증
 Phase 1: FSDP auto_wrap_cls + HYBRID_SHARD 자동 전환 검증
 Phase 2: ExpertParallel process group + expert 분배 + all-to-all dispatch 검증
 Phase 2: CompatValidator MoE 규칙 검증
-Phase 2: Factory MoE 감지 검증
+Phase 2: AssemblyMaterializer MoE 감지 검증
 Phase 3: DeepSpeedStrategy MoE config 주입 검증
 """
 
@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import os
 import platform
-import tempfile
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -261,7 +259,7 @@ def _moe_expert_distribution_worker(rank: int, world_size: int, result_queue) ->
         device = torch.device("cpu")
 
         dist.init_process_group(backend="gloo")
-        wrapped = s.setup(model, device)
+        s.setup(model, device)
 
         expert_range = s._expert_range
         result_queue.put({
@@ -644,30 +642,30 @@ class TestMoEValidation:
 
 
 # =====================================================================
-# Phase 2: Factory MoE 감지
+# Phase 2: AssemblyMaterializer MoE 감지
 # =====================================================================
 
 
-class TestFactoryMoEDetection:
-    """Factory._is_moe_model / _extract_moe_info 검증."""
+class TestAssemblyMaterializerMoEDetection:
+    """AssemblyMaterializer MoE model detection 검증."""
 
     def test_is_moe_model_true(self) -> None:
-        from mdp.factory.factory import Factory
+        from mdp.assembly.materializer import AssemblyMaterializer
 
         model = TinyMoEModel(num_experts=4)
-        assert Factory._is_moe_model(model) is True
+        assert AssemblyMaterializer._is_moe_model(model) is True
 
     def test_is_moe_model_false(self) -> None:
-        from mdp.factory.factory import Factory
+        from mdp.assembly.materializer import AssemblyMaterializer
 
         model = nn.Linear(10, 10)
-        assert Factory._is_moe_model(model) is False
+        assert AssemblyMaterializer._is_moe_model(model) is False
 
     def test_extract_moe_info(self) -> None:
-        from mdp.factory.factory import Factory
+        from mdp.assembly.materializer import AssemblyMaterializer
 
         model = TinyMoEModel(num_experts=8, top_k=2)
-        info = Factory._extract_moe_info(model)
+        info = AssemblyMaterializer._extract_moe_info(model)
         assert info["num_experts"] == 8
         assert info["top_k"] == 2
 

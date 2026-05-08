@@ -14,7 +14,7 @@ spec-system-logging-cleanup §U2 의 Verify 기준:
   않는다. 단 cycle 1 review 1-2 fix 이후: 첫 호출 verbose 결정이 바뀌면 (예:
   1차 env-only False → 2차 settings.verbose=True) 상태 전환이 적용된다.
 
-테스트는 외부 의존(HF·Factory·Settings 파싱)을 피하기 위해 ``setup_logging``
+테스트는 외부 의존(HF·AssemblyMaterializer·Settings 파싱)을 피하기 위해 ``setup_logging``
 을 ``monkeypatch`` 로 스텁하여 "어떤 인자로 호출되었는가" 만 검증한다.
 실제 filter / level 동작은 U1 테스트(``tests/unit/test_logging_setup.py``) 가
 이미 커버한다.
@@ -23,7 +23,10 @@ spec-system-logging-cleanup §U2 의 Verify 기준:
 from __future__ import annotations
 
 import logging
+import json
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -332,22 +335,8 @@ class TestCLIEntryBootstrapWiring:
 
         monkeypatch.setattr(train_mod, "bootstrap_logging", _spy, raising=False)
 
-        # SettingsFactory · apply_liger_patches · 이후 경로는 호출 직전에
-        # 예외를 내서 본 테스트가 bootstrap 호출만 검증하고 종료하도록 한다.
-        def _boom(*a, **kw):
-            raise RuntimeError("stop-here-after-bootstrap")
-
-        # run_train 은 from-import 방식이라 module attr 를 교체해도 로컬
-        # 바인딩에는 영향이 없다. 대신 SettingsFactory 쪽에서 예외를 일으켜
-        # 이후 파이프라인을 차단한다.
-        import mdp.settings.factory as settings_factory
-
-        class _ExplodingFactory:
-            def for_training(self, *a, **kw):
-                raise RuntimeError("stop-here-after-bootstrap")
-
-        monkeypatch.setattr(settings_factory, "SettingsFactory", _ExplodingFactory)
-
+        # Settings loading은 존재하지 않는 YAML 경로에서 실패한다. 이 테스트는
+        # 그 전에 env-only bootstrap이 호출되는지만 검증한다.
         # apply_liger_patches 는 부작용만 있고 실제 HF 로드 이전이라 통과시켜도
         # 무방하지만, import 시간을 줄이기 위해 no-op 으로 대체.
         import mdp._liger_patch as liger_patch
@@ -382,13 +371,6 @@ class TestCLIEntryBootstrapWiring:
         def _spy(settings: Any | None = None) -> None:
             bootstrap_calls.append(settings)
 
-        import mdp.settings.factory as settings_factory
-
-        class _ExplodingFactory:
-            def for_training(self, *a, **kw):
-                raise RuntimeError("stop-here-after-bootstrap")
-
-        monkeypatch.setattr(settings_factory, "SettingsFactory", _ExplodingFactory)
         import mdp._liger_patch as liger_patch
 
         monkeypatch.setattr(liger_patch, "apply_liger_patches", lambda: None)
@@ -407,3 +389,82 @@ class TestCLIEntryBootstrapWiring:
 
         assert len(bootstrap_calls) >= 1
         assert bootstrap_calls[0] is None
+
+    def test_run_rl_train_consumes_typed_algorithm_spec(self, monkeypatch):
+        """정상 RL settings 로드 후 algorithm 표시가 dict API로 회귀하지 않는다."""
+        from mdp.cli import rl_train as rl_train_mod
+
+        import mdp._liger_patch as liger_patch
+
+        monkeypatch.setattr(liger_patch, "apply_liger_patches", lambda: None)
+        monkeypatch.setattr(rl_train_mod, "_detect_gpu_count", lambda: 0)
+        monkeypatch.setattr(
+            rl_train_mod,
+            "_run_single",
+            lambda run_plan, callbacks_observer=None: {
+                "total_steps": 1,
+                "metrics": {"loss": 0.0},
+            },
+        )
+
+        repo_root = Path(__file__).resolve().parents[2]
+        rl_train_mod.run_rl_train(
+            recipe_path=str(repo_root / "tests/fixtures/recipes/gpt2-dpo-preference.yaml"),
+            config_path=str(repo_root / "tests/fixtures/configs/local-cpu.yaml"),
+        )
+
+    def test_torchrun_worker_bootstrap_order_before_runtime(self, tmp_path, monkeypatch):
+        """torchrun worker는 env bootstrap 후 settings bootstrap과 dist init을 거친다."""
+        from mdp.cli import _logging_bootstrap
+        from mdp.cli import _torchrun_entry
+        from tests.e2e.conftest import make_test_settings
+
+        settings = make_test_settings()
+        run_plan_path = Path(tmp_path) / "run_plan.json"
+        from mdp.runtime.payload import RunPlanPayload
+        from mdp.settings.run_plan import RunPlan, RunSources
+
+        run_plan = RunPlan(
+            command="train",
+            mode="sft",
+            settings=settings,
+            sources=RunSources(),
+            overrides=(),
+            callback_configs=(),
+            validation_scope="training",
+            distributed_intent=False,
+        )
+        run_plan_path.write_text(
+            json.dumps(RunPlanPayload.from_run_plan(run_plan).to_json_dict(), default=str)
+        )
+        events: list[str] = []
+
+        def _bootstrap(settings_arg: Any | None = None) -> None:
+            events.append("bootstrap-settings" if settings_arg is not None else "bootstrap-env")
+
+        def _init_dist(settings_arg: Any) -> None:
+            assert settings_arg.recipe.name == settings.recipe.name
+            events.append("dist-init")
+
+        def _run_training(run_plan_arg: Any) -> dict:
+            assert run_plan_arg.settings.recipe.name == settings.recipe.name
+            events.append("run-training")
+            return {}
+
+        monkeypatch.setattr(_logging_bootstrap, "bootstrap_logging", _bootstrap)
+        monkeypatch.setattr(_torchrun_entry, "_init_distributed_if_torchrun", _init_dist)
+        monkeypatch.setattr(_torchrun_entry, "run_training", _run_training)
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["_torchrun_entry.py", "--run-plan-path", str(run_plan_path)],
+        )
+
+        _torchrun_entry.main()
+
+        assert events == [
+            "bootstrap-env",
+            "bootstrap-settings",
+            "dist-init",
+            "run-training",
+        ]

@@ -55,7 +55,7 @@ class CatalogValidator:
         """ValidationResult를 반환한다."""
         result = ValidationResult()
 
-        pretrained = settings.recipe.model.get("pretrained")
+        pretrained = settings.recipe.model.pretrained
         if pretrained is None:
             return result
 

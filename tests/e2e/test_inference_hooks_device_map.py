@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
-from torch import Tensor, nn
+from torch import nn
 
 from mdp.callbacks.base import BaseInferenceCallback
 from mdp.callbacks.inference import DefaultOutputCallback

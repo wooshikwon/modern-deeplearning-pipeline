@@ -14,7 +14,6 @@ from mdp.models.heads.detection import DetectionHead
 from mdp.models.heads.segmentation import SegmentationHead
 
 from tests.e2e.datasets import (
-    ListDataLoader,
     make_feature_map_batches,
     make_segmentation_batches,
     make_vision_batches,
@@ -189,7 +188,7 @@ class TestLoRA:
 
         model = TinyVisionModel(num_classes=2, hidden_dim=16).to(device)
 
-        total_before = sum(p.numel() for p in model.parameters())
+        sum(p.numel() for p in model.parameters())
 
         model = apply_lora(
             model,

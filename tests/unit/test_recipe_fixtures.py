@@ -18,11 +18,9 @@ from typing import Any, Iterator
 import pytest
 import yaml
 
-from mdp.factory.planner import AssemblyPlanner
-from mdp.settings.plan import SettingsPlan
-from mdp.settings.factory import SettingsFactory
+from mdp.settings.components import ComponentSpec, ModelComponentSpec
 from mdp.settings.resolver import ComponentResolver
-from mdp.settings.schema import Config, Recipe, Settings
+from mdp.settings.schema import Recipe
 from mdp.task_taxonomy import TASK_PRESETS
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "recipes"
@@ -44,18 +42,22 @@ def _all_catalog_paths() -> list[Path]:
 
 
 # ---------------------------------------------------------------------------
-# (1) 전체 fixture가 for_estimation 경로로 파싱 + 부분검증을 통과해야 한다.
+# (1) 전체 fixture가 schema 경계에서 파싱되어야 한다.
 #     (config 없이도 Recipe 단독으로 유효해야 한다)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("recipe_path", _all_recipe_paths(), ids=lambda p: p.name)
-def test_fixture_parses_via_factory(recipe_path: Path) -> None:
-    """모든 recipe fixture가 SettingsFactory.for_estimation으로 파싱된다."""
-    factory = SettingsFactory()
-    settings = factory.for_estimation(str(recipe_path))
-    assert settings.recipe.name
-    assert settings.recipe.task
+def test_fixture_parses_via_materializer(recipe_path: Path) -> None:
+    """모든 recipe fixture가 Recipe schema로 파싱된다.
+
+    U2는 schema 경계에서 typed component envelope를 도입한다. AssemblyMaterializer,
+    AssemblyPlan, runtime 소비 경로의 typed migration은 U3 이후 책임이다.
+    """
+    raw = yaml.safe_load(recipe_path.read_text())
+    recipe = Recipe(**raw)
+    assert recipe.name
+    assert recipe.task
 
 
 # ---------------------------------------------------------------------------
@@ -117,23 +119,6 @@ def _iter_component_dicts(node: Any) -> Iterator[dict[str, Any]]:
     elif isinstance(node, list):
         for item in node:
             yield from _iter_component_dicts(item)
-
-
-def _training_plan_for_recipe(recipe: Recipe) -> SettingsPlan:
-    is_rl = recipe.rl is not None
-    settings = Settings(recipe=recipe, config=Config())
-    return SettingsPlan(
-        command="rl-train" if is_rl else "train",
-        mode="rl" if is_rl else "sft",
-        settings=settings,
-        recipe_path=None,
-        config_path=None,
-        artifact_dir=None,
-        overrides=(),
-        callback_configs=(),
-        validation_scope="training",
-        distributed_intent=False,
-    )
 
 
 @pytest.mark.parametrize("recipe_path", _all_recipe_paths(), ids=lambda p: p.name)
@@ -248,6 +233,24 @@ def test_catalog_recipe_default_components_resolvable(catalog_path: Path) -> Non
     assert not errors, f"{catalog_path}: {errors}"
 
 
+@pytest.mark.parametrize("catalog_path", _all_catalog_paths(), ids=lambda p: str(p.relative_to(CATALOG)))
+def test_catalog_recipe_defaults_use_public_adapter_blocks(catalog_path: Path) -> None:
+    """catalog recipe_defaults도 final Recipe와 같은 adapter envelope를 사용한다."""
+    raw = yaml.safe_load(catalog_path.read_text())
+    defaults = raw["recipe_defaults"]
+
+    for task, task_defaults in defaults.items():
+        if not isinstance(task_defaults, dict) or "adapter" not in task_defaults:
+            continue
+        adapter = task_defaults["adapter"]
+        assert isinstance(adapter, dict), (
+            f"{catalog_path}: recipe_defaults.{task}.adapter must be a component mapping"
+        )
+        assert adapter.get("_component_") in {"LoRA", "QLoRA"}, (
+            f"{catalog_path}: recipe_defaults.{task}.adapter has invalid component"
+        )
+
+
 # ---------------------------------------------------------------------------
 # (4) RL 모델 dict 형태: rl.models는 dict-of-dict이고, 각 역할은 _component_
 #     키를 갖는다. 새 RL fixture가 RLModelSpec 제거(§3.4)의 타깃 형태를
@@ -287,32 +290,35 @@ def test_fixture_recipe_pydantic_load(recipe_path: Path) -> None:
     """Recipe(**yaml)이 크래시 없이 로드된다."""
     raw = yaml.safe_load(recipe_path.read_text())
     recipe = Recipe(**raw)
-    # DataSpec이 dict 필드를 실제로 노출하는지 확인 (S1 변경의 회귀 방지)
-    assert isinstance(recipe.data.dataset, dict)
-    assert isinstance(recipe.data.collator, dict)
-    # ModelSpec 제거 확인 — model이 dict로 노출되어야 한다 (S2 변경의 회귀 방지)
-    assert isinstance(recipe.model, dict)
+    assert isinstance(recipe.data.dataset, ComponentSpec)
+    assert isinstance(recipe.data.collator, ComponentSpec)
+    assert isinstance(recipe.model, ModelComponentSpec)
 
 
 @pytest.mark.parametrize("recipe_path", _all_recipe_paths(), ids=lambda p: p.name)
-def test_fixture_recipe_builds_assembly_plan(recipe_path: Path) -> None:
-    """모든 recipe fixture가 component instance 없는 AssemblyPlan으로 변환된다."""
+def test_fixture_recipe_typed_envelopes_serialize_to_legacy_shape(recipe_path: Path) -> None:
+    """typed envelope를 거친 fixture가 기존 YAML snapshot 형태를 유지한다."""
     raw = yaml.safe_load(recipe_path.read_text())
     recipe = Recipe(**raw)
 
-    plan = AssemblyPlanner.from_settings_plan(_training_plan_for_recipe(recipe))
-    plan_dict = plan.to_dict()
+    dumped = recipe.model_dump(mode="json", exclude_unset=True, exclude_none=True)
 
-    assert plan.kind == ("rl_training" if recipe.rl is not None else "sft_training")
-    assert plan.models
-    assert plan.data.dataset.config == recipe.data.dataset
-    assert plan.data.collator.config == recipe.data.collator
-    assert isinstance(plan_dict, dict)
-    assert plan_dict["models"]
-    assert plan_dict["data"]["dataloader_config"] == recipe.data.dataloader.model_dump()
-    for model_node in plan.models:
-        assert isinstance(model_node.model.config, dict)
-        assert not hasattr(model_node.model, "parameters")
+    if "model" in raw:
+        assert dumped["model"] == raw["model"]
+    else:
+        assert recipe.model.to_yaml_dict() == {
+            "_component_": "transformers.AutoModelForCausalLM"
+        }
+    assert dumped["data"]["dataset"] == raw["data"]["dataset"]
+    assert dumped["data"]["collator"] == raw["data"]["collator"]
+    if "adapter" in raw:
+        assert dumped["adapter"] == raw["adapter"]
+    if "optimizer" in raw:
+        assert dumped["optimizer"] == raw["optimizer"]
+    if "rl" in raw:
+        assert dumped["rl"] == raw["rl"]
+    assert "_component_" in dumped["data"]["dataset"]
+    assert "_component_" in dumped["data"]["collator"]
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +358,6 @@ def test_settings_recipe_callbacks_rejected() -> None:
 
 def test_trainer_auto_early_stopping_from_spec() -> None:
     """TrainingSpec.early_stopping이 있으면 Trainer가 EarlyStopping을 자동 구성한다."""
-    import torch
     from mdp.settings.schema import EarlyStoppingSpec, TrainingSpec
     from mdp.training.callbacks.early_stopping import EarlyStopping
     from mdp.training.trainer import Trainer

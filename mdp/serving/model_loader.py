@@ -249,28 +249,34 @@ def reconstruct_model(
     Returns:
         (model, settings) 튜플.
     """
-    from mdp.factory.factory import Factory
-    from mdp.settings.factory import SettingsFactory
+    from mdp.assembly.materializer import AssemblyMaterializer
+    from mdp.assembly.planner import AssemblyPlanner
+    from mdp.settings.run_plan_builder import RunPlanBuilder
 
     plan = resolve_artifact_load_plan(artifact_dir, role=role, merge=merge)
     weights_dir = plan.weights_dir or artifact_dir
 
-    settings = SettingsFactory().from_artifact(str(artifact_dir), overrides=overrides)
+    run_plan = RunPlanBuilder().artifact(
+        str(artifact_dir),
+        overrides=overrides,
+        command="serve",
+    )
+    settings = run_plan.settings
     # RL recipe는 top-level `model` 섹션에 pretrained가 없고 `rl.models.policy`에 있다.
     # create_model()은 recipe.model만 보므로 RL recipe에서 크래시한다.
     # RL recipe이면 create_models()["policy"]를 사용한다.
     # default role은 policy — value/critic 모델은 훈련 전용이며 serving 경로에서는
     # 필요하지 않다. manifest checkpoint에서는 caller가 role을 명시할 수 있다.
-    factory = Factory(settings)
+    materializer = AssemblyMaterializer(AssemblyPlanner.from_run_plan(run_plan))
     if settings.recipe.rl is not None:
-        models = factory.create_models(skip_base_check=True)
+        models = materializer.materialize_models(skip_base_check=True)
         model = (
             models.get(plan.role)
             or models.get("policy")
             or next(iter(models.values()))
         )
     else:
-        model = factory.create_model(skip_base_check=True)
+        model = materializer.materialize_policy_model(skip_base_check=True)
 
     # export_info.json이 있으면 BaseModel.export()가 생성한 커스텀 export artifact
     # (e.g., backbone/ + value_head.pt 분리 저장). BaseModel.load_from_export()에 위임.

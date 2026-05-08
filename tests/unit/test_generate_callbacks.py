@@ -11,6 +11,15 @@ import torch
 from torch import nn
 
 from mdp.callbacks.base import BaseInferenceCallback
+from mdp.cli.output import ModelSourcePlan
+
+
+_PRETRAINED_SOURCE_PLAN = ModelSourcePlan(
+    kind="pretrained",
+    command="generate",
+    uri="hf://fake-model",
+    supports_pretrained=True,
+)
 
 
 class _TrackingCallback(BaseInferenceCallback):
@@ -91,7 +100,7 @@ def test_generate_callback_lifecycle(tmp_path: Path) -> None:
     prompts_file = _make_prompts_file(tmp_path, n=3)
 
     with (
-        patch("mdp.cli.generate.resolve_model_source", return_value=None),
+        patch("mdp.cli.generate.resolve_model_source_plan", return_value=_PRETRAINED_SOURCE_PLAN),
         patch("mdp.models.pretrained.PretrainedResolver.load", return_value=model),
         patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
         patch("mdp.training._common.load_callbacks_from_file", return_value=[{"_component_": "Dummy"}]),
@@ -140,7 +149,7 @@ def test_generate_callback_teardown_on_error(tmp_path: Path) -> None:
     import typer
 
     with (
-        patch("mdp.cli.generate.resolve_model_source", return_value=None),
+        patch("mdp.cli.generate.resolve_model_source_plan", return_value=_PRETRAINED_SOURCE_PLAN),
         patch("mdp.models.pretrained.PretrainedResolver.load", return_value=model),
         patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
         patch("mdp.training._common.load_callbacks_from_file", return_value=[{"_component_": "Dummy"}]),
@@ -178,7 +187,7 @@ def test_generate_callback_teardown_on_pre_loop_error(tmp_path: Path) -> None:
     import typer
 
     with (
-        patch("mdp.cli.generate.resolve_model_source", return_value=None),
+        patch("mdp.cli.generate.resolve_model_source_plan", return_value=_PRETRAINED_SOURCE_PLAN),
         patch("mdp.models.pretrained.PretrainedResolver.load", return_value=model),
         patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
         patch("mdp.training._common.load_callbacks_from_file", return_value=[{"_component_": "Dummy"}]),
@@ -211,7 +220,7 @@ def test_generate_no_callbacks(tmp_path: Path) -> None:
     prompts_file = _make_prompts_file(tmp_path, n=2)
 
     with (
-        patch("mdp.cli.generate.resolve_model_source", return_value=None),
+        patch("mdp.cli.generate.resolve_model_source_plan", return_value=_PRETRAINED_SOURCE_PLAN),
         patch("mdp.models.pretrained.PretrainedResolver.load", return_value=model),
         patch("transformers.AutoTokenizer.from_pretrained", return_value=tokenizer),
     ):

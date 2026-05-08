@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
+from mdp.settings.components import ComponentSpec
 from mdp.settings.schema import Settings
 
 
@@ -21,6 +22,9 @@ _DEEPSPEED_ALIASES = {
 def get_strategy_name(settings: Settings) -> object:
     """Return the raw distributed strategy value, applying the runtime default."""
     dist_config = settings.config.compute.distributed
+    if hasattr(dist_config, "strategy"):
+        strategy = dist_config.strategy
+        return strategy.component if isinstance(strategy, ComponentSpec) else strategy
     if not isinstance(dist_config, Mapping):
         return None
     strategy = dist_config.get("strategy", "auto")

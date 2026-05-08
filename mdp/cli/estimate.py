@@ -16,11 +16,11 @@ def run_estimate(recipe_path: str) -> None:
 
     from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
     from mdp.cli.schemas import EstimateResult
+    from mdp.settings.loader import SettingsLoader
     from mdp.utils.estimator import MemoryEstimator
-    from mdp.settings.factory import SettingsFactory
 
     try:
-        settings = SettingsFactory().for_estimation(recipe_path)
+        settings = SettingsLoader().load_estimation_settings(recipe_path)
     except Exception as e:
         if is_json_mode():
             emit_result(build_error(

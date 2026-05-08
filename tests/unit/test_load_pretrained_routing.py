@@ -1,10 +1,8 @@
 """_load_pretrained 분기 로직 유닛 테스트.
 
-4가지 경우를 검증한다:
-① _component_ 없음 + pretrained → PretrainedResolver가 클래스 추론
-② _component_ 있음 + pretrained 없음 → 생성자 호출 (랜덤 초기화)
-③ _component_(HF) + pretrained → klass.from_pretrained 호출
-④ _component_(커스텀) + pretrained → klass(pretrained=..., **kwargs) 생성자 호출
+AssemblyMaterializer contract로 이동되지 않은 component+pretrained routing을 검증한다:
+① _component_(HF) + pretrained → klass.from_pretrained 호출
+② _component_(커스텀) + pretrained → klass(pretrained=..., **kwargs) 생성자 호출
 
 + BaseModel 검증: 커스텀 클래스는 pretrained 유무와 무관하게 BaseModel 필수.
 """
@@ -15,13 +13,12 @@ from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
-import torch
 from torch import Tensor, nn
 
-from mdp.factory.factory import Factory, _ModelLoadRoute, _decide_model_load_route
-from mdp.factory.planner import AssemblyPlanner
+from mdp.assembly.materializer import AssemblyMaterializer
+from mdp.assembly.planner import AssemblyPlanner
 from mdp.models.base import BaseModel
-from mdp.settings.plan import SettingsPlan
+from mdp.settings.run_plan import RunPlan, RunSources
 from mdp.settings.schema import (
     Config,
     DataSpec,
@@ -95,137 +92,25 @@ def _make_settings(model_config: dict[str, Any]) -> Settings:
     return Settings(recipe=recipe, config=Config())
 
 
-def _make_settings_plan(settings: Settings) -> SettingsPlan:
-    return SettingsPlan(
+def _materializer(settings: Settings) -> AssemblyMaterializer:
+    run_plan = RunPlan(
         command="train",
         mode="sft",
         settings=settings,
-        recipe_path=None,
-        config_path=None,
-        artifact_dir=None,
+        sources=RunSources(),
         overrides=(),
         callback_configs=(),
         validation_scope="training",
         distributed_intent=False,
     )
+    return AssemblyMaterializer(AssemblyPlanner.from_run_plan(run_plan))
 
 
-# ── 경우 ④: 커스텀 BaseModel + pretrained → 생성자 호출 ──
-
-
-class TestModelLoadRouteDecision:
-    """Factory의 model load route pure helper 계약을 고정한다."""
-
-    def test_component_with_pretrained_uses_component_from_pretrained_route(self) -> None:
-        route = _decide_model_load_route(
-            {"_component_": "some.Model", "pretrained": "hf://org/model"},
-            None,
-        )
-
-        assert route is _ModelLoadRoute.COMPONENT_FROM_PRETRAINED
-
-    def test_component_only_uses_component_constructor_route(self) -> None:
-        route = _decide_model_load_route({"_component_": "some.Model"}, None)
-
-        assert route is _ModelLoadRoute.COMPONENT_CONSTRUCTOR
-
-    def test_pretrained_only_uses_pretrained_resolver_route(self) -> None:
-        route = _decide_model_load_route({"pretrained": "hf://org/model"}, None)
-
-        assert route is _ModelLoadRoute.PRETRAINED_RESOLVER
-
-    def test_qlora_adapter_uses_qlora_route(self) -> None:
-        route = _decide_model_load_route(
-            {"pretrained": "hf://Qwen/Qwen2.5-7B", "torch_dtype": "bfloat16"},
-            {"_component_": "QLoRA", "target": ["attn.q", "attn.v"]},
-        )
-
-        assert route is _ModelLoadRoute.QLORA
-
-    def test_missing_model_source_raises_value_error(self) -> None:
-        with pytest.raises(ValueError, match="_component_ 또는 pretrained"):
-            _decide_model_load_route({}, None)
-
-
-class TestAssemblyPlanModelRouteShape:
-    """AssemblyPlanner preserves model route inputs without materializing them."""
-
-    def test_component_with_pretrained_stays_in_model_node(self) -> None:
-        settings = _make_settings({
-            "_component_": "tests.unit.test_load_pretrained_routing.TinyCustomWithPretrained",
-            "pretrained": "hf://fake-org/fake-model",
-            "hidden_dim": 16,
-        })
-
-        plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
-
-        assert plan.kind == "sft_training"
-        assert len(plan.models) == 1
-        model_node = plan.models[0]
-        assert model_node.role == "policy"
-        assert model_node.trainable is True
-        assert model_node.model.config == settings.recipe.model
-        assert model_node.model.component == (
-            "tests.unit.test_load_pretrained_routing.TinyCustomWithPretrained"
-        )
-
-    def test_pretrained_only_route_stays_pretrained_only(self) -> None:
-        settings = _make_settings({"pretrained": "hf://some-org/some-model"})
-
-        plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
-
-        assert plan.models[0].model.config == {"pretrained": "hf://some-org/some-model"}
-        assert plan.models[0].model.component is None
-
-    def test_qlora_route_keeps_adapter_as_owned_spec(self) -> None:
-        settings = _make_settings({
-            "pretrained": "hf://Qwen/Qwen2.5-7B",
-            "torch_dtype": "bfloat16",
-        })
-        settings.recipe.adapter = {
-            "_component_": "QLoRA",
-            "target": ["attn.q", "attn.v"],
-        }
-
-        plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
-
-        assert plan.models[0].model.config == settings.recipe.model
-        assert plan.models[0].adapter is not None
-        assert plan.models[0].adapter.config == settings.recipe.adapter
-
-    def test_data_and_strategy_nodes_capture_distributed_intent(self) -> None:
-        base_settings = _make_settings({"pretrained": "hf://some-org/some-model"})
-        settings = Settings(
-            recipe=base_settings.recipe,
-            config=Config(compute={"distributed": {"strategy": "ddp"}}),
-        )
-        settings_plan = SettingsPlan(
-            command="train",
-            mode="sft",
-            settings=settings,
-            recipe_path=None,
-            config_path=None,
-            artifact_dir=None,
-            overrides=(),
-            callback_configs=(),
-            validation_scope="training",
-            distributed_intent=True,
-        )
-
-        plan = AssemblyPlanner.from_settings_plan(settings_plan)
-
-        assert plan.data.dataset.config == settings.recipe.data.dataset
-        assert plan.data.val_dataset is None
-        assert plan.data.sampler is None
-        assert plan.data.dataloader_config == settings.recipe.data.dataloader.model_dump()
-        assert plan.data.distributed_intent is True
-        assert plan.strategy is not None
-        assert plan.strategy.strategy == "ddp"
-        assert "setup_models" in plan.strategy.capability_boundary
+# ── 경우 ②: 커스텀 BaseModel + pretrained → 생성자 호출 ──
 
 
 class TestCustomBaseModelWithPretrained:
-    """경우 ④: _component_가 커스텀 BaseModel이고 pretrained가 있을 때,
+    """경우 ②: _component_가 커스텀 BaseModel이고 pretrained가 있을 때,
     from_pretrained가 아닌 생성자로 인스턴스화되는지 검증."""
 
     def test_pretrained_passed_as_constructor_arg(self) -> None:
@@ -235,8 +120,8 @@ class TestCustomBaseModelWithPretrained:
             "pretrained": "hf://fake-org/fake-model",
             "hidden_dim": 16,
         })
-        factory = Factory(settings)
-        model = factory.create_model()
+        materializer = _materializer(settings)
+        model = materializer.materialize_policy_model()
 
         assert type(model).__name__ == "TinyCustomWithPretrained"
         assert model.pretrained_source == "hf://fake-org/fake-model"
@@ -249,8 +134,8 @@ class TestCustomBaseModelWithPretrained:
             "pretrained": "local:///path/to/checkpoint",
             "hidden_dim": 8,
         })
-        factory = Factory(settings)
-        model = factory.create_model()
+        materializer = _materializer(settings)
+        model = materializer.materialize_policy_model()
 
         assert model.pretrained_source == "local:///path/to/checkpoint"
 
@@ -261,17 +146,17 @@ class TestCustomBaseModelWithPretrained:
             "pretrained": "hf://fake",
             "hidden_dim": 32,
         })
-        factory = Factory(settings)
-        model = factory.create_model()
+        materializer = _materializer(settings)
+        model = materializer.materialize_policy_model()
 
         assert model.hidden_dim == 32
 
 
-# ── 경우 ③: HF 클래스 + pretrained → from_pretrained 호출 ──
+# ── 경우 ①: HF 클래스 + pretrained → from_pretrained 호출 ──
 
 
 class TestHFClassWithPretrained:
-    """경우 ③: _component_가 from_pretrained를 가진 HF 클래스일 때,
+    """경우 ①: _component_가 from_pretrained를 가진 HF 클래스일 때,
     from_pretrained가 호출되는지 검증."""
 
     def test_from_pretrained_called(self) -> None:
@@ -286,12 +171,12 @@ class TestHFClassWithPretrained:
             "_component_": "some.hf.ModelClass",
             "pretrained": "hf://org/model-name",
         })
-        factory = Factory(settings)
+        materializer = _materializer(settings)
 
         with patch.object(
-            factory.resolver, "import_class", return_value=mock_cls,
+            materializer.resolver, "import_class", return_value=mock_cls,
         ):
-            model = factory.create_model(skip_base_check=True)
+            materializer.materialize_policy_model(skip_base_check=True)
 
         # from_pretrained가 URI에서 추출된 identifier로 호출되어야 한다
         mock_cls.from_pretrained.assert_called_once_with("org/model-name")
@@ -307,12 +192,12 @@ class TestHFClassWithPretrained:
             "_component_": "some.hf.ModelClass",
             "pretrained": "hf://meta-llama/Meta-Llama-3-8B",
         })
-        factory = Factory(settings)
+        materializer = _materializer(settings)
 
         with patch.object(
-            factory.resolver, "import_class", return_value=mock_cls,
+            materializer.resolver, "import_class", return_value=mock_cls,
         ):
-            factory.create_model(skip_base_check=True)
+            materializer.materialize_policy_model(skip_base_check=True)
 
         mock_cls.from_pretrained.assert_called_once_with("meta-llama/Meta-Llama-3-8B")
 
@@ -327,58 +212,14 @@ class TestHFClassWithPretrained:
             "_component_": "some.hf.ModelClass",
             "pretrained": "bert-base-uncased",
         })
-        factory = Factory(settings)
+        materializer = _materializer(settings)
 
         with patch.object(
-            factory.resolver, "import_class", return_value=mock_cls,
+            materializer.resolver, "import_class", return_value=mock_cls,
         ):
-            factory.create_model(skip_base_check=True)
+            materializer.materialize_policy_model(skip_base_check=True)
 
         mock_cls.from_pretrained.assert_called_once_with("bert-base-uncased")
-
-
-# ── 경우 ②: _component_만, pretrained 없음 → 생성자 호출 ──
-
-
-class TestComponentOnlyNoPretrained:
-    """경우 ②: pretrained 없이 _component_만 있으면 생성자 호출."""
-
-    def test_constructor_called_without_pretrained(self) -> None:
-        settings = _make_settings({
-            "_component_": "tests.e2e.models.TinyVisionModel",
-            "num_classes": 3,
-            "hidden_dim": 8,
-        })
-        factory = Factory(settings)
-        model = factory.create_model()
-
-        from tests.e2e.models import TinyVisionModel
-        assert isinstance(model, TinyVisionModel)
-        assert model.num_classes == 3
-
-
-# ── 경우 ①: _component_ 없음 + pretrained → PretrainedResolver ──
-
-
-class TestPretrainedOnlyNoComponent:
-    """경우 ①: _component_가 없고 pretrained만 있으면 PretrainedResolver 위임."""
-
-    def test_resolver_called_when_no_component(self) -> None:
-        mock_model = MagicMock(spec=nn.Module)
-
-        settings = _make_settings({
-            "pretrained": "hf://some-org/some-model",
-        })
-        factory = Factory(settings)
-
-        with patch(
-            "mdp.models.pretrained.PretrainedResolver.load",
-            return_value=mock_model,
-        ) as mock_load:
-            model = factory.create_model(skip_base_check=True)
-
-        mock_load.assert_called_once_with("hf://some-org/some-model")
-        assert model is mock_model
 
 
 # ── BaseModel 검증 강화 ──
@@ -393,10 +234,10 @@ class TestBaseModelValidation:
             "_component_": "tests.unit.test_load_pretrained_routing.NonBaseModelWithPretrained",
             "pretrained": "hf://fake",
         })
-        factory = Factory(settings)
+        materializer = _materializer(settings)
 
         with pytest.raises(TypeError, match="BaseModel을 상속하지 않습니다") as exc_info:
-            factory.create_model()
+            materializer.materialize_policy_model()
         message = str(exc_info.value)
         assert "forward를 구현" in message
         assert "training_step" not in message
@@ -408,8 +249,8 @@ class TestBaseModelValidation:
             "_component_": "tests.unit.test_load_pretrained_routing.TinyCustomWithPretrained",
             "pretrained": "hf://fake",
         })
-        factory = Factory(settings)
-        model = factory.create_model()
+        materializer = _materializer(settings)
+        model = materializer.materialize_policy_model()
 
         assert isinstance(model, BaseModel)
         assert type(model).__name__ == "TinyCustomWithPretrained"
@@ -428,11 +269,11 @@ class TestBaseModelValidation:
             "_component_": "some.hf.Model",
             "pretrained": "hf://fake",
         })
-        factory = Factory(settings)
+        materializer = _materializer(settings)
 
         with patch.object(
-            factory.resolver, "import_class", return_value=mock_cls,
+            materializer.resolver, "import_class", return_value=mock_cls,
         ):
             # BaseModel이 아니어도 에러가 나지 않아야 한다
-            model = factory.create_model()
+            model = materializer.materialize_policy_model()
             assert model is mock_model

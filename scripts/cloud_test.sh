@@ -14,6 +14,7 @@
 #   bash scripts/cloud_test.sh tests/e2e/test_distributed_cpu.py
 #   bash scripts/cloud_test.sh -k allreduce -x --tb=long
 #   bash scripts/cloud_test.sh --skip-fixtures              # assume already cached
+#   bash scripts/cloud_test.sh --suite gpu --dry-run        # print selected pytest args
 #
 # Default suite is quick. Explicit pytest args still run as-is.
 #
@@ -25,23 +26,15 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
 log() { echo -e "${GREEN}[$(date '+%H:%M:%S')]${NC} $*"; }
 die() { echo -e "${RED}[ERROR]${NC} $*"; exit 1; }
 
-REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "must run inside a git repo"
-REPO_NAME=$(basename "$REPO_ROOT")
-STATE_FILE="$HOME/.cache/cloud-runner/$REPO_NAME/current.env"
-[ -f "$STATE_FILE" ] || die "no active instance (run cloud_provision.sh first)"
-# shellcheck disable=SC1090
-source "$STATE_FILE"
-
-WORKSPACE=/workspace/$REPO_NAME
-SSH_BASE="ssh -i $SSH_KEY -p $SSH_PORT root@$SSH_HOST -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ServerAliveInterval=15"
-
 SUITE=quick
 MEMORY_PROFILE="${MDP_MEMORY_BUDGET_PROFILE:-}"
 ALLOW_SKIP=0
 SKIP_FIXTURES=0
+DRY_RUN=0
 PYTEST_ARGS=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --dry-run) DRY_RUN=1; shift ;;
     --skip-fixtures) SKIP_FIXTURES=1; shift ;;
     --suite)
       [ "$#" -ge 2 ] || die "--suite requires a value"
@@ -63,6 +56,18 @@ case "$SUITE" in
   *) die "unknown suite: $SUITE (expected quick|gpu|distributed|memory|all)" ;;
 esac
 
+if [ "$DRY_RUN" -eq 0 ]; then
+  REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "must run inside a git repo"
+  REPO_NAME=$(basename "$REPO_ROOT")
+  STATE_FILE="$HOME/.cache/cloud-runner/$REPO_NAME/current.env"
+  [ -f "$STATE_FILE" ] || die "no active instance (run cloud_provision.sh first)"
+  # shellcheck disable=SC1090
+  source "$STATE_FILE"
+
+  WORKSPACE=/workspace/$REPO_NAME
+  SSH_BASE="ssh -i $SSH_KEY -p $SSH_PORT root@$SSH_HOST -o StrictHostKeyChecking=no -o ConnectTimeout=20 -o ServerAliveInterval=15"
+fi
+
 if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
   case "$SUITE" in
     quick)
@@ -72,7 +77,7 @@ if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
       PYTEST_ARGS=("-m" "gpu and fixtures and not distributed and not memory")
       ;;
     distributed)
-      if [ "${N_GPUS:-0}" -lt 2 ]; then
+      if [ "$DRY_RUN" -eq 0 ] && [ "${N_GPUS:-0}" -lt 2 ]; then
         if [ "$ALLOW_SKIP" -eq 1 ]; then
           log "skipping distributed suite: requires >=2 GPUs (have ${N_GPUS:-0})"
           exit 0
@@ -93,6 +98,16 @@ if [ "${#PYTEST_ARGS[@]}" -eq 0 ]; then
 fi
 PYTEST_REMOTE_ARGS=$(printf " %q" "${PYTEST_ARGS[@]}")
 
+if [ "$DRY_RUN" -eq 1 ]; then
+  log "dry-run cloud pytest selection"
+  log "  suite: $SUITE"
+  log "  targets: ${PYTEST_ARGS[*]}"
+  if [ -n "$MEMORY_PROFILE" ]; then
+    log "  memory profile: $MEMORY_PROFILE"
+  fi
+  exit 0
+fi
+
 # ────────────────────────────────────────────────────────────
 # Step 1 — Test fixtures (tiny HF models + small dataset slices)
 # ────────────────────────────────────────────────────────────
@@ -106,7 +121,7 @@ cd $WORKSPACE
 source .venv/bin/activate
 # Ensure deps for fixture cache + verify + downstream e2e are installed.
 # pytest: not in mdp's optional-dependencies, but required to run any e2e.
-# transformers/peft/tokenizers: needed by most mdp e2e (factory, inference, etc).
+# transformers/peft/tokenizers: needed by most mdp e2e (materializer, inference, etc).
 python -c 'import pytest, datasets, huggingface_hub, transformers, peft, tokenizers, safetensors' 2>/dev/null \\
   || uv pip install \\
        pytest 'datasets>=2.16' 'huggingface_hub>=0.20' \\

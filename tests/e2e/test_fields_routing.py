@@ -14,7 +14,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 
 from mdp.data.tokenizer import (
@@ -140,7 +139,7 @@ class TestGlobalStep:
 
     def test_global_step_with_grad_accum(self) -> None:
         """With grad_accum=2, 4 batches should produce global_step=2."""
-        from tests.e2e.datasets import ListDataLoader, make_vision_batches
+        from tests.e2e.datasets import make_vision_batches
         from tests.e2e.models import TinyVisionModel
 
         model = TinyVisionModel(num_classes=2, hidden_dim=16)
@@ -226,7 +225,6 @@ class TestValDataset:
 
     def test_val_dataset_none_no_val_loader(self) -> None:
         """val_dataset=None이면 create_dataloaders가 val DataLoader를 생성하지 않는다."""
-        from unittest.mock import patch, MagicMock
 
         from mdp.data.dataloader import create_dataloaders
 

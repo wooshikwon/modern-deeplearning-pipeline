@@ -54,7 +54,11 @@ recipe_defaults:
         batch_size: 1
         num_workers: 4
         drop_last: true
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attn.q, attn.v, attn.k]
+      r: 8
+      alpha: 16
     training:
       epochs: 3
       precision: bf16
@@ -94,7 +98,11 @@ recipe_defaults:
         batch_size: 2
         num_workers: 4
         drop_last: true
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attn.q, attn.v, attn.k]
+      r: 8
+      alpha: 16
     training:
       epochs: 3
       precision: bf16
@@ -134,7 +142,11 @@ recipe_defaults:
         batch_size: 4
         num_workers: 4
         drop_last: true
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attn.q, attn.v, attn.k]
+      r: 8
+      alpha: 16
     training:
       epochs: 3
       precision: bf16

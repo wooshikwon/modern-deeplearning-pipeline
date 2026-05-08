@@ -23,7 +23,11 @@ def init_distributed_if_torchrun(settings) -> RuntimeContext:
         torch.cuda.set_device(context.local_rank)
 
     dist_cfg = settings.config.compute.distributed
-    backend = dist_cfg.get("backend") if isinstance(dist_cfg, dict) else None
+    backend = (
+        dist_cfg.backend
+        if hasattr(dist_cfg, "backend")
+        else dist_cfg.get("backend") if isinstance(dist_cfg, dict) else None
+    )
     if backend is None:
         backend = "nccl" if torch.cuda.is_available() else "gloo"
 

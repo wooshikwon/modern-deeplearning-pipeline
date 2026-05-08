@@ -53,7 +53,14 @@ recipe_defaults:
         batch_size: 1
         num_workers: 4
         drop_last: true
-    adapter: qlora
+    adapter:
+      _component_: QLoRA
+      target: [attn.q, attn.k, attn.v, attn.o, mlp.gate, mlp.up, mlp.down]
+      r: 16
+      alpha: 32
+      task_type: CAUSAL_LM
+      quantization:
+        bits: 4
     training:
       epochs: 3
       precision: bf16

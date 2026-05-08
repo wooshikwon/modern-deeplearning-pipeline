@@ -15,95 +15,15 @@ def _init_distributed_if_torchrun(settings) -> None:
     init_distributed_if_torchrun(settings)
 
 
-def _is_main_process() -> bool:
-    """rank-0 여부를 반환한다. torchrun 환경이 아니면 항상 True."""
-    from mdp.runtime.worker import is_main_process
+def run_training(run_plan) -> dict:
+    """Worker adapter for the runtime-owned SFT/RL training lifecycle."""
+    from mdp.cli.callback_output import print_callbacks_log
+    from mdp.runtime.training import run_training as runtime_run_training
 
-    return is_main_process()
-
-
-def _print_callbacks_log(
-    cb_instances: list,
-    settings,
-) -> None:
-    """실행 시작 시 적용된 callbacks와 training.* 자동 추가 항목을 출력한다.
-
-    is_json_mode()이면 생략. rank-0에서만 출력.
-    """
-    from mdp.cli.output import is_json_mode
-
-    if is_json_mode() or not _is_main_process():
-        return
-
-    from mdp.callbacks.base import BaseInterventionCallback
-
-    lines = []
-    for cb in cb_instances:
-        tag = "[Int]" if isinstance(cb, BaseInterventionCallback) else "[Obs]"
-        cb_name = type(cb).__name__
-        # 대표 속성 표시 (monitor 있으면)
-        attrs = []
-        if hasattr(cb, "monitor"):
-            attrs.append(f"monitor={cb.monitor}")
-        detail = f" ({', '.join(attrs)})" if attrs else ""
-        lines.append(f"  {tag} {cb_name}{detail}")
-
-    # training.* 자동 추가 항목
-    auto_lines = []
-    training = settings.recipe.training
-    if training.early_stopping is not None:
-        es = training.early_stopping
-        auto_lines.append(
-            f"  EarlyStopping (monitor={es.monitor}, patience={es.patience})"
-        )
-    if training.ema is not None:
-        ema = training.ema
-        auto_lines.append(f"  EMA (decay={ema.decay})")
-
-    if lines or auto_lines:
-        if lines:
-            print("Applied callbacks:")
-            for line in lines:
-                print(line)
-        if auto_lines:
-            print("Auto-promoted from training.*:")
-            for line in auto_lines:
-                print(line)
-
-
-def run_training(settings, cb_configs: list[dict] | None = None) -> dict:
-    """Settings 객체를 받아 ExecutionEngine으로 training lifecycle을 실행한다."""
-    # Liger-Kernel monkey-patch는 HF `from_pretrained`(Factory.create_model 내부)
-    # 이전에 수행되어야 효과가 있다. Engine이 AssemblyMaterializer를 호출하기
-    # 직전에 공통 적용해 single/torchrun worker 양쪽 순서를 맞춘다. Idempotent.
-    # 상세: mdp/_liger_patch.py, spec-algorithm-hidden-states-support §U2.
-    from mdp.runtime.context import training_settings_plan_from_settings
-    from mdp.runtime.engine import ExecutionEngine
-    from mdp.runtime.worker import apply_liger_patches_for_training
-
-    apply_liger_patches_for_training()
-
-    settings_plan = training_settings_plan_from_settings(
-        settings,
-        cb_configs=cb_configs,
+    return runtime_run_training(
+        run_plan,
+        callbacks_observer=print_callbacks_log,
     )
-    return ExecutionEngine(callbacks_observer=_print_callbacks_log).run(settings_plan)
-
-
-def run_rl_training(settings, cb_configs: list[dict] | None = None) -> dict:
-    """Compatibility wrapper for callers that still enter through RL training."""
-    from mdp.runtime.context import training_settings_plan_from_settings
-    from mdp.runtime.engine import ExecutionEngine
-    from mdp.runtime.worker import apply_liger_patches_for_training
-
-    apply_liger_patches_for_training()
-
-    settings_plan = training_settings_plan_from_settings(
-        settings,
-        command="rl-train",
-        cb_configs=cb_configs,
-    )
-    return ExecutionEngine(callbacks_observer=_print_callbacks_log).run(settings_plan)
 
 
 def main() -> None:
@@ -131,22 +51,20 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="MDP torchrun worker")
     parser.add_argument(
-        "--settings-path", required=True, help="Settings JSON 파일 경로"
+        "--run-plan-path", required=True, help="RunPlan payload JSON 파일 경로"
     )
     parser.add_argument(
         "--result-path", default=None, help="학습 결과를 저장할 JSON 파일 경로 (rank-0 전용)"
     )
     args = parser.parse_args()
 
-    from mdp.settings.schema import Settings
+    from mdp.runtime.payload import RunPlanPayload
 
-    with open(args.settings_path) as f:
+    with open(args.run_plan_path) as f:
         raw = json.load(f)
 
-    # __cb_configs는 Settings 스키마 밖 임시 필드로 전달됨 (extra="forbid" 우회)
-    cb_configs: list[dict] | None = raw.pop("__cb_configs", None)
-
-    settings = Settings(**raw)
+    run_plan = RunPlanPayload.from_json_dict(raw).to_run_plan()
+    settings = run_plan.settings
 
     # settings 가 준비된 뒤 bootstrap_logging(settings) 재호출 — recipe
     # monitoring.verbose 값과 env 가 OR 합성된다. setup_logging 의 args-aware
@@ -163,7 +81,7 @@ def main() -> None:
 
     # Liger monkey-patch와 materialization은 run_training() 내부 ExecutionEngine
     # 경로에서 수행된다. 여기서는 dist init 선행만 보장한다.
-    result = run_training(settings, cb_configs=cb_configs)
+    result = run_training(run_plan)
 
     # rank-0만 결과를 저장한다
     if args.result_path and result:

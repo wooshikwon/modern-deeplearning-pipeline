@@ -9,7 +9,6 @@
 
 from __future__ import annotations
 
-import torch
 
 from mdp.data.collators import PreferenceCollator
 from mdp.data.tokenizer import LABEL_PREFERENCE

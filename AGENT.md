@@ -51,10 +51,13 @@ mdp inference --run-id <id> --data test.jsonl --format json
   internal torchrun when `compute.distributed.strategy` is set and multiple GPUs
   are requested.
 - `compute.distributed.strategy` currently supports `ddp`, `fsdp`, and `auto`.
-  `deepspeed*` aliases are listed for forward compatibility but fail fast until
-  a separate DeepSpeed engine-contract implementation exists.
+  `deepspeed*` aliases are reserved strategy names but fail fast until a
+  separate DeepSpeed engine-contract implementation exists.
 - Recipe and Config are separate. Recipe defines the experiment; Config defines
   infrastructure/runtime.
+- MDP-owned YAML zones are closed. Unknown fields in `training`, `data.dataloader`,
+  `metadata`, `monitoring`, and `config.*` fail schema validation; component
+  kwargs remain open only inside `_component_` envelopes.
 - Recipe has no `callbacks:` field. Pass callbacks with `--callbacks callbacks.yaml`.
   EarlyStopping and EMA are first-class `training.*` Recipe fields because they
   affect training semantics.
@@ -65,6 +68,11 @@ mdp inference --run-id <id> --data test.jsonl --format json
   `compute.distributed.strategy`.
 - External consumers should import `Trainer` or `RLTrainer`, not `BaseTrainer`.
   `BaseTrainer` is an abstract lifecycle base class.
+- Official training execution flows through
+  `RunPlan -> AssemblyPlan -> ExecutionEngine`. `SettingsLoader`,
+  `AssemblyMaterializer(AssemblyPlan).materialize_*`, and direct `Trainer(...)` / `RLTrainer(...)`
+  remain stable facades or low-level loop APIs, but the runtime path uses
+  `Trainer.from_bundle(...)` and `RLTrainer.from_bundle(...)`.
 
 ## Canonical Contracts
 

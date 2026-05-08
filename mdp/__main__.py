@@ -1,10 +1,9 @@
 from dotenv import load_dotenv
-
-load_dotenv()
-
 import typer
 
 from mdp.cli.output import OutputFormat, apply_format_override, set_output_format
+
+load_dotenv()
 
 app = typer.Typer(
     name="mdp",

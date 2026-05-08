@@ -67,30 +67,37 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 markers = [
     "slow: 실모델 로딩이 필요한 통합 테스트 (deselect: -m 'not slow')",
-    "gpu: 단일 CUDA GPU가 필요한 테스트 (CPU 환경에서는 skip)",
-    "distributed: 다중 GPU + NCCL backend가 필요한 테스트 (subprocess+torchrun 패턴)",
+    "gpu: 단일 CUDA GPU hardware boundary 테스트 (CPU 환경에서는 skip)",
+    "distributed: 다중 GPU + NCCL hardware boundary 테스트 (subprocess+torchrun 패턴)",
     "distributed_cpu: CPU gloo torchrun 기반 분산 테스트 (MDP_RUN_DISTRIBUTED_CPU=1 opt-in)",
     "fixtures: scripts/prepare_test_fixtures.py 산출물(MDP_TEST_FIXTURES)을 사용하는 테스트",
-    "memory: GPU memory budget/profile이 필요한 테스트",
+    "memory: GPU memory budget/profile hardware boundary 테스트",
 ]
 
 [tool.importlinter]
 root_packages = ["mdp"]
 
 [[tool.importlinter.contracts]]
-name = "Models must not import training or factory"
+name = "Models must not import training or assembly"
 type = "forbidden"
 source_modules = ["mdp.models"]
-forbidden_modules = ["mdp.training", "mdp.factory"]
+forbidden_modules = ["mdp.training", "mdp.assembly"]
 
 [[tool.importlinter.contracts]]
-name = "Data must not import training or factory"
+name = "Data must not import training or assembly"
 type = "forbidden"
 source_modules = ["mdp.data"]
-forbidden_modules = ["mdp.training", "mdp.factory"]
+forbidden_modules = ["mdp.training", "mdp.assembly"]
 
 [[tool.importlinter.contracts]]
 name = "Serving and settings must not import runtime engine"
 type = "forbidden"
 source_modules = ["mdp.serving", "mdp.settings"]
 forbidden_modules = ["mdp.runtime.engine"]
+
+[[tool.importlinter.contracts]]
+name = "Runtime must not import CLI"
+type = "forbidden"
+source_modules = ["mdp.runtime"]
+forbidden_modules = ["mdp.cli"]
+allow_indirect_imports = true

@@ -7,7 +7,6 @@ then compares new distributions against baselines to detect drift.
 from __future__ import annotations
 
 import logging
-import math
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any

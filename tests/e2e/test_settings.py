@@ -1,4 +1,4 @@
-"""E2E tests for Settings factory, resolver, and validators."""
+"""E2E tests for Settings loading, resolver, and validators."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from mdp.settings.factory import SettingsFactory
+from mdp.settings.components import ComponentSpec, ModelComponentSpec
+from mdp.settings.loader import SettingsLoader
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import (
     ComputeConfig,
@@ -43,9 +44,8 @@ _YAML_PAIRS = [
 
 @pytest.mark.parametrize("recipe_file,config_file", _YAML_PAIRS)
 def test_yaml_parsing(recipe_file: str, config_file: str) -> None:
-    """SettingsFactory.for_training succeeds for each recipe-config pair."""
-    factory = SettingsFactory()
-    settings = factory.for_training(
+    """SettingsLoader loads each recipe-config pair."""
+    settings = SettingsLoader().load_training_settings(
         str(RECIPES / recipe_file),
         str(CONFIGS / config_file),
     )
@@ -54,27 +54,25 @@ def test_yaml_parsing(recipe_file: str, config_file: str) -> None:
     assert settings.recipe.task
 
 
-def test_settings_planner_training_plan_keeps_validated_settings_and_sources() -> None:
-    """SettingsPlanner returns SettingsPlan without making raw YAML the source."""
-    from mdp.settings.plan import SettingsPlan
-    from mdp.settings.planner import SettingsPlanner
+def test_run_plan_builder_training_plan_keeps_validated_settings_and_sources() -> None:
+    """RunPlanBuilder returns RunPlan without making raw YAML the source."""
+    from mdp.settings.run_plan import RunPlan, RunSources
+    from mdp.settings.run_plan_builder import RunPlanBuilder
 
     recipe_path = RECIPES / "gpt2-finetune-text.yaml"
     config_path = CONFIGS / "remote-4gpu-ddp.yaml"
 
-    plan = SettingsPlanner().load_training(
+    plan = RunPlanBuilder().training(
         recipe_path,
         config_path,
         overrides=["training.epochs=0.25"],
         command="rl-train",
     )
 
-    assert isinstance(plan, SettingsPlan)
+    assert isinstance(plan, RunPlan)
     assert isinstance(plan.settings, Settings)
     assert not hasattr(plan, "recipe_dict")
-    assert plan.recipe_path == recipe_path
-    assert plan.config_path == config_path
-    assert plan.artifact_dir is None
+    assert plan.sources == RunSources(recipe_path=recipe_path, config_path=config_path)
     assert plan.overrides == ("training.epochs=0.25",)
     assert plan.validation_scope == "training"
     assert plan.command == "rl-train"
@@ -102,23 +100,40 @@ def test_component_resolver_alias() -> None:
 
 def _make_minimal_settings(
     task: str = "image_classification",
-    head: dict | None = None,
-    adapter: dict | None = None,
+    head: dict | ComponentSpec | None = None,
+    adapter: dict | ComponentSpec | None = None,
     distributed: dict | None = None,
 ) -> Settings:
     """Build a minimal Settings object for validator tests."""
+    typed_head = ComponentSpec.from_yaml_dict(head) if isinstance(head, dict) else head
+    typed_adapter = (
+        ComponentSpec.from_yaml_dict(adapter) if isinstance(adapter, dict) else adapter
+    )
     recipe = Recipe.model_construct(
         name="test",
         task=task,
-        model={"_component_": "test.Model"},
-        head=head,
-        adapter=adapter,
+        model=ModelComponentSpec(component="test.Model"),
+        head=typed_head,
+        adapter=typed_adapter,
         data=DataSpec.model_construct(
-            dataset={"_component_": "mdp.data.datasets.HuggingFaceDataset", "source": "test-dataset", "split": "train"},
-            collator={"_component_": "mdp.data.collators.CausalLMCollator", "tokenizer": "gpt2"},
+            dataset=ComponentSpec.from_yaml_dict(
+                {
+                    "_component_": "mdp.data.datasets.HuggingFaceDataset",
+                    "source": "test-dataset",
+                    "split": "train",
+                }
+            ),
+            collator=ComponentSpec.from_yaml_dict(
+                {
+                    "_component_": "mdp.data.collators.CausalLMCollator",
+                    "tokenizer": "gpt2",
+                }
+            ),
         ),
         training=TrainingSpec(epochs=1),
-        optimizer={"_component_": "torch.optim.SGD", "lr": 0.01},
+        optimizer=ComponentSpec.from_yaml_dict(
+            {"_component_": "torch.optim.SGD", "lr": 0.01}
+        ),
         scheduler=None,
         loss=None,
         evaluation=None,
@@ -213,7 +228,10 @@ def test_seq2seq_alias_resolves_to_causal_lm() -> None:
 
     resolver = ComponentResolver()
     head = resolver.resolve(
-        {"_component_": "Seq2SeqLMHead", "hidden_dim": 64, "vocab_size": 100}
+        ComponentSpec(
+            component="Seq2SeqLMHead",
+            kwargs={"hidden_dim": 64, "vocab_size": 100},
+        )
     )
     assert isinstance(head, CausalLMHead)
 

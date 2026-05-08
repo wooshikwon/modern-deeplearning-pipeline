@@ -13,7 +13,6 @@ from mdp.cli.output import (
     build_result,
     emit_result,
     is_json_mode,
-    resolve_model_source,
     resolve_model_source_plan,
 )
 
@@ -392,7 +391,7 @@ def run_inference(
             resolver = ComponentResolver()
 
             # inference용 dataset: Recipe dataset 설정을 복사하되 source를 CLI 인자로 교체
-            inference_ds_config = dict(recipe_data.dataset)
+            inference_ds_config = recipe_data.dataset.to_yaml_dict()
             inference_ds_config["source"] = data_source
             inference_ds_config["split"] = "train"  # inference 데이터는 단일 split
             # CLI fields override 적용

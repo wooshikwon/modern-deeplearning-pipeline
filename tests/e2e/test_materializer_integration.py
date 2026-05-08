@@ -1,9 +1,9 @@
-"""Factory 통합 경로 테스트: Settings → Model → Head → Adapter 조립.
+"""AssemblyMaterializer 통합 경로 테스트: AssemblyPlan → Model → Head → Adapter 조립.
 
 4 tests:
-- test_factory_model_with_head_and_lora: head 교체 + LoRA 적용 후 학습 가능
-- test_factory_model_without_head: head=None → 원본 모델 반환
-- test_factory_prefix_tuning_path: prefix_tuning adapter가 factory를 통과
+- test_materializer_model_with_head_and_lora: head 교체 + LoRA 적용 후 학습 가능
+- test_materializer_model_without_head: head=None → 원본 모델 반환
+- test_materializer_prefix_tuning_path: prefix_tuning adapter가 materializer를 통과
 - test_log_trainable_params_plain_module: 일반 nn.Module에서 log_trainable_params 동작
 """
 
@@ -13,9 +13,9 @@ from unittest import mock
 
 import torch
 
-from mdp.factory.factory import Factory
-from mdp.factory.planner import AssemblyPlanner
-from mdp.settings.plan import SettingsPlan
+from mdp.assembly.materializer import AssemblyMaterializer
+from mdp.assembly.planner import AssemblyPlanner
+from mdp.settings.run_plan import RunPlan, RunSources
 from mdp.settings.schema import (
     Config,
     DataSpec,
@@ -27,12 +27,12 @@ from mdp.settings.schema import (
 )
 
 
-def _make_factory_settings(
+def _make_materializer_settings(
     head: dict | None = None,
     adapter: dict | None = None,
 ) -> Settings:
     recipe = Recipe(
-        name="factory-test",
+        name="materializer-test",
         task="image_classification",
         model={"_component_": "tests.e2e.models.TinyVisionModel", "num_classes": 2, "hidden_dim": 16},
         head=head,
@@ -43,21 +43,19 @@ def _make_factory_settings(
         ),
         training=TrainingSpec(epochs=1),
         optimizer={"_component_": "AdamW", "lr": 1e-3},
-        metadata=MetadataSpec(author="test", description="factory integration"),
+        metadata=MetadataSpec(author="test", description="materializer integration"),
     )
     config = Config()
     config.job.resume = "disabled"
     return Settings(recipe=recipe, config=config)
 
 
-def _make_settings_plan(settings: Settings) -> SettingsPlan:
-    return SettingsPlan(
-        command="train",
-        mode="sft",
+def _make_run_plan(settings: Settings, *, mode: str = "sft") -> RunPlan:
+    return RunPlan(
+        command="rl-train" if mode == "rl" else "train",
+        mode=mode,
         settings=settings,
-        recipe_path=None,
-        config_path=None,
-        artifact_dir=None,
+        sources=RunSources(),
         overrides=(),
         callback_configs=(),
         validation_scope="training",
@@ -65,9 +63,13 @@ def _make_settings_plan(settings: Settings) -> SettingsPlan:
     )
 
 
-def test_factory_model_with_head_and_lora() -> None:
-    """Factory가 head 교체 + LoRA 적용한 모델을 반환하고, 학습 가능한지 확인."""
-    settings = _make_factory_settings(
+def _make_assembly_plan(settings: Settings, *, mode: str = "sft"):
+    return AssemblyPlanner.from_run_plan(_make_run_plan(settings, mode=mode))
+
+
+def test_materializer_model_with_head_and_lora() -> None:
+    """AssemblyMaterializer가 head 교체 + LoRA 적용한 모델을 반환하고, 학습 가능한지 확인."""
+    settings = _make_materializer_settings(
         head={
             "_component_": "ClassificationHead",
             "_target_attr": "head",
@@ -79,8 +81,8 @@ def test_factory_model_with_head_and_lora() -> None:
             "target_modules": ["classifier"],
         },
     )
-    factory = Factory(settings)
-    model = factory.create_model()
+    materializer = AssemblyMaterializer(_make_assembly_plan(settings))
+    model = materializer.materialize_policy_model()
 
     # head가 교체되었는지 (원래 num_classes=2 → 5로 변경)
     assert hasattr(model, "head")
@@ -96,41 +98,43 @@ def test_factory_model_with_head_and_lora() -> None:
     assert torch.isfinite(loss)
 
 
-def test_factory_accepts_assembly_plan_and_keeps_model_cache() -> None:
-    """Factory can consume an AssemblyPlan while preserving create_model cache."""
-    settings = _make_factory_settings()
-    assembly_plan = AssemblyPlanner.from_settings_plan(_make_settings_plan(settings))
+def test_materializer_accepts_assembly_plan_and_keeps_model_cache() -> None:
+    """AssemblyMaterializer can consume an AssemblyPlan while preserving create_model cache."""
+    settings = _make_materializer_settings()
+    assembly_plan = _make_assembly_plan(settings)
 
-    factory = Factory(assembly_plan)
-    model = factory.create_model()
+    materializer = AssemblyMaterializer(assembly_plan)
+    model = materializer.materialize_policy_model()
 
-    assert factory.settings is settings
-    assert factory.create_model() is model
+    assert materializer.settings is settings
+    assert materializer.materialize_policy_model() is model
 
 
-def test_factory_create_dataloaders_materializes_data_node() -> None:
-    """Factory dataloader path consumes AssemblyPlan.data and keeps public shape."""
-    settings = _make_factory_settings()
+def test_materializer_create_dataloaders_materializes_data_node() -> None:
+    """AssemblyMaterializer dataloader path consumes AssemblyPlan.data and keeps public shape."""
+    settings = _make_materializer_settings()
     settings.config.compute.distributed = {"strategy": "ddp"}
-    settings_plan = _make_settings_plan(settings)
-    assembly_plan = AssemblyPlanner.from_settings_plan(settings_plan)
+    assembly_plan = _make_assembly_plan(settings)
     loaders = {"train": object(), "val": object()}
 
     with mock.patch(
         "mdp.data.dataloader.create_dataloaders",
         return_value=loaders,
     ) as create_dataloaders:
-        result = Factory(assembly_plan).create_dataloaders()
+        result = AssemblyMaterializer(assembly_plan).materialize_dataloaders()
 
     assert result == loaders
-    assert create_dataloaders.call_args.kwargs["dataset_config"] == settings.recipe.data.dataset
+    dataset_config = create_dataloaders.call_args.kwargs["dataset_config"]
+    assert dataset_config.component == settings.recipe.data.dataset.component
+    assert dataset_config.kwargs == settings.recipe.data.dataset.kwargs
+    assert dataset_config.resolved_component == settings.recipe.data.dataset.component
     assert create_dataloaders.call_args.kwargs["val_dataset_config"] is None
     assert create_dataloaders.call_args.kwargs["distributed"] is True
 
 
-def test_factory_create_models_materializes_rl_role_nodes() -> None:
-    """Factory.create_models materializes RL ModelNodes and keeps role dict output."""
-    settings = _make_factory_settings()
+def test_materializer_create_models_materializes_rl_role_nodes() -> None:
+    """AssemblyMaterializer.create_models materializes RL ModelNodes and keeps role dict output."""
+    settings = _make_materializer_settings()
     settings.recipe.rl = RLSpec(
         algorithm={"_component_": "DPO"},
         models={
@@ -145,19 +149,19 @@ def test_factory_create_models_materializes_rl_role_nodes() -> None:
         },
     )
 
-    factory = Factory(settings)
-    models = factory.create_models()
+    materializer = AssemblyMaterializer(_make_assembly_plan(settings, mode="rl"))
+    models = materializer.materialize_models()
 
     assert set(models) == {"policy", "reference"}
     assert models["policy"] is not models["reference"]
-    assert factory.create_models() is models
+    assert materializer.materialize_models() is models
 
 
-def test_factory_model_without_head() -> None:
+def test_materializer_model_without_head() -> None:
     """head=None이면 원본 모델 그대로 반환."""
-    settings = _make_factory_settings(head=None, adapter=None)
-    factory = Factory(settings)
-    model = factory.create_model()
+    settings = _make_materializer_settings(head=None, adapter=None)
+    materializer = AssemblyMaterializer(_make_assembly_plan(settings))
+    model = materializer.materialize_policy_model()
 
     # TinyVisionModel의 기본 head가 유지
     assert hasattr(model, "head")
@@ -166,23 +170,25 @@ def test_factory_model_without_head() -> None:
     assert torch.isfinite(loss)
 
 
-def test_factory_prefix_tuning_path() -> None:
-    """PrefixTuning adapter가 factory의 resolver 경로를 통과하는지 확인.
+def test_materializer_prefix_tuning_path() -> None:
+    """PrefixTuning adapter가 materializer의 resolver 경로를 통과하는지 확인.
 
     PEFT PrefixTuning은 task_type이 필수라 TinyModel에서 직접 동작하지 않을 수 있다.
-    핵심 검증: factory가 _component_=="PrefixTuning"일 때 resolver.resolve를 통해
+    핵심 검증: materializer가 _component_=="PrefixTuning"일 때 resolver.resolve를 통해
     apply_prefix_tuning을 호출하는지.
     """
     from unittest.mock import patch
 
-    settings = _make_factory_settings(
+    settings = _make_materializer_settings(
         adapter={"_component_": "PrefixTuning", "r": 4},
     )
-    factory = Factory(settings)
+    materializer = AssemblyMaterializer(_make_assembly_plan(settings))
 
     with patch("mdp.models.adapters.prefix_tuning.apply_prefix_tuning") as mock_apply:
-        mock_apply.return_value = factory._load_pretrained(settings.recipe.model)
-        factory.create_model()
+        from tests.e2e.models import TinyVisionModel
+
+        mock_apply.return_value = TinyVisionModel(num_classes=2, hidden_dim=16)
+        materializer.materialize_policy_model()
 
         mock_apply.assert_called_once()
         _, call_kwargs = mock_apply.call_args

@@ -70,8 +70,7 @@ class CompatValidator:
             has_strategy = False
             strategy = None
         else:
-            # runtime(create_strategy)과 동일하게 기본값 "auto" 적용
-            strategy = distributed.get("strategy", "auto")
+            strategy = get_strategy_name(settings)
             has_strategy = strategy is not None and strategy != "none"
 
         if gpu_count > 1 and not has_strategy:
@@ -108,10 +107,7 @@ class CompatValidator:
         if distributed is None:
             return
 
-        strategy = distributed.get("strategy", "auto")
-        strategy_name = strategy
-        if isinstance(strategy, dict):
-            strategy_name = strategy.get("_component_", "")
+        strategy_name = get_strategy_name(settings)
         if not (isinstance(strategy_name, str) and strategy_name.lower().startswith("fsdp")):
             return
 
@@ -127,7 +123,7 @@ class CompatValidator:
         # RL per-model adapter
         if settings.recipe.rl is not None:
             for name, spec in settings.recipe.rl.models.items():
-                adapter = spec.get("adapter")
+                adapter = spec.adapter
                 if adapter is not None and is_qlora(adapter):
                     result.errors.append(
                         f"FSDP와 rl.models.{name}.adapter의 QLoRA(4bit)는 호환되지 않습니다. "
@@ -141,7 +137,11 @@ class CompatValidator:
         distributed = settings.config.compute.distributed
         if distributed is None:
             return
-        moe_config = distributed.get("moe")
+        moe_config = (
+            distributed.moe
+            if hasattr(distributed, "moe")
+            else distributed.get("moe")
+        )
         if moe_config is None or not moe_config.get("enabled", False):
             return
 

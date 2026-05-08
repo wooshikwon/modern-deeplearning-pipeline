@@ -1,13 +1,12 @@
-"""BusinessValidator — 비즈니스 규칙 검증.
-
-태스크-헤드 호환성, adapter-precision 호환성,
-분산 학습 batch_size 검증 등 비즈니스 규칙을 검증한다.
-"""
+"""BusinessValidator — 비즈니스 규칙 검증."""
 
 from __future__ import annotations
 
+from mdp.settings.components import ComponentSpec
 from mdp.settings.schema import Settings
 from mdp.settings.validation import ValidationResult, is_qlora
+from mdp.settings.validation.component import iter_component_specs
+
 
 # 태스크별 허용 Head 클래스명 매핑
 TASK_HEAD_COMPAT: dict[str, list[str]] = {
@@ -31,12 +30,23 @@ def _extract_class_name(component_path: str) -> str:
 class BusinessValidator:
     """태스크-모델 호환성 등 비즈니스 규칙을 검증한다."""
 
-    def validate(self, settings: Settings) -> ValidationResult:
+    def validate(
+        self,
+        settings: Settings,
+        *,
+        validation_scope: str = "recipe",
+    ) -> ValidationResult:
         """검증 결과를 반환한다."""
-        return self.validate_partial(settings)
+        return self.validate_partial(settings, validation_scope=validation_scope)
 
     @classmethod
-    def validate_partial(cls, settings: Settings, checks: list[str] | None = None) -> ValidationResult:
+    def validate_partial(
+        cls,
+        settings: Settings,
+        checks: list[str] | None = None,
+        *,
+        validation_scope: str = "recipe",
+    ) -> ValidationResult:
         """부분 검증. checks가 None이면 전체 실행."""
         result = ValidationResult()
         all_checks = {
@@ -51,11 +61,13 @@ class BusinessValidator:
         }
         targets = checks or list(all_checks.keys())
         for name in targets:
-            if name in all_checks:
+            if name not in all_checks:
+                continue
+            if name in {"task_fields", "component_imports"}:
+                all_checks[name](settings, result, validation_scope)
+            else:
                 all_checks[name](settings, result)
         return result
-
-    # ── 개별 검증 ──
 
     @staticmethod
     def _check_head_task_compat(settings: Settings, result: ValidationResult) -> None:
@@ -65,18 +77,12 @@ class BusinessValidator:
         head = recipe.head
 
         if head is None:
-            # head가 없으면 검증 대상 없음
             return
 
-        component_path = head.get("_component_")
-        if component_path is None:
-            return
-
-        head_class = _extract_class_name(component_path)
+        head_class = _extract_class_name(head.component)
         allowed = TASK_HEAD_COMPAT.get(task)
 
         if allowed is not None:
-            # 빈 리스트 = head 생략 권장
             if len(allowed) == 0:
                 result.warnings.append(
                     f"태스크 '{task}'은(는) head 생략을 권장합니다. "
@@ -88,9 +94,8 @@ class BusinessValidator:
                     f"허용 head: {allowed}"
                 )
 
-        # 1b. head 교체 + adapter 사용 시 modules_to_save 경고
         adapter = recipe.adapter
-        if adapter is not None and not adapter.get("modules_to_save"):
+        if adapter is not None and not adapter.kwargs.get("modules_to_save"):
             result.warnings.append(
                 "head와 adapter를 함께 사용하지만 modules_to_save가 "
                 "비어 있습니다. head 파라미터가 학습되지 않을 수 있습니다."
@@ -98,15 +103,16 @@ class BusinessValidator:
 
     @staticmethod
     def _validate_single_adapter(
-        adapter: dict[str, Any],
+        adapter: ComponentSpec,
         result: ValidationResult,
         prefix: str,
         torch_dtype: str | None,
         has_head: bool,
     ) -> None:
         """단일 adapter 설정을 검증한다. SFT/RL 양쪽에서 공용."""
-        component = adapter.get("_component_", "")
-        r = adapter.get("r")
+        component = adapter.component
+        kwargs = adapter.kwargs
+        r = kwargs.get("r")
 
         if component and r is None:
             result.errors.append(
@@ -115,11 +121,11 @@ class BusinessValidator:
 
         if component in ("PrefixTuning", "mdp.models.adapters.prefix_tuning.apply_prefix_tuning"):
             lora_only_fields = []
-            if adapter.get("alpha") is not None:
+            if kwargs.get("alpha") is not None:
                 lora_only_fields.append("alpha")
-            if adapter.get("dropout", 0.0) != 0.0:
+            if kwargs.get("dropout", 0.0) != 0.0:
                 lora_only_fields.append("dropout")
-            target_modules = adapter.get("target_modules")
+            target_modules = kwargs.get("target_modules")
             if target_modules and target_modules != "all-linear":
                 lora_only_fields.append("target_modules")
             if lora_only_fields:
@@ -129,7 +135,7 @@ class BusinessValidator:
                 )
 
         if is_qlora(adapter):
-            quant = adapter.get("quantization")
+            quant = kwargs.get("quantization")
             if quant is None or (isinstance(quant, dict) and quant.get("bits") is None):
                 result.errors.append(
                     f"{prefix}: QLoRA에는 quantization.bits가 필수입니다."
@@ -151,25 +157,22 @@ class BusinessValidator:
                 )
 
     @staticmethod
-    def _check_adapter(
-        settings: Settings, result: ValidationResult
-    ) -> None:
+    def _check_adapter(settings: Settings, result: ValidationResult) -> None:
         """2. adapter 설정 검증."""
         adapter = settings.recipe.adapter
         if adapter is None:
             return
 
         BusinessValidator._validate_single_adapter(
-            adapter, result,
+            adapter,
+            result,
             prefix="adapter",
-            torch_dtype=settings.recipe.model.get("torch_dtype"),
+            torch_dtype=settings.recipe.model.kwargs.get("torch_dtype"),
             has_head=settings.recipe.head is not None,
         )
 
     @staticmethod
-    def _check_rl_models(
-        settings: Settings, result: ValidationResult
-    ) -> None:
+    def _check_rl_models(settings: Settings, result: ValidationResult) -> None:
         """2d. RL per-model head/adapter 검증."""
         recipe = settings.recipe
         if recipe.rl is None:
@@ -179,47 +182,41 @@ class BusinessValidator:
         for name, spec in recipe.rl.models.items():
             prefix = f"rl.models.{name}"
 
-            # head-task 호환성
-            head = spec.get("head")
+            head = spec.head
             if head is not None:
-                component_path = head.get("_component_")
-                if component_path is not None:
-                    head_class = _extract_class_name(component_path)
-                    allowed = TASK_HEAD_COMPAT.get(task)
-                    if allowed is not None:
-                        if len(allowed) == 0:
-                            result.warnings.append(
-                                f"{prefix}: 태스크 '{task}'은(는) head 생략을 권장합니다. "
-                                f"현재 head: '{head_class}'"
-                            )
-                        elif head_class not in allowed:
-                            result.errors.append(
-                                f"{prefix}: 태스크 '{task}'에 호환되지 않는 head '{head_class}'. "
-                                f"허용 head: {allowed}"
-                            )
+                head_class = _extract_class_name(head.component)
+                allowed = TASK_HEAD_COMPAT.get(task)
+                if allowed is not None:
+                    if len(allowed) == 0:
+                        result.warnings.append(
+                            f"{prefix}: 태스크 '{task}'은(는) head 생략을 권장합니다. "
+                            f"현재 head: '{head_class}'"
+                        )
+                    elif head_class not in allowed:
+                        result.errors.append(
+                            f"{prefix}: 태스크 '{task}'에 호환되지 않는 head '{head_class}'. "
+                            f"허용 head: {allowed}"
+                        )
 
-                # head + adapter 시 modules_to_save 경고
-                adapter = spec.get("adapter")
-                if adapter is not None and not adapter.get("modules_to_save"):
+                adapter = spec.adapter
+                if adapter is not None and not adapter.kwargs.get("modules_to_save"):
                     result.warnings.append(
                         f"{prefix}: head와 adapter를 함께 사용하지만 modules_to_save가 "
                         "비어 있습니다. head 파라미터가 학습되지 않을 수 있습니다."
                     )
 
-            # adapter 검증
-            adapter = spec.get("adapter")
+            adapter = spec.adapter
             if adapter is not None:
                 BusinessValidator._validate_single_adapter(
-                    adapter, result,
+                    adapter,
+                    result,
                     prefix=f"{prefix}.adapter",
-                    torch_dtype=spec.get("torch_dtype"),
+                    torch_dtype=spec.model.kwargs.get("torch_dtype"),
                     has_head=head is not None,
                 )
 
     @staticmethod
-    def _check_distributed_batch(
-        settings: Settings, result: ValidationResult
-    ) -> None:
+    def _check_distributed_batch(settings: Settings, result: ValidationResult) -> None:
         """3. 분산 학습 시 batch_size 검증."""
         distributed = settings.config.compute.distributed
         if distributed is None:
@@ -234,49 +231,42 @@ class BusinessValidator:
 
     @staticmethod
     def _check_streaming_distributed(
-        settings: Settings, result: ValidationResult
+        settings: Settings,
+        result: ValidationResult,
     ) -> None:
-        """3b. streaming + data parallelism 비호환 검증.
-
-        _component_ 기반 DataSpec에서는 streaming이 Dataset init_args에 있으므로
-        스키마 레벨에서 감지할 수 없다. Dataset 클래스가 런타임에 처리한다.
-        """
+        """3b. Dataset init kwargs 안의 streaming은 런타임 Dataset이 처리한다."""
         return
 
     @staticmethod
     def _check_task_fields(
-        settings: Settings, result: ValidationResult
+        settings: Settings,
+        result: ValidationResult,
+        validation_scope: str = "recipe",
     ) -> None:
-        """4. task 유효성 검증.
-
-        _component_ 기반 DataSpec에서는 fields가 Dataset init_args에 있으므로
-        task-fields 양방향 검증을 수행하지 않는다. task 이름 유효성만 확인한다.
-        """
+        """4. task 이름 유효성 검증."""
         from mdp.task_taxonomy import TASK_PRESETS
 
         recipe = settings.recipe
         if recipe.task not in TASK_PRESETS:
-            result.warnings.append(
+            message = (
                 f"알 수 없는 task '{recipe.task}'. "
                 f"등록된 task: {list(TASK_PRESETS.keys())}"
             )
+            if validation_scope == "training":
+                result.errors.append(message)
+            else:
+                result.warnings.append(message)
 
     @staticmethod
-    def _check_data_components(
-        settings: Settings, result: ValidationResult
-    ) -> None:
-        """5. data.dataset/collator _component_ 존재 검증.
-
-        label_strategy 제거 후, dataset과 collator가 _component_ 키를 갖는지만 확인한다.
-        세부 fields 검증은 Dataset/Collator 클래스의 __init__이 책임진다.
-        """
+    def _check_data_components(settings: Settings, result: ValidationResult) -> None:
+        """5. data.dataset/collator _component_ 존재 검증."""
         data = settings.recipe.data
-        if "_component_" not in data.dataset:
+        if not data.dataset.component:
             result.errors.append(
                 "data.dataset에 '_component_' 키가 없습니다. "
                 "예: {_component_: HuggingFaceDataset, source: wikitext, ...}"
             )
-        if "_component_" not in data.collator:
+        if not data.collator.component:
             result.errors.append(
                 "data.collator에 '_component_' 키가 없습니다. "
                 "예: {_component_: CausalLMCollator, tokenizer: gpt2}"
@@ -284,54 +274,30 @@ class BusinessValidator:
 
     @staticmethod
     def _check_component_imports(
-        settings: Settings, result: ValidationResult
+        settings: Settings,
+        result: ValidationResult,
+        validation_scope: str = "recipe",
     ) -> None:
-        """6. _component_ 경로 import 가능 여부 검증.
-
-        모델 weights를 로딩하지 않고 클래스만 import하여, 오타나
-        잘못된 모듈 경로를 모델 로딩 전에 잡는다.
-        """
+        """6. active training component import 검증."""
         from mdp.settings.resolver import ComponentResolver
 
         resolver = ComponentResolver()
-        recipe = settings.recipe
+        hard_error = validation_scope == "training"
 
-        # Recipe 내 모든 _component_ 경로 수집: (필드명, 경로)
-        targets: list[tuple[str, str]] = []
-
-        # SFT
-        if recipe.model.get("_component_"):
-            targets.append(("model", recipe.model["_component_"]))
-        if recipe.adapter and recipe.adapter.get("_component_"):
-            targets.append(("adapter", recipe.adapter["_component_"]))
-        if recipe.head and recipe.head.get("_component_"):
-            targets.append(("head", recipe.head["_component_"]))
-        if recipe.loss and recipe.loss.get("_component_"):
-            targets.append(("loss", recipe.loss["_component_"]))
-
-        # Data
-        if recipe.data.dataset.get("_component_"):
-            targets.append(("data.dataset", recipe.data.dataset["_component_"]))
-        if recipe.data.collator.get("_component_"):
-            targets.append(("data.collator", recipe.data.collator["_component_"]))
-        if recipe.data.val_dataset and recipe.data.val_dataset.get("_component_"):
-            targets.append(("data.val_dataset", recipe.data.val_dataset["_component_"]))
-
-        # RL
-        if recipe.rl:
-            if recipe.rl.algorithm.get("_component_"):
-                targets.append(("rl.algorithm", recipe.rl.algorithm["_component_"]))
-            for name, spec in recipe.rl.models.items():
-                if spec.get("_component_"):
-                    targets.append((f"rl.models.{name}", spec["_component_"]))
-                if isinstance(spec.get("adapter"), dict) and spec["adapter"].get("_component_"):
-                    targets.append((f"rl.models.{name}.adapter", spec["adapter"]["_component_"]))
-
-        for field, path in targets:
+        for spec in iter_component_specs(settings):
+            if spec.component is None:
+                continue
+            if getattr(spec, "pretrained", None) is not None:
+                continue
+            resolved = spec.component
             try:
-                resolved = resolver._resolve_alias(path)
+                resolved = resolver._resolve_alias(spec.component)
                 resolver.import_class(resolved)
             except (ImportError, ModuleNotFoundError, AttributeError, ValueError) as e:
-                result.warnings.append(
-                    f"{field}._component_ '{path}' import 실패: {e}"
-                )
+                message = f"{spec.path}._component_ '{spec.component}' import 실패: {e}"
+                project_owned = resolved.startswith(("mdp.", "tests.", "torch."))
+                registered_alias = "." not in spec.component
+                if hard_error and (registered_alias or project_owned):
+                    result.errors.append(message)
+                else:
+                    result.warnings.append(message)

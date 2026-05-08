@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 
 import typer
 
@@ -90,9 +89,9 @@ def run_serve(
 
         serving_config = None
         try:
-            from mdp.settings.factory import SettingsFactory
+            from mdp.settings.loader import SettingsLoader
 
-            _settings = SettingsFactory().from_artifact(str(source_dir))
+            _settings = SettingsLoader().load_artifact_settings(str(source_dir))
             serving_config = _settings.config.serving
         except Exception:
             pass
@@ -125,8 +124,8 @@ def run_serve(
             typer.echo(f"  모델: {recipe.name} (task: {recipe.task})")
             if effective_device_map is not None:
                 typer.echo(f"  device_map: {effective_device_map}")
-            typer.echo(f"  /predict — 추론 엔드포인트")
-            typer.echo(f"  /health  — 헬스 체크")
+            typer.echo("  /predict — 추론 엔드포인트")
+            typer.echo("  /health  — 헬스 체크")
 
         if is_json_mode():
             from mdp.cli.schemas import ServeResult

@@ -18,6 +18,7 @@ from mdp.settings.schema import (
 
 
 def e2e_artifact_dir(tmp_path: Path, test_name: str, *parts: str) -> Path:
+    """Return per-test artifacts under the cloud artifact root when configured."""
     root = os.environ.get("MDP_TEST_ARTIFACT_DIR")
     if root:
         safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in test_name)

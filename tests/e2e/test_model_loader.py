@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
+import pytest
 import torch
 import yaml
 
@@ -142,50 +144,83 @@ def test_reconstruct_model_from_manifest_checkpoint(tmp_path: Path) -> None:
         assert torch.equal(expected, actual)
 
 
-# ---------------------------------------------------------------------------
-# device_map 관련 테스트
-# ---------------------------------------------------------------------------
-
-
-def test_dispatch_model_with_accelerate(tmp_path: Path) -> None:
-    """_dispatch_model이 accelerate로 모델을 분산 배치한다 (CPU 환경에서도 동작)."""
+def test_reconstruct_model_dispatches_safetensors_with_device_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """device_map reconstruction uses the public artifact loading path."""
     from safetensors.torch import save_file
 
-    from mdp.serving.model_loader import _dispatch_model
+    from mdp.serving import model_loader
 
     model = TinyVisionModel(num_classes=2, hidden_dim=16)
     save_file(model.state_dict(), tmp_path / "model.safetensors")
+    _write_tiny_recipe(tmp_path, name="device-map-safetensors-test")
 
-    dispatched = _dispatch_model(
-        TinyVisionModel(num_classes=2, hidden_dim=16),
-        str(tmp_path / "model.safetensors"),
+    calls: list[tuple[Any, str, str, dict[str, str] | None]] = []
+
+    def fake_dispatch(
+        model: Any,
+        checkpoint: str,
+        device_map: str,
+        max_memory: dict[str, str] | None = None,
+    ) -> Any:
+        calls.append((model, checkpoint, device_map, max_memory))
+        model.hf_device_map = {"": "cpu"}
+        return model
+
+    monkeypatch.setattr(model_loader, "_dispatch_model", fake_dispatch)
+
+    loaded, _settings = model_loader.reconstruct_model(
+        tmp_path,
         device_map="auto",
+        max_memory={"cpu": "4GiB"},
     )
-    assert hasattr(dispatched, "hf_device_map")
+
+    assert calls
+    assert calls[0][1] == str(tmp_path / "model.safetensors")
+    assert calls[0][2] == "auto"
+    assert calls[0][3] == {"cpu": "4GiB"}
+    assert loaded.hf_device_map == {"": "cpu"}
 
 
-def test_find_checkpoint_path_safetensors(tmp_path: Path) -> None:
-    """safetensors 파일을 우선 반환한다."""
-    from mdp.serving.model_loader import _find_checkpoint_path
+def test_reconstruct_model_dispatches_model_pt_fallback_with_device_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """device_map reconstruction falls back to model.pt through public behavior."""
+    from mdp.serving import model_loader
 
-    (tmp_path / "model.safetensors").touch()
-    (tmp_path / "model.pt").touch()
-    assert _find_checkpoint_path(tmp_path) == str(tmp_path / "model.safetensors")
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    torch.save(model.state_dict(), tmp_path / "model.pt")
+    _write_tiny_recipe(tmp_path, name="device-map-pt-test")
+
+    checkpoints: list[str] = []
+
+    def fake_dispatch(
+        model: Any,
+        checkpoint: str,
+        device_map: str,
+        max_memory: dict[str, str] | None = None,
+    ) -> Any:
+        checkpoints.append(checkpoint)
+        return model
+
+    monkeypatch.setattr(model_loader, "_dispatch_model", fake_dispatch)
+
+    model_loader.reconstruct_model(tmp_path, device_map="auto")
+
+    assert checkpoints == [str(tmp_path / "model.pt")]
 
 
-def test_find_checkpoint_path_pt_fallback(tmp_path: Path) -> None:
-    """safetensors 없으면 model.pt로 fallback."""
-    from mdp.serving.model_loader import _find_checkpoint_path
+def test_reconstruct_model_device_map_requires_weights(tmp_path: Path) -> None:
+    """device_map reconstruction fails clearly when no dispatchable weights exist."""
+    from mdp.serving.model_loader import reconstruct_model
 
-    (tmp_path / "model.pt").touch()
-    assert _find_checkpoint_path(tmp_path) == str(tmp_path / "model.pt")
+    _write_tiny_recipe(tmp_path, name="device-map-missing-weights-test")
 
-
-def test_find_checkpoint_path_none(tmp_path: Path) -> None:
-    """가중치 파일 없으면 None."""
-    from mdp.serving.model_loader import _find_checkpoint_path
-
-    assert _find_checkpoint_path(tmp_path) is None
+    with pytest.raises(ValueError, match="model.safetensors/model.pt"):
+        reconstruct_model(tmp_path, device_map="auto")
 
 
 def test_serving_config_device_map_fields() -> None:
@@ -199,3 +234,27 @@ def test_serving_config_device_map_fields() -> None:
     default = ServingConfig()
     assert default.device_map is None
     assert default.max_memory is None
+
+
+def _write_tiny_recipe(tmp_path: Path, *, name: str) -> None:
+    recipe = {
+        "name": name,
+        "task": "image_classification",
+        "model": {
+            "_component_": "tests.e2e.models.TinyVisionModel",
+            "num_classes": 2,
+            "hidden_dim": 16,
+        },
+        "data": {
+            "dataset": {
+                "_component_": "mdp.data.datasets.HuggingFaceDataset",
+                "source": "/tmp/fake",
+                "split": "train",
+            },
+            "collator": {"_component_": "mdp.data.collators.ClassificationCollator"},
+        },
+        "training": {"epochs": 1},
+        "optimizer": {"_component_": "AdamW", "lr": 1e-3},
+        "metadata": {"author": "test", "description": "device map test"},
+    }
+    (tmp_path / "recipe.yaml").write_text(yaml.dump(recipe))

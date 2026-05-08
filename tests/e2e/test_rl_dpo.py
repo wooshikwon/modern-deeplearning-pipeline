@@ -123,7 +123,7 @@ def test_rl_trainer_dpo() -> None:
     settings = Settings(recipe=recipe, config=Config())
     settings.config.job.resume = "disabled"
 
-    # 모델 생성 (Factory 우회, 직접 생성)
+    # 모델 생성 (assembly materialization 우회, 직접 생성)
     models = {"policy": TinyLM(), "reference": TinyLM()}
 
     trainer = RLTrainer(

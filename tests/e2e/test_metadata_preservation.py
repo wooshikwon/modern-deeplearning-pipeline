@@ -7,7 +7,6 @@ run_batch_inference가 콜백에 metadata 슬라이스를 전달하는 과정을
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import torch
 from torch import Tensor, nn

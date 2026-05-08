@@ -44,13 +44,12 @@ if _CWD not in sys.path:
 import torch  # noqa: E402
 
 from mdp.data.dataloader import create_dataloaders  # noqa: E402
-from mdp.settings.factory import SettingsFactory  # noqa: E402
+from mdp.settings.loader import SettingsLoader  # noqa: E402
 
 
 def _load_recipe_settings(recipe_path: str) -> Any:
     """Recipe 단독 로드. config 페어가 없어도 ``for_estimation``으로 진입 가능."""
-    factory = SettingsFactory()
-    return factory.for_estimation(recipe_path)
+    return SettingsLoader().load_estimation_settings(recipe_path)
 
 
 def _override_sampler(recipe_data: Any, sampler_config: dict[str, Any] | None) -> None:

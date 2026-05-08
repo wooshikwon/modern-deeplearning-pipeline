@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import json
 from typing import Any
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
-import pytest
 
 from mdp.callbacks.interventions import apply_intervention_tags
 from mdp.callbacks.base import BaseInterventionCallback, BaseInferenceCallback

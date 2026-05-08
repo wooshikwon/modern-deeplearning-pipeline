@@ -1,4 +1,4 @@
-"""create_dataloaders — _component_ 기반 Dataset + Collator + Sampler 조립.
+"""create_dataloaders — component spec 기반 Dataset + Collator + Sampler 조립.
 
 Dataset/Collator/Sampler를 ComponentResolver로 인스턴스화하고
 DataLoader로 감싸는 얇은 조립자.
@@ -7,7 +7,7 @@ DataLoader로 감싸는 얇은 조립자.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Protocol
 
 from torch.utils.data import DataLoader
 
@@ -16,15 +16,22 @@ from mdp.settings.resolver import ComponentResolver
 logger = logging.getLogger(__name__)
 
 
+class ComponentSpecLike(Protocol):
+    """Minimal component spec surface consumed by DataLoader assembly."""
+
+    component: str | None
+    resolved_component: str | None
+
+
 def create_dataloaders(
-    dataset_config: dict[str, Any],
-    collator_config: dict[str, Any],
+    dataset_config: ComponentSpecLike,
+    collator_config: ComponentSpecLike,
     dataloader_config: dict[str, Any] | None = None,
-    val_dataset_config: dict[str, Any] | None = None,
-    sampler_config: dict[str, Any] | None = None,
+    val_dataset_config: ComponentSpecLike | None = None,
+    sampler_config: ComponentSpecLike | None = None,
     distributed: bool = False,
 ) -> dict[str, DataLoader]:
-    """_component_ 설정으로 DataLoader 딕셔너리를 생성한다.
+    """component spec 설정으로 DataLoader 딕셔너리를 생성한다.
 
     1. ``dataset_config``를 resolve하여 Dataset 인스턴스 생성
     2. ``collator_config``를 resolve하여 collate_fn 생성
@@ -34,11 +41,11 @@ def create_dataloaders(
     4. ``val_dataset_config``가 있으면 val DataLoader도 생성 (val에는 sampler 미적용)
 
     Args:
-        dataset_config: ``_component_`` 키를 포함하는 Dataset 설정.
-        collator_config: ``_component_`` 키를 포함하는 Collator 설정.
+        dataset_config: Dataset component spec.
+        collator_config: Collator component spec.
         dataloader_config: DataLoader kwargs (batch_size, num_workers 등).
         val_dataset_config: Validation Dataset 설정. None이면 val 비활성.
-        sampler_config: ``_component_`` 키를 포함하는 (Batch)Sampler 설정.
+        sampler_config: (Batch)Sampler component spec.
             지정 시 ``DataLoader(batch_sampler=...)``로 train에 주입되며,
             ``batch_size``/``shuffle``/``drop_last``는 sampler 책임으로 위임된다
             (DataLoader 표준 계약상 ``batch_sampler`` 사용 시 이들은 ValueError를
@@ -78,7 +85,9 @@ def create_dataloaders(
         # rank 간 partition이 부재하므로 경고 로그 (spec 정합성 표).
         if distributed:
             sampler_class_name = str(
-                sampler_config.get("_component_", "<unknown>")
+                sampler_config.resolved_component
+                or sampler_config.component
+                or "<unknown>"
             )
             if "Distributed" not in sampler_class_name:
                 logger.warning(

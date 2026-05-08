@@ -38,11 +38,52 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 import torch
 
+from mdp.settings.components import ComponentSpec, ModelComponentSpec
+
 if TYPE_CHECKING:
     from mdp.settings.schema import Recipe, Settings
 
 
 logger = logging.getLogger(__name__)
+
+
+def _component_name(spec: ComponentSpec | ModelComponentSpec | None) -> str:
+    if spec is None:
+        return "unknown"
+    if isinstance(spec, Mapping):
+        try:
+            return ComponentSpec.from_yaml_dict(spec).component
+        except ValueError:
+            return ModelComponentSpec.from_yaml_dict(spec).component or "unknown"
+    return spec.component or "unknown"
+
+
+def _pretrained_name(spec: ModelComponentSpec | None) -> str:
+    if spec is None:
+        return "none"
+    if isinstance(spec, Mapping):
+        return ModelComponentSpec.from_yaml_dict(spec).pretrained or "none"
+    return spec.pretrained or "none"
+
+
+def _component_kwargs(spec: ComponentSpec | ModelComponentSpec | Mapping[str, Any]) -> Mapping[str, Any]:
+    if isinstance(spec, Mapping):
+        try:
+            return ComponentSpec.from_yaml_dict(spec).kwargs
+        except ValueError:
+            try:
+                return ModelComponentSpec.from_yaml_dict(spec).kwargs
+            except ValueError:
+                return spec
+    return spec.kwargs
+
+
+def _role_model_spec(role: Any) -> Any:
+    return role.get("model", role) if isinstance(role, Mapping) else role.model
+
+
+def _role_owned_spec(role: Any, key: str) -> Any:
+    return role.get(key) if isinstance(role, Mapping) else getattr(role, key)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -138,29 +179,40 @@ def log_static_params(
         params: dict[str, Any] = {"task": recipe.task}
 
         if is_rl:
-            policy_spec = recipe.rl.models.get("policy", {})
-            algo = recipe.rl.algorithm
-            if isinstance(algo, Mapping):
-                params["algorithm"] = algo.get("_component_", "unknown")
-            params["policy_class"] = policy_spec.get("_component_", "unknown")
-            params["pretrained"] = policy_spec.get("pretrained", "none")
+            policy_spec = recipe.rl.models.get("policy")
+            params["algorithm"] = _component_name(recipe.rl.algorithm)
+            policy_model = _role_model_spec(policy_spec) if policy_spec is not None else None
+            params["policy_class"] = _component_name(policy_model)
+            params["pretrained"] = _pretrained_name(
+                policy_model
+            )
             # RL learning_rate_init: recipe.rl.models.policy.optimizer.lr
-            policy_optimizer = policy_spec.get("optimizer") or {}
-            if "lr" in policy_optimizer:
-                params["learning_rate_init"] = policy_optimizer["lr"]
+            policy_optimizer = (
+                _role_owned_spec(policy_spec, "optimizer")
+                if policy_spec is not None
+                else None
+            )
+            if policy_optimizer is not None and "lr" in _component_kwargs(policy_optimizer):
+                params["learning_rate_init"] = _component_kwargs(policy_optimizer)["lr"]
             # RL adapter는 policy_spec 안쪽 adapter
-            adapter = policy_spec.get("adapter")
+            adapter = (
+                _role_owned_spec(policy_spec, "adapter")
+                if policy_spec is not None
+                else None
+            )
         else:
-            params["model_class"] = recipe.model.get("_component_", "unknown")
-            params["pretrained"] = recipe.model.get("pretrained", "none")
+            params["model_class"] = _component_name(recipe.model)
+            params["pretrained"] = _pretrained_name(recipe.model)
             # SFT learning_rate_init: recipe.optimizer.lr
-            sft_optimizer = recipe.optimizer or {}
-            if isinstance(sft_optimizer, Mapping) and "lr" in sft_optimizer:
-                params["learning_rate_init"] = sft_optimizer["lr"]
+            if recipe.optimizer is not None and "lr" in _component_kwargs(recipe.optimizer):
+                params["learning_rate_init"] = _component_kwargs(recipe.optimizer)["lr"]
             adapter = recipe.adapter
 
         # 데이터·학습 공통 파라미터
-        params["dataset_source"] = recipe.data.dataset.get("source", "unknown")
+        params["dataset_source"] = _component_kwargs(recipe.data.dataset).get(
+            "source",
+            "unknown",
+        )
         params["batch_size"] = recipe.data.dataloader.batch_size
         params["epochs"] = recipe.training.epochs if recipe.training.epochs is not None else 0
         params["max_steps"] = recipe.training.max_steps if recipe.training.max_steps is not None else 0
@@ -168,16 +220,20 @@ def log_static_params(
         params["gradient_accumulation_steps"] = recipe.training.gradient_accumulation_steps
 
         # Adapter (SFT: recipe.adapter; RL: policy_spec.adapter)
-        if adapter is not None and isinstance(adapter, Mapping):
-            params["adapter_component"] = adapter.get("_component_", "unknown")
-            if adapter.get("r") is not None:
-                params["adapter_r"] = adapter["r"]
+        if adapter is not None:
+            params["adapter_component"] = _component_name(adapter)
+            adapter_kwargs = _component_kwargs(adapter)
+            if adapter_kwargs.get("r") is not None:
+                params["adapter_r"] = adapter_kwargs["r"]
 
         # Strategy
         dist = settings.config.compute.distributed
         if isinstance(dist, Mapping) and dist.get("strategy"):
             s = dist["strategy"]
-            params["strategy"] = s.get("_component_", s) if isinstance(s, Mapping) else s
+            if isinstance(s, Mapping):
+                params["strategy"] = ComponentSpec.from_yaml_dict(s).component
+            else:
+                params["strategy"] = s
 
         mlflow.log_params(params)
     except Exception as e:  # noqa: BLE001

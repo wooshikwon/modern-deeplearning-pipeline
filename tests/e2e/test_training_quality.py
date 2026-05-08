@@ -8,13 +8,10 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 import torch
-import torch.nn.functional as F
 
 from mdp.settings.schema import Settings
 from tests.e2e.conftest import make_test_settings
@@ -23,7 +20,6 @@ from mdp.training.trainer import Trainer
 from tests.e2e.datasets import (
     ListDataLoader,
     make_language_batches,
-    make_token_class_batches,
     make_vision_batches,
 )
 from tests.e2e.models import (

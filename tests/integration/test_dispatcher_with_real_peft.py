@@ -38,8 +38,8 @@ def tiny_peft_hf_model():
     PEFT의 투과 로직(``base_model.model`` 체인)은 모델 종류와 무관하므로 유효.
     LLaMA 아키텍처 전용 gradient 회귀 테스트는 ``tiny_llama_peft_model`` 픽스처 참조.
     """
-    transformers = pytest.importorskip("transformers")
-    peft = pytest.importorskip("peft")
+    pytest.importorskip("transformers")
+    pytest.importorskip("peft")
     from transformers import GPT2Config, GPT2LMHeadModel
     from peft import LoraConfig, get_peft_model
 
@@ -71,7 +71,6 @@ def test_dispatcher_returns_tensors_on_model_device_with_real_peft(tiny_peft_hf_
     Sanity v6 실패의 근본 회귀 고정. 이 테스트가 로컬에서 green하고 GPU에서도
     green이면 "dispatcher 반환 계약"이 framework·device 불문 확정된다.
     """
-    from mdp.training.rl_trainer import RLTrainer
 
     model, cfg = tiny_peft_hf_model
     expected_device = next(model.parameters()).device
@@ -159,8 +158,8 @@ def tiny_llama_peft_model():
     path" 조합은 별도 검증이 필요했다. LlamaConfig는 flash_attn 없이도 로컬 CPU
     실행 가능하므로 GPT-2와 동일하게 로컬에서 돌릴 수 있다.
     """
-    transformers = pytest.importorskip("transformers")
-    peft = pytest.importorskip("peft")
+    pytest.importorskip("transformers")
+    pytest.importorskip("peft")
     from transformers import LlamaConfig, LlamaForCausalLM
     from peft import LoraConfig, get_peft_model
 

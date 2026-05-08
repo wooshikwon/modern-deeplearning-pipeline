@@ -13,7 +13,7 @@
 - ``resolve_targets(targets, family)``, ``resolve_head_slot(slot, family)``,
   ``resolve_save_modules(saves, family)``:
   semantic dot-path 리스트를 실제 모듈 이름 리스트로 번역하는 순수 함수.
-  인자가 model이 아닌 family 문자열 — Factory가 family를 추출해서 전달한다.
+  인자가 model이 아닌 family 문자열 — AssemblyMaterializer가 family를 추출해서 전달한다.
 """
 
 from __future__ import annotations
@@ -277,7 +277,7 @@ def resolve_targets(
 ) -> list[str] | str | None:
     """Semantic target 리스트를 actual module name 리스트로 번역한다.
 
-    **인자가 model이 아닌 family 문자열** -- Factory가 family를 추출해서 전달한다.
+    **인자가 model이 아닌 family 문자열** -- AssemblyMaterializer가 family를 추출해서 전달한다.
     이렇게 resolve 함수를 model에 무관한 순수 함수로 유지한다.
 
     변환 규칙:

@@ -57,7 +57,12 @@ recipe_defaults:
         batch_size: 32
         num_workers: 4
         drop_last: true
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attention.q_lin, attention.v_lin]
+      r: 8
+      alpha: 16
+      task_type: SEQ_CLS
     training:
       epochs: 3
       precision: bf16
@@ -100,7 +105,12 @@ recipe_defaults:
         batch_size: 32
         num_workers: 4
         drop_last: true
-    adapter: lora
+    adapter:
+      _component_: LoRA
+      target: [attention.q_lin, attention.v_lin]
+      r: 8
+      alpha: 16
+      task_type: SEQ_CLS
     training:
       epochs: 3
       precision: bf16

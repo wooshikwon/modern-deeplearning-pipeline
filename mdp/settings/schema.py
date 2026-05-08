@@ -10,6 +10,13 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mdp.settings.components import (
+    ComponentSpec,
+    MetricSpec,
+    ModelComponentSpec,
+    RoleModelSpec,
+)
+
 
 # ── Recipe 스키마 ──
 
@@ -18,6 +25,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 class DataloaderSpec(BaseModel):
     """DataLoader 설정."""
+
+    model_config = ConfigDict(extra="forbid")
 
     batch_size: int = 32
     num_workers: int = 4
@@ -54,15 +63,19 @@ class DataSpec(BaseModel):
             batch_size: 32
     """
 
-    dataset: dict[str, Any]                          # _component_ 필수
-    collator: dict[str, Any]                         # _component_ 필수
-    val_dataset: dict[str, Any] | None = None        # _component_, None이면 validation 비활성
-    sampler: dict[str, Any] | None = None            # _component_, None이면 기존 동작 보존
+    model_config = ConfigDict(extra="forbid")
+
+    dataset: ComponentSpec                          # _component_ 필수
+    collator: ComponentSpec                         # _component_ 필수
+    val_dataset: ComponentSpec | None = None        # _component_, None이면 validation 비활성
+    sampler: ComponentSpec | None = None            # _component_, None이면 기존 동작 보존
     dataloader: DataloaderSpec = Field(default_factory=DataloaderSpec)
 
 
 class EarlyStoppingSpec(BaseModel):
     """학습 조기 종료 기준. monitor 메트릭이 patience 번 연속 개선되지 않으면 중단."""
+
+    model_config = ConfigDict(extra="forbid")
 
     monitor: str = "val_loss"
     patience: int = Field(default=5, ge=1)
@@ -72,6 +85,8 @@ class EarlyStoppingSpec(BaseModel):
 
 class EMASpec(BaseModel):
     """파라미터 지수이동평균. on_train_end에서 EMA 가중치를 모델에 복사하여 최종 평가/저장 대상으로 사용."""
+
+    model_config = ConfigDict(extra="forbid")
 
     decay: float = Field(default=0.9999, gt=0.0, lt=1.0)
     update_after_step: int = Field(default=0, ge=0)
@@ -89,6 +104,8 @@ class TrainingSpec(BaseModel):
       200 step에서 종료.
     - 최소 하나는 필수(Recipe.check_training_duration validator). 둘 다 None이면 ValueError.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     epochs: float | None = Field(
         default=None,
@@ -158,6 +175,8 @@ class MonitoringSpec(BaseModel):
 class GenerationSpec(BaseModel):
     """자기회귀 생성 설정 (서빙/추론 전용)."""
 
+    model_config = ConfigDict(extra="forbid")
+
     max_new_tokens: int = 256
     temperature: float = 1.0
     top_p: float = 1.0
@@ -176,8 +195,10 @@ class RLGenerationSpec(GenerationSpec):
 class RLSpec(BaseModel):
     """RL alignment 설정. None이면 SFT."""
 
-    algorithm: dict[str, Any]  # _component_ 패턴 (DPO, GRPO, PPO)
-    models: dict[str, dict[str, Any]]  # 역할별 모델 정의 (policy 필수)
+    model_config = ConfigDict(extra="forbid")
+
+    algorithm: ComponentSpec  # _component_ 패턴 (DPO, GRPO, PPO)
+    models: dict[str, RoleModelSpec]  # 역할별 모델 정의 (policy 필수)
     generation: RLGenerationSpec | None = None  # GRPO/PPO 전용 응답 생성 파라미터
 
 
@@ -187,11 +208,15 @@ class EvaluationSpec(BaseModel):
     metrics 항목은 str(alias 이름) 또는 dict(_component_ 패턴) 형태.
     """
 
-    metrics: list[dict[str, Any] | str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+
+    metrics: list[MetricSpec] = Field(default_factory=list)
 
 
 class MetadataSpec(BaseModel):
     """실험 메타데이터."""
+
+    model_config = ConfigDict(extra="forbid")
 
     author: str
     description: str
@@ -205,16 +230,18 @@ class Recipe(BaseModel):
     name: str
     task: str
     # SFT 필드
-    model: dict[str, Any] = Field(
-        default_factory=lambda: {"_component_": "transformers.AutoModelForCausalLM"}
+    model: ModelComponentSpec = Field(
+        default_factory=lambda: ModelComponentSpec(
+            component="transformers.AutoModelForCausalLM"
+        )
     )
-    head: dict[str, Any] | None = None
-    adapter: dict[str, Any] | None = None
+    head: ComponentSpec | None = None
+    adapter: ComponentSpec | None = None
     data: DataSpec
     training: TrainingSpec
-    optimizer: dict[str, Any] | None = None  # SFT용 (RL은 models.*.optimizer)
-    scheduler: dict[str, Any] | None = None
-    loss: dict[str, Any] | None = None
+    optimizer: ComponentSpec | None = None  # SFT용 (RL은 models.*.optimizer)
+    scheduler: ComponentSpec | None = None
+    loss: ComponentSpec | None = None
     evaluation: EvaluationSpec = Field(default_factory=EvaluationSpec)
     generation: GenerationSpec | None = None  # 서빙/추론 전용 (rl.generation과 독립)
     monitoring: MonitoringSpec = Field(default_factory=MonitoringSpec)
@@ -239,12 +266,44 @@ class Recipe(BaseModel):
             if "policy" not in self.rl.models:
                 raise ValueError("RL 학습에는 rl.models.policy가 필수입니다")
             policy = self.rl.models["policy"]
-            if policy.get("optimizer") is None:
+            if policy.optimizer is None:
                 raise ValueError("rl.models.policy에는 optimizer가 필수입니다")
         return self
 
 
 # ── Config 스키마 ──
+
+
+class DistributedConfig(BaseModel):
+    """Distributed execution settings owned by MDP."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    strategy: str | ComponentSpec = "auto"
+    moe: dict[str, Any] | None = None
+    backend: str | None = None
+    sharding_strategy: str | None = None
+    mixed_precision: bool | None = None
+    precision: str | None = None
+    cpu_offload: bool | None = None
+    min_num_params: int | None = None
+    auto_wrap_cls: str | list[str] | None = None
+
+    @model_validator(mode="after")
+    def check_strategy_kwargs_do_not_conflict(self) -> "DistributedConfig":
+        if isinstance(self.strategy, ComponentSpec):
+            duplicate_keys = sorted(set(self.strategy.kwargs) & set(self.strategy_kwargs()))
+            if duplicate_keys:
+                raise ValueError(
+                    "config.compute.distributed strategy kwargs duplicated in "
+                    f"strategy block and top-level: {duplicate_keys}"
+                )
+        return self
+
+    def strategy_kwargs(self) -> dict[str, Any]:
+        """Return non-null strategy constructor kwargs."""
+        data = self.model_dump(mode="json", exclude={"strategy", "moe"})
+        return {key: value for key, value in data.items() if value is not None}
 
 
 class ComputeConfig(BaseModel):
@@ -255,13 +314,17 @@ class ComputeConfig(BaseModel):
     사용자가 이미 실행 환경 안에 있다고 가정한다.
     """
 
+    model_config = ConfigDict(extra="forbid")
+
     target: str = "local"
     gpus: int | str | list[int] = "auto"
-    distributed: dict[str, Any] | None = None
+    distributed: DistributedConfig | None = None
 
 
 class MLflowConfig(BaseModel):
     """MLflow 실험 추적."""
+
+    model_config = ConfigDict(extra="forbid")
 
     tracking_uri: str = "./mlruns"
     experiment_name: str = "default"
@@ -270,6 +333,8 @@ class MLflowConfig(BaseModel):
 class StorageConfig(BaseModel):
     """체크포인트/출력 저장소."""
 
+    model_config = ConfigDict(extra="forbid")
+
     checkpoint_dir: str = "./checkpoints"
     checkpoint_every_n_steps: int | None = None
     output_dir: str = "./outputs"
@@ -277,6 +342,8 @@ class StorageConfig(BaseModel):
 
 class ServingConfig(BaseModel):
     """서빙 설정."""
+
+    model_config = ConfigDict(extra="forbid")
 
     backend: str = "torchserve"
     model_repository: str | None = None
@@ -290,6 +357,8 @@ class ServingConfig(BaseModel):
 class JobConfig(BaseModel):
     """작업 제어."""
 
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = None
     resume: str = "auto"
     max_retries: int = 0
@@ -297,6 +366,8 @@ class JobConfig(BaseModel):
 
 class Config(BaseModel):
     """인프라 설정서. '어디서 실행할지'를 기술한다."""
+
+    model_config = ConfigDict(extra="forbid")
 
     environment: dict[str, Any] = Field(default_factory=lambda: {"name": "local"})
     compute: ComputeConfig = Field(default_factory=ComputeConfig)
@@ -311,6 +382,8 @@ class Config(BaseModel):
 
 class Settings(BaseModel):
     """Recipe + Config를 합친 통합 설정 객체."""
+
+    model_config = ConfigDict(extra="forbid")
 
     recipe: Recipe
     config: Config

@@ -20,16 +20,16 @@ from __future__ import annotations
 
 import logging
 from types import SimpleNamespace
-
-logger = logging.getLogger(__name__)
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-import torch
 import pytest
+import torch
 
 from mdp.training._base import BaseTrainer
 from mdp.training._common import set_epoch_on_loader
+
+logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────────────────────────────────────

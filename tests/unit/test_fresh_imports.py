@@ -15,7 +15,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.parametrize(
     "statement",
     [
-        "from mdp.factory.factory import Factory; print(Factory)",
+        "from mdp.assembly.materializer import AssemblyMaterializer; print(AssemblyMaterializer)",
         "from mdp.runtime.engine import ExecutionEngine; print(ExecutionEngine)",
         "from mdp.training import Trainer; print(Trainer)",
     ],

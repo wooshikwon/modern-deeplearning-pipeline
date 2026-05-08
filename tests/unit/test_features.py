@@ -152,7 +152,7 @@ def test_forward_model_no_trainer_instance_needed() -> None:
 
 def test_extract_hidden_states_and_head_no_trainer_hf() -> None:
     """HF 경로: trainer 인스턴스 없이 extract_hidden_states_and_head 직접 호출."""
-    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers")
     from transformers import GPT2Config, GPT2LMHeadModel
 
     cfg = GPT2Config(vocab_size=64, n_embd=16, n_layer=2, n_head=2, n_positions=32, n_ctx=32)
@@ -203,7 +203,7 @@ def test_extract_hidden_states_and_head_no_trainer_timm() -> None:
 
 def test_extract_hf_pretrained_direct_call_without_trainer() -> None:
     """_extract_hf_pretrained를 trainer 없이 직접 호출 — 시그니처 (model, batch, layer_idx)."""
-    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers")
     from transformers import GPT2Config, GPT2LMHeadModel
 
     cfg = GPT2Config(vocab_size=64, n_embd=16, n_layer=2, n_head=2, n_positions=32, n_ctx=32)
@@ -219,7 +219,7 @@ def test_extract_hf_pretrained_direct_call_without_trainer() -> None:
 
 def test_extract_hf_pretrained_layer_idx_applied() -> None:
     """layer_idx 인자가 _extract_hf_pretrained free function에 전달된다."""
-    transformers = pytest.importorskip("transformers")
+    pytest.importorskip("transformers")
     from transformers import GPT2Config, GPT2LMHeadModel
 
     cfg = GPT2Config(vocab_size=64, n_embd=16, n_layer=2, n_head=2, n_positions=32, n_ctx=32)

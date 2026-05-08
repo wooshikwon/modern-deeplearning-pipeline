@@ -102,6 +102,22 @@ def build_error(
     )
 
 
+def schema_error_details_from_message(message: str) -> dict[str, Any]:
+    """Extract schema YAML paths from settings loading validation messages."""
+    errors: list[dict[str, str]] = []
+    marker = "YAML path "
+    for line in message.splitlines():
+        stripped = line.strip()
+        if marker not in stripped:
+            continue
+        path_and_message = stripped.split(marker, 1)[1]
+        if ": " not in path_and_message:
+            continue
+        yaml_path, detail = path_and_message.split(": ", 1)
+        errors.append({"path": yaml_path, "message": detail})
+    return {"schema_errors": errors} if errors else {}
+
+
 @dataclass(frozen=True)
 class ModelSourcePlan:
     """CLI 모델 입력 source를 한 번에 판정한 plan."""

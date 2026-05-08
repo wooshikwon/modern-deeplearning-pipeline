@@ -67,7 +67,7 @@ model:
 
 ### Pretrained backbone 조합
 
-커스텀 BaseModel이 외부 pretrained 모델을 backbone으로 사용할 수 있다. Factory는 클래스에 `from_pretrained` 메서드가 없으면 `pretrained` 키를 생성자 인자로 전달한다 — 클래스가 내부에서 backbone을 로드하고 그 위에 자신의 컴포넌트를 얹는 패턴이다:
+커스텀 BaseModel이 외부 pretrained 모델을 backbone으로 사용할 수 있다. AssemblyMaterializer는 클래스에 `from_pretrained` 메서드가 없으면 `pretrained` 키를 생성자 인자로 전달한다 — 클래스가 내부에서 backbone을 로드하고 그 위에 자신의 컴포넌트를 얹는 패턴이다:
 
 ```python
 # my_models/value_model.py
@@ -108,7 +108,7 @@ model:
   value_head_dropout: 0.2
 ```
 
-**로딩 동작 정리** (Factory가 `_component_`와 `pretrained`를 어떻게 해석하는가):
+**로딩 동작 정리** (AssemblyMaterializer가 `_component_`와 `pretrained`를 어떻게 해석하는가):
 
 | `_component_` | `pretrained` | 동작 |
 |:-:|:-:|---|
@@ -531,7 +531,7 @@ loss:
 
 ## Semantic Module Routing 매핑
 
-`target`, `slot`, `save` 필드의 semantic 이름은 모델 family별로 실제 모듈명으로 번역된다. Factory는 모델 로딩 후 `family_routing` 모듈로 번역을 수행하므로 동일한 Recipe를 서로 다른 family에 재사용할 수 있다. 개념·YAML 예시는 `AGENT.md`의 "Semantic Module Routing" 섹션에 있고, 여기는 **raw name 매핑과 family별 제약의 참조 자료**다.
+`target`, `slot`, `save` 필드의 semantic 이름은 모델 family별로 실제 모듈명으로 번역된다. AssemblyMaterializer는 모델 로딩 후 `family_routing` 모듈로 번역을 수행하므로 동일한 Recipe를 서로 다른 family에 재사용할 수 있다. 개념·YAML 예시는 `AGENT.md`의 "Semantic Module Routing" 섹션에 있고, 여기는 **raw name 매핑과 family별 제약의 참조 자료**다.
 
 ### Semantic 네임스페이스
 

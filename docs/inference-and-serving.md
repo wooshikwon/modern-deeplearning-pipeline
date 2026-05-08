@@ -206,7 +206,7 @@ Adapter artifact reconstruction currently computes an automatic accelerate map i
 
 > **device_map은 추론/서빙 전용.** `device_map`으로 분산 배치된 모델(`hf_device_map` 속성 존재)은 `mdp train`·`mdp rl-train`에서 명시적 guard(`mdp/training/trainer.py`, `mdp/training/rl_trainer.py`)에 의해 거부된다. 멀티 GPU 학습에는 `compute.distributed.strategy`의 DDP/FSDP를 사용한다. `deepspeed*` 전략명은 현재 fail-fast 경계로 남아 있다.
 
-Serving config precedence is `artifact config snapshot < explicit serve CLI`. `SettingsFactory.from_artifact()` uses `config_file` from the artifact manifest when present, otherwise standard config snapshot filenames, otherwise schema defaults. `mdp serve --device-map` and `--max-memory` override artifact-derived serving values at runtime.
+Serving config precedence is `artifact config snapshot < explicit serve CLI`. `SettingsLoader.load_artifact_settings()` uses `config_file` from the artifact manifest when present, otherwise standard config snapshot filenames, otherwise schema defaults. `mdp serve --device-map` and `--max-memory` override artifact-derived serving values at runtime.
 
 ### 서빙 아키텍처
 
