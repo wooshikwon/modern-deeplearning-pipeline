@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import torch
@@ -14,6 +15,7 @@ import torch.nn as nn
 import yaml
 
 from mdp.models.base import BaseModel
+from mdp.settings.components import ComponentSpec
 from tests.e2e.models import TinyVisionModel
 
 
@@ -175,6 +177,34 @@ def test_parse_request_applies_fields_to_json_body() -> None:
     assert result["text"] == "great"
 
 
+def test_create_app_reads_fields_from_typed_dataset() -> None:
+    """Serving request routing reads ComponentSpec.kwargs, not raw YAML dicts."""
+    from starlette.testclient import TestClient
+
+    from mdp.serving.server import create_app
+
+    class _Handler:
+        async def handle(self, raw):
+            return raw
+
+    recipe = SimpleNamespace(
+        name="typed-fields",
+        task="text_classification",
+        data=SimpleNamespace(
+            dataset=ComponentSpec(
+                component="mdp.data.datasets.HuggingFaceDataset",
+                kwargs={"fields": {"text": "review"}},
+            ),
+        ),
+    )
+
+    client = TestClient(create_app(_Handler(), recipe))
+    response = client.post("/predict", json={"review": "great"})
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "great"
+
+
 def test_parse_request_keeps_canonical_json_key() -> None:
     """Canonical role key wins when both role and source column are present."""
     from mdp.serving.server import _parse_request
@@ -188,6 +218,68 @@ def test_parse_request_keeps_canonical_json_key() -> None:
     result = asyncio.run(_parse_request(_Request(), {"text": "review"}, "text_classification"))
 
     assert result["text"] == "canonical"
+
+
+def test_load_tokenizer_reads_typed_collator_fallback(monkeypatch) -> None:
+    """Text serving can fall back to recipe.data.collator.kwargs.tokenizer."""
+    from mdp.serving.server import _load_tokenizer
+
+    calls: list[tuple[str, str]] = []
+
+    class _AutoTokenizer:
+        @staticmethod
+        def from_pretrained(name, *, padding_side):
+            calls.append((name, padding_side))
+            return SimpleNamespace(name=name, padding_side=padding_side)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=_AutoTokenizer),
+    )
+    recipe = SimpleNamespace(
+        data=SimpleNamespace(
+            collator=ComponentSpec(
+                component="mdp.data.collators.CausalLMCollator",
+                kwargs={"tokenizer": "gpt2"},
+            ),
+        ),
+    )
+
+    tokenizer = _load_tokenizer(None, recipe, model=None)
+
+    assert tokenizer.name == "gpt2"
+    assert calls == [("gpt2", "left")]
+
+
+def test_load_transform_reads_typed_val_dataset(monkeypatch) -> None:
+    """Serving transform fallback reads val_dataset/dataset ComponentSpec kwargs."""
+    from mdp.serving.server import _load_transform
+
+    calls: list[list[dict]] = []
+
+    def fake_build_transforms(augmentation):
+        calls.append(augmentation)
+        return "transform"
+
+    monkeypatch.setattr("mdp.data.transforms.build_transforms", fake_build_transforms)
+    recipe = SimpleNamespace(
+        data=SimpleNamespace(
+            dataset=ComponentSpec(
+                component="mdp.data.datasets.VisionDataset",
+                kwargs={"augmentation": [{"name": "train-only"}]},
+            ),
+            val_dataset=ComponentSpec(
+                component="mdp.data.datasets.VisionDataset",
+                kwargs={"augmentation": [{"name": "resize"}]},
+            ),
+        ),
+    )
+
+    transform = _load_transform(recipe)
+
+    assert transform == "transform"
+    assert calls == [[{"name": "resize"}]]
 
 
 def test_serving_runtime_options_cli_overrides_config() -> None:

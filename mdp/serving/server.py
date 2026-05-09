@@ -7,13 +7,15 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
+from fastapi import FastAPI, Request
+
+from mdp.settings.components import component_kwargs
+
 logger = logging.getLogger(__name__)
 
 
 def create_app(handler: Any, recipe: Any) -> Any:
     """recipe 기반으로 FastAPI 앱을 생성한다."""
-    from fastapi import FastAPI, Request
-
     @asynccontextmanager
     async def lifespan(app):
         if hasattr(handler, "start"):
@@ -26,7 +28,7 @@ def create_app(handler: Any, recipe: Any) -> Any:
 
     @app.post("/predict")
     async def predict(request: Request):
-        fields = recipe.data.dataset.get("fields") if isinstance(recipe.data.dataset, dict) else None
+        fields = component_kwargs(recipe.data.dataset).get("fields")
         raw = await _parse_request(request, fields, recipe.task)
         result = await handler.handle(raw)
         if hasattr(result, "body"):
@@ -120,7 +122,7 @@ def _load_tokenizer(model_dir: Path | None, recipe: Any, model: Any = None) -> A
             return AutoTokenizer.from_pretrained(str(model_dir), padding_side=padding_side)
 
     # 2. recipe에서 fallback — tokenizer는 collator _component_의 init_args
-    tokenizer_name = recipe.data.collator.get("tokenizer") if isinstance(recipe.data.collator, dict) else None
+    tokenizer_name = component_kwargs(recipe.data.collator).get("tokenizer")
     if tokenizer_name:
         from transformers import AutoTokenizer
         return AutoTokenizer.from_pretrained(tokenizer_name, padding_side=padding_side)
@@ -136,9 +138,7 @@ def _load_transform(recipe: Any) -> Any:
     """
     # val_dataset 우선, 없으면 dataset
     ds_config = recipe.data.val_dataset or recipe.data.dataset
-    if not isinstance(ds_config, dict):
-        return None
-    augmentation = ds_config.get("augmentation")
+    augmentation = component_kwargs(ds_config).get("augmentation")
     if augmentation:
         from mdp.data.transforms import build_transforms
         return build_transforms(augmentation)

@@ -227,11 +227,17 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> Any:
 
     target = getattr(model, "module", model)
 
-    adapter_path = checkpoint_dir / "adapter_model.safetensors"
+    adapter_config_path = checkpoint_dir / "adapter_config.json"
+    adapter_safetensors_path = checkpoint_dir / "adapter_model.safetensors"
+    adapter_bin_path = checkpoint_dir / "adapter_model.bin"
     safetensors_path = checkpoint_dir / "model.safetensors"
     model_pt_path = checkpoint_dir / "model.pt"
 
-    if adapter_path.exists():
+    if (
+        adapter_config_path.exists()
+        or adapter_safetensors_path.exists()
+        or adapter_bin_path.exists()
+    ):
         return _load_peft_adapter_artifact(model, checkpoint_dir)
     elif safetensors_path.exists():
         from safetensors.torch import load_file
@@ -371,6 +377,7 @@ def reconstruct_model(
     adapter_config_path = weights_dir / "adapter_config.json"
     adapter_safetensors = weights_dir / "adapter_model.safetensors"
     safetensors_path = weights_dir / "model.safetensors"
+    model_pt_path = weights_dir / "model.pt"
 
     if export_info_path.exists():
         target = getattr(model, "module", model)
@@ -422,12 +429,8 @@ def reconstruct_model(
             )
         else:
             model = _dispatch_model(model, checkpoint, device_map, max_memory)
-    elif safetensors_path.exists():
-        from safetensors.torch import load_file
-
-        target = getattr(model, "module", model)
-        state_dict = load_file(safetensors_path)
-        target.load_state_dict(state_dict)
+    elif safetensors_path.exists() or model_pt_path.exists():
+        model = load_checkpoint_weights(model, weights_dir)
     else:
         logger.warning("가중치 파일 없음: %s", weights_dir)
 

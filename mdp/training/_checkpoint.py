@@ -760,11 +760,9 @@ def _write_serving_model_artifact(
         save_file(target.state_dict(), output_dir / "model.safetensors")
 
     recipe = settings.recipe
-    tokenizer_name = (
-        recipe.data.collator.get("tokenizer")
-        if isinstance(recipe.data.collator, dict)
-        else None
-    )
+    from mdp.settings.components import component_kwargs
+
+    tokenizer_name = component_kwargs(recipe.data.collator).get("tokenizer")
     if tokenizer_name:
         try:
             from transformers import AutoTokenizer

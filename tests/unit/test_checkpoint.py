@@ -13,16 +13,20 @@ tmp_path fixture로 고립 검증한다. Trainer / RLTrainer 인스턴스 없이
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 
+from mdp.settings.components import ComponentSpec
 from mdp.training._checkpoint import (
     find_best_checkpoint,
     gather_fsdp_state_dict,
     load_checkpoint,
     save_checkpoint,
+    _write_serving_model_artifact,
 )
 
 
@@ -170,6 +174,47 @@ def test_save_empty_state_creates_dir_only(tmp_path: Path) -> None:
     assert ckpt_dir.exists()
     contents = list(ckpt_dir.iterdir())
     assert contents == [], f"예상치 못한 파일: {contents}"
+
+
+def test_write_serving_model_artifact_saves_tokenizer_from_typed_collator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serving artifact writer reads tokenizer from ComponentSpec.kwargs."""
+    saved: list[Path] = []
+
+    class _Tokenizer:
+        def save_pretrained(self, output_dir: Path) -> None:
+            saved.append(Path(output_dir))
+            (Path(output_dir) / "tokenizer.json").write_text("{}")
+
+    class _AutoTokenizer:
+        @staticmethod
+        def from_pretrained(name: str) -> _Tokenizer:
+            assert name == "gpt2"
+            return _Tokenizer()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "transformers",
+        SimpleNamespace(AutoTokenizer=_AutoTokenizer),
+    )
+    settings = SimpleNamespace(
+        recipe=SimpleNamespace(
+            data=SimpleNamespace(
+                collator=ComponentSpec(
+                    component="mdp.data.collators.CausalLMCollator",
+                    kwargs={"tokenizer": "gpt2"},
+                ),
+            ),
+            model_dump=lambda mode: {"name": "artifact"},
+        ),
+    )
+
+    _write_serving_model_artifact(torch.nn.Linear(2, 1), settings, tmp_path)
+
+    assert saved == [tmp_path]
+    assert (tmp_path / "tokenizer.json").exists()
 
 
 # ──────────────────────────────────────────────────────────────────────────────

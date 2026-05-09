@@ -38,7 +38,7 @@ from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 import torch
 
-from mdp.settings.components import ComponentSpec, ModelComponentSpec
+from mdp.settings.components import ComponentSpec, ModelComponentSpec, component_kwargs
 
 if TYPE_CHECKING:
     from mdp.settings.schema import Recipe, Settings
@@ -67,15 +67,7 @@ def _pretrained_name(spec: ModelComponentSpec | None) -> str:
 
 
 def _component_kwargs(spec: ComponentSpec | ModelComponentSpec | Mapping[str, Any]) -> Mapping[str, Any]:
-    if isinstance(spec, Mapping):
-        try:
-            return ComponentSpec.from_yaml_dict(spec).kwargs
-        except ValueError:
-            try:
-                return ModelComponentSpec.from_yaml_dict(spec).kwargs
-            except ValueError:
-                return spec
-    return spec.kwargs
+    return component_kwargs(spec)
 
 
 def _role_model_spec(role: Any) -> Any:

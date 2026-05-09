@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -55,6 +56,27 @@ def _serialize_yaml_value(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     raise TypeError(f"cannot serialize component envelope value: {value!r}")
+
+
+def component_kwargs(
+    spec: "ComponentSpec | ModelComponentSpec | Mapping[str, Any] | None",
+) -> Mapping[str, Any]:
+    """Return open kwargs from typed component specs or legacy YAML mappings."""
+    if spec is None:
+        return {}
+    if isinstance(spec, Mapping):
+        try:
+            return ComponentSpec.from_yaml_dict(spec).kwargs
+        except ValueError:
+            try:
+                return ModelComponentSpec.from_yaml_dict(spec).kwargs
+            except ValueError:
+                return {
+                    key: value
+                    for key, value in spec.items()
+                    if key not in {_COMPONENT_KEY, "pretrained"}
+                }
+    return spec.kwargs
 
 
 @dataclass(frozen=True)

@@ -146,6 +146,27 @@ def test_reconstruct_model_from_manifest_checkpoint(tmp_path: Path) -> None:
         assert torch.equal(expected, actual)
 
 
+def test_reconstruct_model_loads_flat_model_pt_artifact(tmp_path: Path) -> None:
+    """Flat serving artifacts load model.pt weights without requiring device_map."""
+    from mdp.serving.model_loader import reconstruct_model
+
+    model = TinyVisionModel(num_classes=2, hidden_dim=16)
+    with torch.no_grad():
+        for param in model.parameters():
+            param.fill_(0.5)
+    torch.save(model.state_dict(), tmp_path / "model.pt")
+    _write_tiny_recipe(tmp_path, name="flat-model-pt-artifact-test")
+
+    loaded, settings = reconstruct_model(tmp_path)
+
+    assert settings.recipe.name == "flat-model-pt-artifact-test"
+    for (_, expected), (_, actual) in zip(
+        model.named_parameters(),
+        loaded.named_parameters(),
+    ):
+        assert torch.equal(expected, actual)
+
+
 def test_reconstruct_model_preserves_recipe_adapter_for_manifest_safetensors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -223,7 +244,9 @@ def test_reconstruct_model_suppresses_recipe_adapter_for_full_artifact_weights(
         assert torch.equal(expected, actual)
 
 
+@pytest.mark.parametrize("adapter_weight_file", ["adapter_model.safetensors", "adapter_model.bin"])
 def test_reconstruct_model_suppresses_recipe_adapter_for_peft_artifact(
+    adapter_weight_file: str,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -233,7 +256,7 @@ def test_reconstruct_model_suppresses_recipe_adapter_for_peft_artifact(
     (tmp_path / "adapter_config.json").write_text(
         json.dumps({"adapter_name": "trained"})
     )
-    (tmp_path / "adapter_model.safetensors").touch()
+    (tmp_path / adapter_weight_file).touch()
     _write_tiny_recipe(
         tmp_path,
         name="peft-artifact-suppresses-recipe-adapter-test",

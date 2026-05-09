@@ -9,6 +9,7 @@ from pathlib import Path
 import typer
 
 from mdp.cli.output import build_error, build_result, emit_result, is_json_mode, resolve_model_source
+from mdp.settings.components import component_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def run_export(
             save_file(target.state_dict(), output_dir / "model.safetensors")
 
         # tokenizer 저장 — collator _component_의 init_args에서 추출
-        tokenizer_name = recipe.data.collator.get("tokenizer") if isinstance(recipe.data.collator, dict) else None
+        tokenizer_name = component_kwargs(recipe.data.collator).get("tokenizer")
         if tokenizer_name:
             try:
                 from transformers import AutoTokenizer
