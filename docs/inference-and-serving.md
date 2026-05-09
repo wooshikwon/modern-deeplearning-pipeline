@@ -153,6 +153,11 @@ model-production/
 
 > MLflow에 저장되는 LoRA 아티팩트는 어댑터만(~50MB) 포함한다. `export`가 on-demand merge를 수행한다.
 
+Serving/inference reconstruction은 artifact metadata와 checkpoint manifest를 먼저
+해석해 load plan을 만든다. PEFT artifact는 `adapter_model.safetensors`와
+`adapter_model.bin`을 모두 adapter weights로 취급하고, full-model artifact의
+`model.safetensors`/`model.pt`와 섞어 추측하지 않는다.
+
 ---
 
 ## REST API 서빙

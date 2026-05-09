@@ -237,7 +237,7 @@ custom wrapper가 `forward()` output에 `loss`를 반환해야 한다.
 ```
 checkpoint-1000/
   ├── manifest.json
-  ├── model.safetensors (또는 adapter_model.safetensors)
+  ├── model.safetensors (또는 adapter_model.safetensors / adapter_model.bin)
   ├── optimizer.pt
   ├── scheduler.pt
   ├── scaler.pt                 # AMP 사용 시
@@ -251,8 +251,9 @@ Checkpoint compatibility boundary: 권장 작성 경로는 항상 `manifest.json
 기반 layout이다. `manifest.json`이 없는 checkpoint는 read-only compatibility
 reader가 best-effort로 읽는다. 이 경우 `trainer_state.json`과 `scaler.pt`만
 공통 I/O 계층에서 복원하고, 모델/optimizer/scheduler weight 주입은
-manifestless resume reader의 파일명 관례(`model.pt`, `model.safetensors`,
-`optimizer.pt`, `scheduler.pt`)를 따른다.
+manifestless resume reader의 파일명 관례(`adapter_model.safetensors`,
+`adapter_model.bin`, `model.safetensors`, `model.pt`, `optimizer.pt`,
+`scheduler.pt`)를 따른다.
 
 `best`와 `latest`는 checkpoint 디렉토리의 symlink다. `latest`는 가장 최근 저장본을 가리키고, `best`는 validation monitor가 있을 때 가장 좋은 metric checkpoint를 가리킨다. Export와 MLflow summary에서 checkpoint 하나를 고를 때는 `best`가 우선이고 없으면 `latest`를 사용한다.
 
