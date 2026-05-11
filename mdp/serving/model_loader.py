@@ -66,8 +66,11 @@ def resolve_artifact_load_plan(
         if models:
             selected_name, selected = _select_manifest_model(models, role)
             record_path = Path(str(selected.get("path", ".")))
-            weights_dir = source / record_path.parent
-            if str(record_path.parent) == ".":
+            if _manifest_record_path_is_dir(selected):
+                weights_dir = source / record_path
+            else:
+                weights_dir = source / record_path.parent
+            if str(weights_dir) == ".":
                 weights_dir = source
             logger.info(
                 "manifest checkpoint selected model slot=%s role=%s format=%s",
@@ -136,6 +139,10 @@ def _select_manifest_model(
     raise ValueError(
         f"manifest checkpoint에 role={role!r} 모델이 없습니다. available={available}"
     )
+
+
+def _manifest_record_path_is_dir(record: dict[str, Any]) -> bool:
+    return record.get("format") == "pretrained_dir"
 
 
 def _detect_weight_format(source: Path) -> str | None:

@@ -377,6 +377,12 @@ def _relative_to_ckpt(path: Path, ckpt_dir: Path) -> str:
 
 
 def _detect_model_file(model_dir: Path, ckpt_dir: Path) -> tuple[str, str]:
+    from mdp.artifacts.layout import detect_weight_layout
+
+    layout = detect_weight_layout(model_dir)
+    if layout.kind == "hf_pretrained_dir":
+        return _relative_to_ckpt(model_dir, ckpt_dir), "pretrained_dir"
+
     candidates = [
         ("adapter_model.safetensors", "peft_adapter"),
         ("model.safetensors", "safetensors"),
@@ -424,7 +430,7 @@ def _restore_manifest_slots(
             )
             continue
         model_path = ckpt_dir / record.path
-        model_dir = model_path.parent
+        model_dir = model_path if _model_record_path_is_dir(record) else model_path.parent
         if strategy is not None and record.format in {
             "safetensors",
             "safetensors_full_state_dict",
@@ -537,10 +543,18 @@ def _load_model_record(
             strict=False,
         )
     elif record.format == "pretrained_dir":
-        logger.warning(
-            "pretrained_dir checkpoint record cannot be injected as state_dict: %s",
+        from mdp.artifacts.layout import detect_weight_layout
+        from mdp.artifacts.loading import load_weights_into_model
+
+        load_weights_into_model(
+            model,
             model_path,
+            layout=detect_weight_layout(model_path),
         )
+
+
+def _model_record_path_is_dir(record: ModelRecord) -> bool:
+    return record.format == "pretrained_dir"
 
 
 def _read_json_file(ckpt_dir: Path, relative_path: str | None) -> dict[str, Any] | None:

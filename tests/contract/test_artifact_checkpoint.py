@@ -230,6 +230,39 @@ def test_artifact_load_plan_selects_manifest_role_path(tmp_path: Path) -> None:
     assert plan.adapter_policy == "preserve_recipe_adapter"
 
 
+def test_artifact_load_plan_preserves_manifest_pretrained_dir_slot(
+    tmp_path: Path,
+) -> None:
+    policy_dir = tmp_path / "policy"
+    policy_dir.mkdir()
+    (policy_dir / "config.json").write_text("{}")
+    (policy_dir / "model-00001-of-00002.safetensors").touch()
+    (policy_dir / "model.safetensors.index.json").write_text(
+        json.dumps({
+            "metadata": {"total_size": 1},
+            "weight_map": {"weight": "model-00001-of-00002.safetensors"},
+        })
+    )
+    (tmp_path / MANIFEST_FILE).write_text(
+        json.dumps({
+            "models": {
+                "policy": {
+                    "role": "policy",
+                    "format": "pretrained_dir",
+                    "path": "policy",
+                    "trainable": True,
+                }
+            }
+        })
+    )
+
+    plan = resolve_artifact_load_plan(tmp_path, role="policy")
+
+    assert plan.artifact_kind == "training_checkpoint"
+    assert plan.weight_format == "pretrained_dir"
+    assert plan.weights_dir == policy_dir
+
+
 @pytest.mark.parametrize(
     ("files", "artifact_kind", "weight_format", "adapter_policy"),
     [

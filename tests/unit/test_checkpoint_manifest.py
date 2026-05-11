@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -354,3 +356,74 @@ def test_checkpoint_manager_reads_manifestless_legacy_checkpoint(tmp_path: Path)
         "legacy": True,
         "legacy_policy": "read_only",
     }
+
+
+def test_checkpoint_manager_restores_named_pretrained_dir_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _ShardedPretrained(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+        def save_pretrained(self, output_dir: Path) -> None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "config.json").write_text("{}")
+            (output_dir / "model-00001-of-00002.safetensors").touch()
+            (output_dir / "model.safetensors.index.json").write_text(
+                json.dumps({
+                    "metadata": {"total_size": 1},
+                    "weight_map": {"weight": "model-00001-of-00002.safetensors"},
+                })
+            )
+
+    calls: list[tuple[Any, str, bool, bool]] = []
+
+    def _load_sharded_checkpoint(
+        model: Any,
+        folder: str,
+        *,
+        strict: bool = True,
+        prefer_safe: bool = True,
+    ) -> None:
+        calls.append((model, folder, strict, prefer_safe))
+
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "transformers.modeling_utils",
+        SimpleNamespace(load_sharded_checkpoint=_load_sharded_checkpoint),
+    )
+
+    ckpt_dir = tmp_path / "checkpoint"
+    CheckpointManager().save(
+        CheckpointContext(kind="rl", ckpt_dir=ckpt_dir, global_step=3),
+        [
+            ModelSlot(
+                name="policy",
+                role="policy",
+                model=_ShardedPretrained(),
+                trainable=True,
+            )
+        ],
+    )
+    manifest = json.loads((ckpt_dir / MANIFEST_FILE).read_text())
+
+    assert manifest["models"]["policy"]["format"] == "pretrained_dir"
+    assert manifest["models"]["policy"]["path"] == "policy"
+
+    target = _ShardedPretrained()
+    CheckpointManager().restore(
+        ckpt_dir,
+        [
+            ModelSlot(
+                name="policy",
+                role="policy",
+                model=target,
+                trainable=True,
+            )
+        ],
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1:] == (str(ckpt_dir / "policy"), False, True)
