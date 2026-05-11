@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import pytest
 
-from mdp.cli.inference import _resolve_fields, _validate_data_interface
+from mdp.cli.inference import (
+    _build_inference_dataset_spec,
+    _create_metrics,
+    _resolve_fields,
+    _validate_data_interface,
+)
+from mdp.settings.components import ComponentSpec
 
 
 class TestResolveFields:
@@ -83,3 +89,42 @@ class TestValidateDataInterface:
                 {"image": "photo"},
                 ["img", "id"],
             )
+
+
+def test_artifact_inference_dataset_override_stays_typed() -> None:
+    base = ComponentSpec(
+        component="mdp.data.datasets.HuggingFaceDataset",
+        kwargs={
+            "source": "/tmp/train.jsonl",
+            "split": "validation",
+            "fields": {"text": "body"},
+        },
+    )
+
+    result = _build_inference_dataset_spec(
+        base,
+        data_source="/tmp/infer.jsonl",
+        cli_fields=["text=prompt", "label=target"],
+    )
+
+    assert isinstance(result, ComponentSpec)
+    assert result.component == "mdp.data.datasets.HuggingFaceDataset"
+    assert result.kwargs["source"] == "/tmp/infer.jsonl"
+    assert result.kwargs["split"] == "train"
+    assert result.kwargs["fields"] == {"text": "prompt", "label": "target"}
+
+
+def test_metric_specs_are_resolved_as_typed_components(monkeypatch) -> None:
+    seen = []
+
+    def fake_resolve(self, spec):
+        seen.append(spec)
+        return object()
+
+    monkeypatch.setattr("mdp.settings.resolver.ComponentResolver.resolve", fake_resolve)
+
+    metrics = _create_metrics(["tests.e2e.test_evaluation._SimpleAccuracy"], None)
+
+    assert len(metrics) == 1
+    assert isinstance(seen[0], ComponentSpec)
+    assert seen[0].component == "tests.e2e.test_evaluation._SimpleAccuracy"

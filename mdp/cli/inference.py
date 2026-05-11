@@ -100,6 +100,7 @@ def _create_metrics(
     recipe_eval: dict | None,
 ) -> list[Any]:
     """CLI --metrics 또는 recipe.evaluation.metrics에서 metric 인스턴스를 생성한다."""
+    from mdp.settings.components import ComponentSpec
     from mdp.settings.resolver import ComponentResolver
 
     resolver = ComponentResolver()
@@ -115,10 +116,36 @@ def _create_metrics(
         if isinstance(spec, str):
             spec = {"_component_": spec}
         try:
-            metrics.append(resolver.resolve(spec))
+            metrics.append(
+                resolver.resolve(ComponentSpec.from_yaml_dict(spec, path="metrics"))
+            )
         except Exception as e:
             logger.warning("Metric 생성 실패: %s — %s", spec, e)
     return metrics
+
+
+def _build_inference_dataset_spec(
+    recipe_dataset: Any,
+    *,
+    data_source: str,
+    cli_fields: list[str] | None,
+):
+    """Build the artifact-inference dataset override as a typed component spec."""
+    from mdp.settings.components import ComponentSpec
+
+    inference_ds_config = recipe_dataset.to_yaml_dict()
+    inference_ds_config["source"] = data_source
+    inference_ds_config["split"] = "train"
+    if cli_fields:
+        override_fields = {}
+        for pair in cli_fields:
+            if "=" in pair:
+                role, col = pair.split("=", 1)
+                override_fields[role] = col
+        inference_ds_config["fields"] = override_fields
+    return ComponentSpec.from_yaml_dict(
+        inference_ds_config, path="inference.dataset"
+    )
 
 
 # ── Pretrained 전용 데이터 로딩 ──
@@ -410,24 +437,17 @@ def run_inference(
             resolver = ComponentResolver()
 
             # inference용 dataset: Recipe dataset 설정을 복사하되 source를 CLI 인자로 교체
-            inference_ds_config = recipe_data.dataset.to_yaml_dict()
-            inference_ds_config["source"] = data_source
-            inference_ds_config["split"] = "train"  # inference 데이터는 단일 split
-            # CLI fields override 적용
-            if cli_fields:
-                override_fields = {}
-                for pair in cli_fields:
-                    if "=" in pair:
-                        role, col = pair.split("=", 1)
-                        override_fields[role] = col
-                inference_ds_config["fields"] = override_fields
-
-            inferred_fields = inference_ds_config.get("fields")
+            inference_ds_spec = _build_inference_dataset_spec(
+                recipe_data.dataset,
+                data_source=data_source,
+                cli_fields=cli_fields,
+            )
+            inferred_fields = inference_ds_spec.kwargs.get("fields")
             if inferred_fields:
                 columns = _load_data_columns(data_source)
                 _validate_data_interface(inferred_fields, columns)
 
-            test_ds = resolver.resolve(inference_ds_config)
+            test_ds = resolver.resolve(inference_ds_spec)
 
             # DataLoader
             dl_config = recipe_data.dataloader.model_dump() if recipe_data.dataloader else {}
