@@ -32,8 +32,11 @@ rank 가드는 caller의 ``_is_main_process``에 위임한다. 본 모듈은 thr
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import os
 from pathlib import Path
+import subprocess
 from typing import TYPE_CHECKING, Any, Iterable, Mapping
 
 import torch
@@ -76,6 +79,95 @@ def _role_model_spec(role: Any) -> Any:
 
 def _role_owned_spec(role: Any, key: str) -> Any:
     return role.get(key) if isinstance(role, Mapping) else getattr(role, key)
+
+
+def _safe_git_commit() -> str:
+    """Return the current repository commit, or ``unknown`` outside git."""
+    env_commit = os.environ.get("MDP_GIT_COMMIT")
+    if env_commit:
+        return env_commit
+    repo_root = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_root,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+        return result.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _gpu_metadata() -> dict[str, Any]:
+    if not torch.cuda.is_available():
+        return {
+            "gpu_count": 0,
+            "gpu_names": "none",
+            "cuda_available": False,
+        }
+    names = [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())]
+    return {
+        "gpu_count": len(names),
+        "gpu_names": ",".join(names),
+        "cuda_available": True,
+    }
+
+
+def _sha256_file(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _fixture_manifest_metadata() -> dict[str, Any]:
+    fixture_root = os.environ.get("MDP_TEST_FIXTURES")
+    if not fixture_root:
+        return {}
+    manifest = Path(fixture_root) / "manifest.json"
+    metadata: dict[str, Any] = {"fixture_manifest_path": str(manifest)}
+    digest = _sha256_file(manifest)
+    if digest is not None:
+        metadata["fixture_manifest_sha256"] = digest
+    return metadata
+
+
+def _random_seed_value(recipe: "Recipe") -> Any:
+    """Best-effort seed discovery from supported declarative locations."""
+    sampler = getattr(recipe.data, "sampler", None)
+    sampler_kwargs = _component_kwargs(sampler) if sampler is not None else {}
+    if "seed" in sampler_kwargs:
+        return sampler_kwargs["seed"]
+    metadata = getattr(recipe, "metadata", None)
+    metadata_seed = getattr(metadata, "seed", None) if metadata is not None else None
+    if isinstance(metadata_seed, (str, int, float, bool)):
+        return metadata_seed
+    env_seed = os.environ.get("MDP_RANDOM_SEED")
+    return env_seed if env_seed is not None else "unset"
+
+
+def _runtime_metadata(recipe: "Recipe") -> dict[str, Any]:
+    dataset_kwargs = _component_kwargs(recipe.data.dataset)
+    metadata: dict[str, Any] = {
+        "git_commit": _safe_git_commit(),
+        "torch_version": torch.__version__,
+        "cuda_version": torch.version.cuda or "none",
+        "cudnn_version": torch.backends.cudnn.version() or "none",
+        "memory_profile": os.environ.get("MDP_MEMORY_BUDGET_PROFILE", "unset"),
+        "random_seed": _random_seed_value(recipe),
+        "dataset_split": dataset_kwargs.get("split", "unknown"),
+        "dataset_revision": dataset_kwargs.get("revision", "unknown"),
+    }
+    metadata.update(_gpu_metadata())
+    metadata.update(_fixture_manifest_metadata())
+    return metadata
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -210,6 +302,7 @@ def log_static_params(
         params["max_steps"] = recipe.training.max_steps if recipe.training.max_steps is not None else 0
         params["precision"] = recipe.training.precision
         params["gradient_accumulation_steps"] = recipe.training.gradient_accumulation_steps
+        params.update(_runtime_metadata(recipe))
 
         # Adapter (SFT: recipe.adapter; RL: policy_spec.adapter)
         if adapter is not None:

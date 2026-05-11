@@ -198,6 +198,71 @@ def test_log_static_params_uses_recipe_lr() -> None:
     assert "policy_lr" not in params  # 구 스냅샷 키 제거
 
 
+def test_log_static_params_records_reproducibility_metadata(monkeypatch) -> None:
+    """Run 분석에 필요한 환경 fingerprint를 static params에 함께 기록한다."""
+    recipe, settings = _make_rl_recipe_settings(policy_lr=1e-4)
+    monkeypatch.setenv("MDP_MEMORY_BUDGET_PROFILE", "cuda_24gb")
+
+    with patch("mlflow.active_run", return_value=MagicMock()), patch(
+        "mlflow.log_params"
+    ) as mock_log_params, patch(
+        "mdp.training._mlflow_logging._safe_git_commit",
+        return_value="abc123",
+    ), patch(
+        "mdp.training._mlflow_logging._gpu_metadata",
+        return_value={
+            "gpu_count": 2,
+            "gpu_names": "NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 3090",
+            "cuda_available": True,
+        },
+    ), patch(
+        "mdp.training._mlflow_logging._fixture_manifest_metadata",
+        return_value={
+            "fixture_manifest_path": "/workspace/test-fixtures/manifest.json",
+            "fixture_manifest_sha256": "deadbeef",
+        },
+    ):
+        log_static_params(recipe, settings)
+
+    params = mock_log_params.call_args.args[0]
+    assert params["git_commit"] == "abc123"
+    assert params["gpu_count"] == 2
+    assert params["gpu_names"] == "NVIDIA GeForce RTX 3090,NVIDIA GeForce RTX 3090"
+    assert params["cuda_available"] is True
+    assert params["torch_version"] == torch.__version__
+    assert "cuda_version" in params
+    assert "cudnn_version" in params
+    assert params["memory_profile"] == "cuda_24gb"
+    assert params["random_seed"] == "unset"
+    assert params["dataset_split"] == "unknown"
+    assert params["dataset_revision"] == "unknown"
+    assert params["fixture_manifest_path"] == "/workspace/test-fixtures/manifest.json"
+    assert params["fixture_manifest_sha256"] == "deadbeef"
+
+
+def test_log_static_params_prefers_env_git_commit(monkeypatch) -> None:
+    """rsync 배포처럼 원격 .git이 stale일 수 있어 env commit을 우선한다."""
+    recipe, settings = _make_rl_recipe_settings(policy_lr=1e-4)
+    monkeypatch.setenv("MDP_GIT_COMMIT", "env-commit")
+
+    with patch("mlflow.active_run", return_value=MagicMock()), patch(
+        "mlflow.log_params"
+    ) as mock_log_params, patch(
+        "mdp.training._mlflow_logging.subprocess.run",
+        side_effect=AssertionError("git should not be queried when env is set"),
+    ), patch(
+        "mdp.training._mlflow_logging._gpu_metadata",
+        return_value={"gpu_count": 0, "gpu_names": "none", "cuda_available": False},
+    ), patch(
+        "mdp.training._mlflow_logging._fixture_manifest_metadata",
+        return_value={},
+    ):
+        log_static_params(recipe, settings)
+
+    params = mock_log_params.call_args.args[0]
+    assert params["git_commit"] == "env-commit"
+
+
 def test_log_static_params_no_run_noop() -> None:
     """``mlflow.active_run()`` 이 None이면 어떤 쓰기도 발생하지 않는다.
 

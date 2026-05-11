@@ -60,6 +60,7 @@ esac
 if [ "$DRY_RUN" -eq 0 ]; then
   REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || die "must run inside a git repo"
   REPO_NAME=$(basename "$REPO_ROOT")
+  GIT_COMMIT=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
   STATE_FILE="$HOME/.cache/cloud-runner/$REPO_NAME/current.env"
   [ -f "$STATE_FILE" ] || die "no active instance (run cloud_provision.sh first)"
   # shellcheck disable=SC1090
@@ -163,6 +164,7 @@ export MDP_TEST_FIXTURES=/workspace/test-fixtures
 export HF_HOME=/root/.cache/huggingface
 export MDP_MEMORY_BUDGET_PROFILE=$MEMORY_PROFILE
 export MDP_TEST_ARTIFACT_DIR=/tmp/mdp-test-artifacts
+export MDP_GIT_COMMIT=$GIT_COMMIT
 mkdir -p \$MDP_TEST_ARTIFACT_DIR
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -$N_GPUS
 python -c 'import torch; print(\"CUDA devices:\", torch.cuda.device_count(), \"| bf16:\", torch.cuda.is_bf16_supported())'
