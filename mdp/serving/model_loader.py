@@ -9,18 +9,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mdp.artifacts.layout import (
-    ADAPTER_CONFIG_FILE,
-    ADAPTER_MODEL_BIN_FILE,
-    ADAPTER_MODEL_SAFETENSORS_FILE,
-    EXPORT_INFO_FILE,
-    MODEL_PT_FILE,
-    MODEL_SAFETENSORS_FILE,
-    PYTORCH_MODEL_BIN_FILE,
-    PYTORCH_MODEL_BIN_INDEX_FILE,
-    SAFETENSORS_INDEX_FILE,
     WeightLayout,
     detect_weight_layout,
-    get_adapter_name,
+)
+from mdp.artifacts.loading import (
+    find_dispatch_checkpoint,
+    load_weights_into_model,
 )
 
 logger = logging.getLogger(__name__)
@@ -32,6 +26,13 @@ AdapterPolicy = Literal[
     "load_peft_adapter_artifact",
 ]
 LegacyPolicy = Literal["read_only"]
+
+
+def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> Any:
+    """Backward-compatible public import path for artifact weight loading."""
+    from mdp.artifacts.loading import load_checkpoint_weights as _load_weights
+
+    return _load_weights(model, checkpoint_dir)
 
 
 @dataclass(frozen=True)
@@ -191,93 +192,6 @@ def _apply_artifact_adapter_policy(assembly_plan: Any, plan: ArtifactLoadPlan) -
     return replace(assembly_plan, models=models)
 
 
-def _get_adapter_name(checkpoint_dir: Path) -> str:
-    """adapter_config.json에서 adapter_name을 읽는다. 없으면 PEFT 기본값 "default"로 폴백.
-
-    PEFT load_adapter()는 adapter_name이 필수 위치 인자이므로 반드시 명시해야 한다.
-    adapter_config.json에 adapter_name 필드가 없으면 (PEFT가 저장하지 않는 경우)
-    학습 시 적용된 이름인 "default"로 폴백한다.
-    """
-    return get_adapter_name(checkpoint_dir)
-
-
-def _load_peft_adapter_artifact(model: Any, checkpoint_dir: Path) -> Any:
-    target = getattr(model, "module", model)
-    adapter_name = _get_adapter_name(checkpoint_dir)
-    if hasattr(target, "load_adapter"):
-        target.load_adapter(str(checkpoint_dir), adapter_name=adapter_name)
-        logger.info(
-            "LoRA adapter loaded from %s (adapter_name=%s)",
-            checkpoint_dir,
-            adapter_name,
-        )
-        return model
-
-    try:
-        from peft import PeftModel
-    except ImportError as exc:
-        raise ImportError(
-            "PEFT adapter artifact를 로드하려면 peft가 필요합니다: "
-            "pip install peft"
-        ) from exc
-
-    loaded = PeftModel.from_pretrained(
-        model,
-        str(checkpoint_dir),
-        adapter_name=adapter_name,
-    )
-    logger.info(
-        "PEFT adapter artifact loaded from %s (adapter_name=%s)",
-        checkpoint_dir,
-        adapter_name,
-    )
-    return loaded
-
-
-def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> Any:
-    """checkpoint/ artifact에서 가중치를 로드한다. resume용 — adapter/safetensors/pt 3가지 분기."""
-    import torch
-
-    target = getattr(model, "module", model)
-
-    adapter_config_path = checkpoint_dir / ADAPTER_CONFIG_FILE
-    adapter_safetensors_path = checkpoint_dir / ADAPTER_MODEL_SAFETENSORS_FILE
-    adapter_bin_path = checkpoint_dir / ADAPTER_MODEL_BIN_FILE
-    safetensors_path = checkpoint_dir / MODEL_SAFETENSORS_FILE
-    model_pt_path = checkpoint_dir / MODEL_PT_FILE
-    pytorch_model_bin_path = checkpoint_dir / PYTORCH_MODEL_BIN_FILE
-
-    if (
-        adapter_config_path.exists()
-        or adapter_safetensors_path.exists()
-        or adapter_bin_path.exists()
-    ):
-        return _load_peft_adapter_artifact(model, checkpoint_dir)
-    elif safetensors_path.exists():
-        from mdp.utils.safetensors import load_module
-
-        load_module(target, safetensors_path)
-        logger.info("모델 가중치 로드: %s", safetensors_path)
-        return model
-    elif model_pt_path.exists():
-        state_dict = torch.load(model_pt_path, map_location="cpu", weights_only=True)
-        target.load_state_dict(state_dict)
-        logger.info("모델 가중치 로드: %s", model_pt_path)
-        return model
-    elif pytorch_model_bin_path.exists():
-        state_dict = torch.load(
-            pytorch_model_bin_path,
-            map_location="cpu",
-            weights_only=True,
-        )
-        target.load_state_dict(state_dict, strict=False)
-        logger.info("모델 가중치 로드: %s", pytorch_model_bin_path)
-        return model
-    else:
-        logger.warning("체크포인트에 모델 가중치 파일이 없습니다: %s", checkpoint_dir)
-        return model
-
-
 def _resolve_padding_side(model: Any) -> str:
     """모델 아키텍처에 맞는 padding_side를 반환한다.
 
@@ -293,19 +207,7 @@ def _resolve_padding_side(model: Any) -> str:
 
 def _find_checkpoint_path(artifact_dir: Path) -> str | None:
     """device_map 로딩에 사용할 체크포인트 경로를 찾는다."""
-    safetensors_path = artifact_dir / MODEL_SAFETENSORS_FILE
-    model_pt_path = artifact_dir / MODEL_PT_FILE
-    safetensors_index_path = artifact_dir / SAFETENSORS_INDEX_FILE
-    pytorch_index_path = artifact_dir / PYTORCH_MODEL_BIN_INDEX_FILE
-    if safetensors_path.exists():
-        return str(safetensors_path)
-    if model_pt_path.exists():
-        return str(model_pt_path)
-    if safetensors_index_path.exists():
-        return str(safetensors_index_path)
-    if pytorch_index_path.exists():
-        return str(pytorch_index_path)
-    return None
+    return find_dispatch_checkpoint(artifact_dir)
 
 
 def _dispatch_model(
@@ -397,70 +299,14 @@ def reconstruct_model(
     else:
         model = materializer.materialize_policy_model(skip_base_check=True)
 
-    # export_info.json이 있으면 BaseModel.export()가 생성한 커스텀 export artifact
-    # (e.g., backbone/ + value_head.pt 분리 저장). BaseModel.load_from_export()에 위임.
-    export_info_path = weights_dir / EXPORT_INFO_FILE
-
-    # adapter_config.json이 있으면 PEFT adapter artifact
-    adapter_config_path = weights_dir / ADAPTER_CONFIG_FILE
-    adapter_safetensors = weights_dir / ADAPTER_MODEL_SAFETENSORS_FILE
-    safetensors_path = weights_dir / MODEL_SAFETENSORS_FILE
-    model_pt_path = weights_dir / MODEL_PT_FILE
-    pytorch_model_bin_path = weights_dir / PYTORCH_MODEL_BIN_FILE
-
-    if export_info_path.exists():
-        target = getattr(model, "module", model)
-        if hasattr(target, "load_from_export"):
-            target.load_from_export(weights_dir)
-        else:
-            logger.warning(
-                "export_info.json 있지만 load_from_export() 없음 — "
-                "BaseModel 서브클래스인지 확인하세요: %s", type(target).__name__
-            )
-        # export는 이미 merge된 가중치이므로 merge_and_unload 불필요.
-        # device_map은 추후 필요 시 추가.
-    elif adapter_config_path.exists() or adapter_safetensors.exists():
-        # adapter는 항상 CPU에서 먼저 로드 + merge
-        model = load_checkpoint_weights(model, weights_dir)
-        if merge and hasattr(model, "merge_and_unload"):
-            logger.info("LoRA adapter 병합 중...")
-            model = model.merge_and_unload()
-        # device_map: merge 후 분산 배치는 아래에서 처리
-        if device_map is not None:
-            # merge된 모델의 가중치는 이미 메모리에 있으므로
-            # dispatch_model로 재배치
-            try:
-                from accelerate import dispatch_model, infer_auto_device_map
-            except ImportError:
-                raise ImportError(
-                    "device_map 사용에 accelerate가 필요합니다: pip install accelerate"
-                )
-            dm_kwargs: dict[str, Any] = {}
-            if max_memory is not None:
-                dm_kwargs["max_memory"] = {
-                    (int(k) if k.isdigit() else k): v for k, v in max_memory.items()
-                }
-            no_split_classes = getattr(model, "_no_split_modules", None)
-            computed_map = infer_auto_device_map(
-                model,
-                no_split_module_classes=no_split_classes,
-                **dm_kwargs,
-            )
-            model = dispatch_model(model, computed_map)
-            logger.info("adapter merge 후 분산 배치 완료: %s",
-                        getattr(model, "hf_device_map", "N/A"))
-    elif device_map is not None:
-        # device_map 지정: accelerate로 가중치 분산 로딩
-        checkpoint = _find_checkpoint_path(weights_dir)
-        if checkpoint is None:
-            raise ValueError(
-                f"device_map이 지정되었지만 가중치 파일(model.safetensors/model.pt)이 없습니다: {weights_dir}"
-            )
-        else:
-            model = _dispatch_model(model, checkpoint, device_map, max_memory)
-    elif safetensors_path.exists() or model_pt_path.exists() or pytorch_model_bin_path.exists():
-        model = load_checkpoint_weights(model, weights_dir)
-    else:
-        logger.warning("가중치 파일 없음: %s", weights_dir)
+    layout = detect_weight_layout(weights_dir)
+    model = load_weights_into_model(
+        model,
+        weights_dir,
+        layout=layout,
+        merge=merge,
+        device_map=device_map,
+        max_memory=max_memory,
+    )
 
     return model, settings

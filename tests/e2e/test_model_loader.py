@@ -306,6 +306,7 @@ def test_reconstruct_model_dispatches_safetensors_with_device_map(
     """device_map reconstruction uses the public artifact loading path."""
     from safetensors.torch import save_file
 
+    from mdp.artifacts import loading
     from mdp.serving import model_loader
 
     model = TinyVisionModel(num_classes=2, hidden_dim=16)
@@ -324,7 +325,7 @@ def test_reconstruct_model_dispatches_safetensors_with_device_map(
         model.hf_device_map = {"": "cpu"}
         return model
 
-    monkeypatch.setattr(model_loader, "_dispatch_model", fake_dispatch)
+    monkeypatch.setattr(loading, "dispatch_model_from_checkpoint", fake_dispatch)
 
     loaded, _settings = model_loader.reconstruct_model(
         tmp_path,
@@ -344,6 +345,7 @@ def test_reconstruct_model_dispatches_model_pt_fallback_with_device_map(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """device_map reconstruction falls back to model.pt through public behavior."""
+    from mdp.artifacts import loading
     from mdp.serving import model_loader
 
     model = TinyVisionModel(num_classes=2, hidden_dim=16)
@@ -361,7 +363,7 @@ def test_reconstruct_model_dispatches_model_pt_fallback_with_device_map(
         checkpoints.append(checkpoint)
         return model
 
-    monkeypatch.setattr(model_loader, "_dispatch_model", fake_dispatch)
+    monkeypatch.setattr(loading, "dispatch_model_from_checkpoint", fake_dispatch)
 
     model_loader.reconstruct_model(tmp_path, device_map="auto")
 
@@ -376,6 +378,52 @@ def test_reconstruct_model_device_map_requires_weights(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="model.safetensors/model.pt"):
         reconstruct_model(tmp_path, device_map="auto")
+
+
+def test_reconstruct_model_loads_hf_sharded_directory_without_device_map(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HF sharded save_pretrained directories load in the non-device_map path."""
+    import transformers.modeling_utils as modeling_utils
+
+    from mdp.serving.model_loader import reconstruct_model
+
+    _write_tiny_recipe(tmp_path, name="hf-sharded-directory-test")
+    (tmp_path / "config.json").write_text("{}")
+    (tmp_path / "model-00001-of-00002.safetensors").touch()
+    (tmp_path / "model-00002-of-00002.safetensors").touch()
+    (tmp_path / "model.safetensors.index.json").write_text(
+        json.dumps({
+            "metadata": {"total_size": 2},
+            "weight_map": {
+                "linear.weight": "model-00001-of-00002.safetensors",
+                "linear.bias": "model-00002-of-00002.safetensors",
+            },
+        })
+    )
+
+    calls: list[tuple[Any, str, bool, bool]] = []
+
+    def fake_load_sharded_checkpoint(
+        model: Any,
+        folder: str,
+        *,
+        strict: bool = True,
+        prefer_safe: bool = True,
+    ) -> None:
+        calls.append((model, folder, strict, prefer_safe))
+
+    monkeypatch.setattr(
+        modeling_utils,
+        "load_sharded_checkpoint",
+        fake_load_sharded_checkpoint,
+    )
+
+    reconstruct_model(tmp_path)
+
+    assert len(calls) == 1
+    assert calls[0][1:] == (str(tmp_path), False, True)
 
 
 def test_reconstruct_model_adapter_device_map_uses_current_computed_map_policy(

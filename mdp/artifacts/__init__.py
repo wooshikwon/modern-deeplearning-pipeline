@@ -19,6 +19,12 @@ from mdp.artifacts.serving import (
     ServingArtifactMode,
     ServingArtifactRecord,
 )
+from mdp.artifacts.loading import (
+    dispatch_model_from_checkpoint,
+    find_dispatch_checkpoint,
+    load_checkpoint_weights,
+    load_weights_into_model,
+)
 
 __all__ = [
     "ADAPTER_CONFIG_FILE",
@@ -36,4 +42,8 @@ __all__ = [
     "ServingArtifactManager",
     "ServingArtifactMode",
     "ServingArtifactRecord",
+    "dispatch_model_from_checkpoint",
+    "find_dispatch_checkpoint",
+    "load_checkpoint_weights",
+    "load_weights_into_model",
 ]
