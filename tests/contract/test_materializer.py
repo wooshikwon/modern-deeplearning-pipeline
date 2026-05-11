@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from unittest import mock
+import warnings
 
 import pytest
 import torch
@@ -84,14 +85,19 @@ def _sft_settings(tmp_path: Path) -> Settings:
     )
 
 
-def _run_plan(settings: Settings, *, mode: str = "sft") -> RunPlan:
+def _run_plan(
+    settings: Settings,
+    *,
+    mode: str = "sft",
+    callback_configs: tuple[ComponentSpec, ...] = (),
+) -> RunPlan:
     return RunPlan(
         command="rl-train" if mode == "rl" else "train",
         mode=mode,
         settings=settings,
         sources=RunSources(),
         overrides=(),
-        callback_configs=(),
+        callback_configs=callback_configs,
         validation_scope="training",
         distributed_intent=bool(settings.config.compute.distributed),
     )
@@ -148,6 +154,35 @@ def test_dataloader_materialization_delegates_plan_data_node(tmp_path: Path) -> 
         "sampler_config": data_node.sampler,
         "distributed": True,
     }
+
+
+def test_callback_materialization_preserves_typed_component_spec(
+    tmp_path: Path,
+) -> None:
+    settings = _sft_settings(tmp_path)
+    callback = ComponentSpec(
+        component="mdp.training.callbacks.checkpoint.ModelCheckpoint",
+        kwargs={
+            "dirpath": str(tmp_path / "ckpt"),
+            "every_n_steps": 1,
+            "save_top_k": 1,
+        },
+        path="callbacks[0]",
+    )
+    plan = AssemblyPlanner.from_run_plan(
+        _run_plan(settings, callback_configs=(callback,))
+    )
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        callbacks = AssemblyMaterializer(plan).materialize_callbacks()
+
+    assert [type(cb).__name__ for cb in callbacks] == ["ModelCheckpoint"]
+    assert not any(
+        issubclass(item.category, DeprecationWarning)
+        and "raw dict support is deprecated" in str(item.message)
+        for item in caught
+    )
 
 
 def test_rl_model_materialization_returns_role_dict(tmp_path: Path) -> None:

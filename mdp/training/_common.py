@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -143,8 +144,8 @@ def load_callbacks_from_file(path: str) -> list[ComponentSpec]:
     return configs
 
 
-def create_callbacks(configs: list[ComponentSpec], resolver: Any) -> list:
-    """CLI callbacks YAML 설정에서 콜백 리스트를 생성한다."""
+def create_callbacks(configs: Sequence[Any], resolver: Any) -> list:
+    """Create callback instances from typed settings or assembly component specs."""
     callbacks = []
     for cfg in configs:
         try:

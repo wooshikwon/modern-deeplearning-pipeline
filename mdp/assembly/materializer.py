@@ -114,16 +114,13 @@ class AssemblyMaterializer:
         )
 
     def materialize_callbacks(self) -> list[BaseCallback]:
-        """Materialize callback nodes from the plan's raw callback configs."""
+        """Materialize callback nodes from the plan's typed callback configs."""
         def _create() -> list[BaseCallback]:
             if self.assembly_plan is None:
                 raise ValueError("AssemblyMaterializer에는 AssemblyPlan이 필요합니다")
             from mdp.training._common import create_callbacks
 
-            configs = [
-                node.config.to_dict()
-                for node in self.assembly_plan.callbacks
-            ]
+            configs = [node.config for node in self.assembly_plan.callbacks]
             return create_callbacks(configs, self.resolver)
 
         return self._get_or_create("callbacks", _create)
