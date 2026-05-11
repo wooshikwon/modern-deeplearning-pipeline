@@ -98,6 +98,7 @@ class CheckpointManifest:
     trainer_state_file: str | None = "trainer_state.json"
     recipe_file: str | None = None
     config_file: str | None = None
+    recipe_name: str | None = None
     models: dict[str, ModelRecord] = field(default_factory=dict)
     scaler: str | None = None
     epoch: int | None = None
@@ -113,6 +114,7 @@ class CheckpointManifest:
             "trainer_state_file": self.trainer_state_file,
             "recipe_file": self.recipe_file,
             "config_file": self.config_file,
+            "recipe_name": self.recipe_name,
             "models": {
                 name: record.to_dict()
                 for name, record in self.models.items()
@@ -146,6 +148,7 @@ class CheckpointManifest:
             trainer_state_file=data.get("trainer_state_file"),
             recipe_file=data.get("recipe_file"),
             config_file=data.get("config_file"),
+            recipe_name=data.get("recipe_name"),
             models=models,
             scaler=data.get("scaler"),
             epoch=data.get("epoch"),
@@ -248,9 +251,12 @@ class CheckpointManager:
         (ckpt_dir / "trainer_state.json").write_text(json.dumps(trainer_state))
 
         recipe_file = None
+        recipe_name = None
         if context.recipe_dict is not None:
             import yaml
 
+            recipe_name_raw = context.recipe_dict.get("name")
+            recipe_name = str(recipe_name_raw) if recipe_name_raw else None
             recipe_file = "recipe.yaml"
             recipe_path = ckpt_dir / recipe_file
             if not recipe_path.exists():
@@ -262,8 +268,24 @@ class CheckpointManager:
         for slot in slots:
             model_dir = ckpt_dir if slot.name == "" else ckpt_dir / slot.name
             model_dir.mkdir(parents=True, exist_ok=True)
-            target = getattr(slot.model, "module", slot.model)
-            if strategy is not None:
+            target = (
+                strategy.unwrap(slot.model)
+                if strategy is not None else getattr(slot.model, "module", slot.model)
+            )
+            is_peft_adapter = (
+                hasattr(target, "peft_config")
+                and hasattr(target, "save_pretrained")
+            )
+            if (
+                is_peft_adapter
+                and (
+                    capability is None
+                    or not capability.requires_all_ranks_for_save
+                )
+            ):
+                target.save_pretrained(model_dir)
+                model_path, model_format = _detect_model_file(model_dir, ckpt_dir)
+            elif strategy is not None:
                 strategy.save_checkpoint(slot.model, str(model_dir / "model.safetensors"))
                 model_path = _relative_to_ckpt(model_dir / "model.safetensors", ckpt_dir)
                 model_format = (
@@ -309,6 +331,7 @@ class CheckpointManager:
             global_step=context.global_step,
             trainer_state_file="trainer_state.json",
             recipe_file=recipe_file,
+            recipe_name=recipe_name,
             models=models,
             scaler=scaler_path,
             epoch=context.epoch,
@@ -328,6 +351,7 @@ class CheckpointManager:
         *,
         strategy: Any | None = None,
         scaler: Any | None = None,
+        expected_recipe_name: str | None = None,
     ) -> LoadedCheckpoint:
         if not ckpt_dir.exists():
             raise FileNotFoundError(f"체크포인트 경로가 존재하지 않습니다: {ckpt_dir}")
@@ -340,6 +364,10 @@ class CheckpointManager:
             return loaded
 
         manifest = CheckpointManifest.read(ckpt_dir)
+        _validate_manifest_compatibility(
+            manifest,
+            expected_recipe_name=expected_recipe_name,
+        )
         if slots is not None:
             _restore_manifest_slots(ckpt_dir, manifest, slots, strategy=strategy)
         trainer_state = _read_json_file(ckpt_dir, manifest.trainer_state_file)
@@ -372,8 +400,38 @@ def _strategy_checkpoint_capability(strategy: Any) -> "StrategyCheckpointCapabil
     return capability
 
 
+def _validate_manifest_compatibility(
+    manifest: CheckpointManifest,
+    *,
+    expected_recipe_name: str | None,
+) -> None:
+    if (
+        expected_recipe_name is not None
+        and manifest.recipe_name is not None
+        and manifest.recipe_name != expected_recipe_name
+    ):
+        raise ValueError(
+            "Resume checkpoint recipe mismatch: "
+            f"checkpoint recipe={manifest.recipe_name!r}, "
+            f"current recipe={expected_recipe_name!r}. "
+            "Use a recipe-specific checkpoint_dir or set config.job.resume=disabled."
+        )
+
+
 def _relative_to_ckpt(path: Path, ckpt_dir: Path) -> str:
     return path.relative_to(ckpt_dir).as_posix()
+
+
+def resolve_checkpoint_dir(
+    checkpoint_dir: str | Path,
+    *,
+    recipe_name: str | None = None,
+    job_name: str | None = None,
+) -> Path:
+    root = Path(checkpoint_dir)
+    if not job_name:
+        return root
+    return root / (recipe_name or "unnamed_recipe") / job_name
 
 
 def _detect_model_file(model_dir: Path, ckpt_dir: Path) -> tuple[str, str]:
@@ -658,6 +716,7 @@ def load_checkpoint(
     *,
     strategy: Any | None = None,
     scaler: Any | None = None,
+    expected_recipe_name: str | None = None,
 ) -> dict:
     """ckpt_dir에서 학습 상태를 복원하여 dict로 반환한다.
 
@@ -679,6 +738,7 @@ def load_checkpoint(
         slots,
         strategy=strategy,
         scaler=scaler,
+        expected_recipe_name=expected_recipe_name,
     ).to_legacy_state()
 
 

@@ -259,7 +259,7 @@ manifestless resume reader의 파일명 관례(`adapter_model.safetensors`,
 
 Strategy checkpoint boundary:
 - No strategy: manager가 모델 state dict 또는 `save_pretrained()` 결과를 직접 저장한다.
-- DDP: `checkpoint_capability`가 manager 지원을 선언하며 rank 0이 full state dict를 저장한다.
+- DDP: `checkpoint_capability`가 manager 지원을 선언한다. 일반 모델은 rank 0이 full state dict를 저장하지만, PEFT/LoRA 모델은 strategy `unwrap()`으로 내부 모델을 확인한 뒤 `save_pretrained()` adapter layout을 우선한다.
 - FSDP: full state dict 저장이 all-rank collective이므로 모든 rank가 save 경로에 진입하고 rank 0만 파일과 manifest를 쓴다.
 - DeepSpeed ZeRO: 현재 unsupported다. ZeRO engine checkpoint는 별도 engine-contract spec 범위이며 DDP/FSDP checkpoint처럼 복원 가능하다고 가정하지 않는다.
 
@@ -267,10 +267,18 @@ Resume 설정:
 ```yaml
 # config.yaml
 job:
+  name: core4-h100-20260511  # 선택. 있으면 checkpoint_dir/{recipe.name}/{job.name} 사용
   resume: auto       # 최신 체크포인트에서 자동 재개
   # resume: disabled  # 항상 처음부터
   # resume: ./checkpoints/checkpoint-1000  # 특정 체크포인트
 ```
+
+`job.name`을 지정하면 `storage.checkpoint_dir` 아래에 recipe/job namespace가 붙는다.
+예를 들어 `checkpoint_dir: ./storage/checkpoints/runs`, recipe `wntp_taw`,
+job `core4-h100`이면 실제 checkpoint root는
+`./storage/checkpoints/runs/wntp_taw/core4-h100`이다. Resume 시 manifest의
+`recipe_name`이 현재 recipe와 다르면 restore 전에 실패하여 다른 recipe의
+`latest`를 잘못 잡는 것을 차단한다.
 
 SFT는 mid-epoch resume을 지원한다 — `trainer_state.json`의 `step_in_epoch` 기준으로 배치를 건너뛴다. RLTrainer는 현재 `global_step`과 epoch counter를 복원하지만 `step_in_epoch` 기반 batch skip은 수행하지 않는다.
 

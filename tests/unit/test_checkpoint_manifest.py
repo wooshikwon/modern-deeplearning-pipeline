@@ -19,6 +19,7 @@ from mdp.training._checkpoint import (
     LoadedCheckpoint,
     ModelRecord,
     ModelSlot,
+    resolve_checkpoint_dir,
 )
 from mdp.training.callbacks.checkpoint import ModelCheckpoint
 from mdp.training.strategies.base import StrategyCheckpointCapability
@@ -50,6 +51,34 @@ class _CollectiveStrategy:
     def save_checkpoint(self, model: torch.nn.Module, path: str) -> None:  # noqa: ARG002
         self.saved_paths.append(path)
 
+    def unwrap(self, wrapped_model: torch.nn.Module) -> torch.nn.Module:
+        return wrapped_model
+
+
+class _ManagedStrategy:
+    def __init__(self) -> None:
+        self.unwrap_called = False
+
+    @property
+    def checkpoint_capability(self) -> StrategyCheckpointCapability:
+        return StrategyCheckpointCapability(
+            supports_managed_checkpoint=True,
+            weight_format="safetensors",
+        )
+
+    def unwrap(self, wrapped_model: torch.nn.Module) -> torch.nn.Module:
+        self.unwrap_called = True
+        return wrapped_model.inner  # type: ignore[attr-defined]
+
+    def save_checkpoint(self, model: torch.nn.Module, path: str) -> None:  # noqa: ARG002
+        raise AssertionError("PEFT adapter checkpoints must not save full state_dict")
+
+
+class _WrappedModel(torch.nn.Module):
+    def __init__(self, inner: torch.nn.Module) -> None:
+        super().__init__()
+        self.inner = inner
+
 
 def test_checkpoint_manifest_json_round_trip(tmp_path: Path) -> None:
     manifest = CheckpointManifest(
@@ -58,6 +87,7 @@ def test_checkpoint_manifest_json_round_trip(tmp_path: Path) -> None:
         global_step=120,
         trainer_state_file="trainer_state.json",
         recipe_file="recipe.yaml",
+        recipe_name="wntp_baseline",
         models={
             "policy": ModelRecord(
                 role="policy",
@@ -81,6 +111,7 @@ def test_checkpoint_manifest_json_round_trip(tmp_path: Path) -> None:
     restored = CheckpointManifest.read(tmp_path)
     assert restored == decoded
     assert restored.layout_version == CHECKPOINT_LAYOUT_VERSION
+    assert restored.recipe_name == "wntp_baseline"
     assert restored.models["policy"].optimizer == "policy/optimizer.pt"
 
 
@@ -94,6 +125,15 @@ def test_checkpoint_manifest_rejects_unknown_layout_version() -> None:
                 "global_step": 0,
             }
         )
+
+
+def test_resolve_checkpoint_dir_uses_recipe_and_job_namespace() -> None:
+    assert resolve_checkpoint_dir("./checkpoints") == Path("./checkpoints")
+    assert resolve_checkpoint_dir(
+        "./checkpoints",
+        recipe_name="critic_pretrain",
+        job_name="sanity-c8",
+    ) == Path("./checkpoints/critic_pretrain/sanity-c8")
 
 
 def test_checkpoint_manager_save_writes_manifest_and_loads(tmp_path: Path) -> None:
@@ -111,7 +151,7 @@ def test_checkpoint_manager_save_writes_manifest_and_loads(tmp_path: Path) -> No
             step_in_epoch=4,
             saved_at="step",
             metrics={"loss": 0.5},
-            recipe_dict={"task": "sft"},
+            recipe_dict={"name": "sft", "task": "sft"},
         ),
         [
             ModelSlot(
@@ -137,6 +177,44 @@ def test_checkpoint_manager_save_writes_manifest_and_loads(tmp_path: Path) -> No
     assert loaded.trainer_state["global_step"] == 10
     assert loaded.manifest.models["model"].path == "model.pt"
     assert loaded.manifest.models["model"].optimizer == "optimizer.pt"
+    assert loaded.manifest.recipe_name == "sft"
+
+
+def test_checkpoint_manager_rejects_resume_from_different_recipe(tmp_path: Path) -> None:
+    source = torch.nn.Linear(2, 1)
+    target = torch.nn.Linear(2, 1)
+    ckpt_dir = tmp_path / "checkpoint"
+
+    CheckpointManager().save(
+        CheckpointContext(
+            kind="sft",
+            ckpt_dir=ckpt_dir,
+            global_step=1,
+            recipe_dict={"name": "wntp_baseline"},
+        ),
+        [
+            ModelSlot(
+                name="",
+                role="policy",
+                model=source,
+                trainable=True,
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="recipe mismatch"):
+        CheckpointManager().restore(
+            ckpt_dir,
+            [
+                ModelSlot(
+                    name="",
+                    role="policy",
+                    model=target,
+                    trainable=True,
+                )
+            ],
+            expected_recipe_name="critic_pretrain",
+        )
 
 
 def test_checkpoint_manager_restore_uses_manifest_record_paths(tmp_path: Path) -> None:
@@ -427,3 +505,72 @@ def test_checkpoint_manager_restores_named_pretrained_dir_record(
 
     assert len(calls) == 1
     assert calls[0][1:] == (str(ckpt_dir / "policy"), False, True)
+
+
+def test_checkpoint_manager_prefers_peft_adapter_under_managed_strategy(tmp_path: Path) -> None:
+    class _PeftLike(torch.nn.Module):
+        peft_config = {"default": object()}
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+        def save_pretrained(self, output_dir: Path) -> None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "adapter_config.json").write_text("{}")
+            (output_dir / "adapter_model.safetensors").touch()
+
+    ckpt_dir = tmp_path / "checkpoint"
+    strategy = _ManagedStrategy()
+    CheckpointManager().save(
+        CheckpointContext(kind="rl", ckpt_dir=ckpt_dir, global_step=4),
+        [
+            ModelSlot(
+                name="policy",
+                role="policy",
+                model=_WrappedModel(_PeftLike()),
+                trainable=True,
+            )
+        ],
+        strategy=strategy,
+    )
+
+    manifest = json.loads((ckpt_dir / MANIFEST_FILE).read_text())
+
+    assert strategy.unwrap_called is True
+    assert manifest["models"]["policy"]["format"] == "peft_adapter"
+    assert manifest["models"]["policy"]["path"] == "policy/adapter_model.safetensors"
+    assert (ckpt_dir / "policy" / "adapter_model.safetensors").exists()
+    assert not (ckpt_dir / "policy" / "model.safetensors").exists()
+
+
+def test_checkpoint_manager_keeps_collective_strategy_save_for_peft(tmp_path: Path) -> None:
+    class _PeftLike(torch.nn.Module):
+        peft_config = {"default": object()}
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.ones(1))
+
+        def save_pretrained(self, output_dir: Path) -> None:  # noqa: ARG002
+            raise AssertionError("collective strategy must own PEFT checkpoint save")
+
+    ckpt_dir = tmp_path / "checkpoint"
+    strategy = _CollectiveStrategy()
+    CheckpointManager().save(
+        CheckpointContext(kind="rl", ckpt_dir=ckpt_dir, global_step=5),
+        [
+            ModelSlot(
+                name="policy",
+                role="policy",
+                model=_PeftLike(),
+                trainable=True,
+            )
+        ],
+        strategy=strategy,
+    )
+
+    manifest = json.loads((ckpt_dir / MANIFEST_FILE).read_text())
+
+    assert strategy.saved_paths == [str(ckpt_dir / "policy" / "model.safetensors")]
+    assert manifest["models"]["policy"]["format"] == "test_collective"

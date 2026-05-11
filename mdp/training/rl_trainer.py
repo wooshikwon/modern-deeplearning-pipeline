@@ -39,6 +39,7 @@ from mdp.training._checkpoint import (
     gather_fsdp_state_dict,
     load_checkpoint,
     ModelSlot,
+    resolve_checkpoint_dir,
 )
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
@@ -169,6 +170,13 @@ class RLTrainer(BaseTrainer):
         # 정상 실행되도록 한다.
         self._stop_requested: bool = False
         self._stop_signal_name: str | None = None
+
+    def _checkpoint_dir(self) -> Path:
+        return resolve_checkpoint_dir(
+            self.settings.config.storage.checkpoint_dir,
+            recipe_name=self._recipe_dict.get("name"),
+            job_name=self.settings.config.job.name,
+        )
 
     # ── BaseTrainer abstract method 구현 ──
 
@@ -538,7 +546,7 @@ class RLTrainer(BaseTrainer):
             )
 
             if self._is_main_process:
-                checkpoint_dir = Path(self.settings.config.storage.checkpoint_dir)
+                checkpoint_dir = self._checkpoint_dir()
                 checkpoint_dir.mkdir(parents=True, exist_ok=True)
                 baseline_path = checkpoint_dir / "baseline.json"
                 import json
@@ -563,15 +571,8 @@ class RLTrainer(BaseTrainer):
             return
 
         # checkpoint 경로 해석
-        storage = getattr(self.settings.config, "storage", None)
-        ckpt_root = (
-            Path(storage.checkpoint_dir)
-            if storage and hasattr(storage, "checkpoint_dir") and storage.checkpoint_dir
-            else None
-        )
+        ckpt_root = self._checkpoint_dir()
         if resume_cfg == "auto":
-            if ckpt_root is None:
-                return
             latest = ckpt_root / "latest"
             if not latest.exists():
                 return
@@ -588,6 +589,7 @@ class RLTrainer(BaseTrainer):
             self._checkpoint_model_slots(),
             strategy=self.strategy,
             scaler=self.scaler,
+            expected_recipe_name=self._recipe_dict.get("name"),
         )
         self._load_checkpoint_state(state)
 
@@ -810,16 +812,11 @@ class RLTrainer(BaseTrainer):
         # Inject storage.checkpoint_dir into ModelCheckpoint callbacks that don't have an
         # explicit dirpath set. Config takes precedence over recipe, so
         # --override config.storage.checkpoint_dir=X overrides recipe's default.
-        _cfg_storage = getattr(self.settings.config, "storage", None)
-        _ckpt_dir = _cfg_storage and getattr(_cfg_storage, "checkpoint_dir", None)
-        if not _ckpt_dir:
-            _rec_storage = getattr(self.settings.recipe, "storage", None)
-            _ckpt_dir = _rec_storage and getattr(_rec_storage, "checkpoint_dir", None)
-        if _ckpt_dir:
-            for _cb in self.callbacks:
-                _set = getattr(_cb, "set_dirpath", None)
-                if callable(_set):
-                    _set(_ckpt_dir)
+        _ckpt_dir = self._checkpoint_dir()
+        for _cb in self.callbacks:
+            _set = getattr(_cb, "set_dirpath", None)
+            if callable(_set):
+                _set(_ckpt_dir)
 
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)

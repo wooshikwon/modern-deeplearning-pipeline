@@ -192,7 +192,7 @@ Strategies expose checkpoint capability declaratively.
 | Strategy | Managed checkpoint | Save participation | Status |
 |---|---:|---|---|
 | none | yes | main process | supported |
-| DDP | yes | rank 0 writes full state | supported |
+| DDP | yes | rank 0 writes full state; PEFT/LoRA uses adapter `save_pretrained()` | supported |
 | FSDP | yes | all ranks enter collective; rank 0 writes files | supported |
 | DeepSpeed ZeRO | no | engine-owned | unsupported, fail-fast |
 

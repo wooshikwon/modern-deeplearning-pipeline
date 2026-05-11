@@ -46,6 +46,7 @@ from mdp.training._checkpoint import (
     find_best_checkpoint,
     load_checkpoint,
     ModelSlot,
+    resolve_checkpoint_dir,
 )
 from mdp.training._mlflow_logging import (
     log_epoch_metrics,
@@ -150,6 +151,13 @@ class Trainer(BaseTrainer):
         self._stop_requested: bool = False
         self._stop_signal_name: str | None = None
         self._warned_ignored_forward_loss: bool = False
+
+    def _checkpoint_dir(self) -> Path:
+        return resolve_checkpoint_dir(
+            self.settings.config.storage.checkpoint_dir,
+            recipe_name=self._recipe_dict.get("name"),
+            job_name=self.settings.config.job.name,
+        )
 
     # ── Component creation ──
 
@@ -406,16 +414,11 @@ class Trainer(BaseTrainer):
         # Inject storage.checkpoint_dir into ModelCheckpoint callbacks that don't have an
         # explicit dirpath set. Config takes precedence over recipe, so
         # --override config.storage.checkpoint_dir=X overrides recipe's default.
-        _cfg_storage = getattr(self.settings.config, "storage", None)
-        _ckpt_dir = _cfg_storage and getattr(_cfg_storage, "checkpoint_dir", None)
-        if not _ckpt_dir:
-            _rec_storage = getattr(self.settings.recipe, "storage", None)
-            _ckpt_dir = _rec_storage and getattr(_rec_storage, "checkpoint_dir", None)
-        if _ckpt_dir:
-            for _cb in self.callbacks:
-                _set = getattr(_cb, "set_dirpath", None)
-                if callable(_set):
-                    _set(_ckpt_dir)
+        _ckpt_dir = self._checkpoint_dir()
+        for _cb in self.callbacks:
+            _set = getattr(_cb, "set_dirpath", None)
+            if callable(_set):
+                _set(_ckpt_dir)
 
         total_steps = self._estimate_total_steps()
         self._fire("on_train_start", total_steps=total_steps)
@@ -924,7 +927,7 @@ class Trainer(BaseTrainer):
         if resume == "disabled":
             return
 
-        checkpoint_dir = Path(self.settings.config.storage.checkpoint_dir)
+        checkpoint_dir = self._checkpoint_dir()
 
         if resume == "auto":
             latest = checkpoint_dir / "latest"
@@ -943,6 +946,7 @@ class Trainer(BaseTrainer):
             self._checkpoint_model_slots(),
             strategy=self.strategy,
             scaler=self.scaler,
+            expected_recipe_name=self._recipe_dict.get("name"),
         )
         self._load_checkpoint_state(state)
 
@@ -969,7 +973,7 @@ class Trainer(BaseTrainer):
 
             # Only rank-0 saves the baseline
             if self._is_main_process:
-                checkpoint_dir = Path(self.settings.config.storage.checkpoint_dir)
+                checkpoint_dir = self._checkpoint_dir()
                 checkpoint_dir.mkdir(parents=True, exist_ok=True)
                 baseline_path = checkpoint_dir / "baseline.json"
                 baseline_path.write_text(json.dumps(baseline, indent=2))
@@ -1017,7 +1021,7 @@ class Trainer(BaseTrainer):
 
             sanitized_config = sanitize_config(self.settings.model_dump())
 
-            ckpt_dir = Path(self.settings.config.storage.checkpoint_dir)
+            ckpt_dir = self._checkpoint_dir()
             best_ckpt = find_best_checkpoint(ckpt_dir)
             if best_ckpt:
                 artifact_dirs.append((best_ckpt, "checkpoint"))
