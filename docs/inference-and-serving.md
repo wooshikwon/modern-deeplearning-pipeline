@@ -139,7 +139,7 @@ mdp export --run-id <id> --output ./model-production
 mdp export --checkpoint ./checkpoints/best --output ./model-production
 ```
 
-출력 구조는 모델 구현에 따라 달라진다. `mdp export`는 우선 모델의 `export()` 메서드, 그 다음 `save_pretrained()`, 마지막으로 safetensors fallback을 사용한다. tokenizer와 `recipe.yaml`은 원본 artifact에 존재할 때 함께 복사된다.
+출력 구조는 모델 구현에 따라 달라진다. CLI는 저장 방식을 직접 고르지 않고 `ServingArtifactManager(mode="deployment_export")`에 위임한다. manager가 모델의 `export()` 메서드, HF `save_pretrained()` directory layout, safetensors fallback 중 알맞은 writer를 선택한다. tokenizer와 `recipe.yaml`은 원본 artifact에 존재할 때 함께 복사된다.
 
 일반적인 출력 예:
 ```
@@ -151,12 +151,15 @@ model-production/
   └── recipe.yaml                 # 원본 artifact에 있을 때
 ```
 
-> MLflow에 저장되는 LoRA 아티팩트는 어댑터만(~50MB) 포함한다. `export`가 on-demand merge를 수행한다.
+> MLflow `model/` snapshot은 `mlflow_snapshot` mode로 기록되는 학습 관측 artifact라 LoRA/QLoRA 어댑터만 포함하고 merge하지 않는다. `mdp export`는 별도 `deployment_export` mode로 배포용 package를 만들며, 이때 on-demand merge를 수행한다.
 
 Serving/inference reconstruction은 artifact metadata와 checkpoint manifest를 먼저
-해석해 load plan을 만든다. PEFT artifact는 `adapter_model.safetensors`와
-`adapter_model.bin`을 모두 adapter weights로 취급하고, full-model artifact의
-`model.safetensors`/`model.pt`와 섞어 추측하지 않는다.
+해석해 `WeightLayout`을 만든다. `mdp.artifacts.layout`은 파일 구조만 관찰하고,
+`mdp.artifacts.loading`이 full-state, safetensors, HF sharded/unsharded
+`save_pretrained()` directory, PEFT adapter weight를 실제 모델에 주입한다. PEFT
+artifact는 `adapter_model.safetensors`와 `adapter_model.bin`을 모두 adapter
+weights로 취급하고, full-model artifact의 `model.safetensors`/`model.pt`와
+섞어 추측하지 않는다.
 
 ---
 

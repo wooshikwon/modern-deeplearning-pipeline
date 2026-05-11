@@ -27,6 +27,7 @@ mdp/
 │   ├── adapters/         # LoRA, QLoRA, PrefixTuning
 │   └── catalog/          # YAML model metadata
 ├── monitoring/           # Data distribution monitoring
+├── artifacts/            # Artifact layout descriptors, weight loading, serving writers
 ├── serving/              # Serving layer (FastAPI)
 ├── runtime/              # Training runtime launcher/worker/engine
 ├── settings/             # Settings loading, schema validation, and RunPlan building
@@ -95,7 +96,7 @@ training/
 ├── rl_trainer.py       # RLTrainer(BaseTrainer) — RL step loop
 │
 ├── _base.py            # BaseTrainer(ABC) — shared lifecycle + observability wrappers
-├── _checkpoint.py      # Checkpoint I/O free functions
+├── _checkpoint.py      # CheckpointManager + manifest-aware checkpoint I/O
 ├── _features.py        # Feature extractor dispatcher free functions
 │
 ├── _progress_log.py    # Python logger + stdout helpers (renamed from _logging_helpers.py)
@@ -152,7 +153,6 @@ Manifest-aware checkpoint I/O for training state. Separated from the compute lay
 | `CheckpointManager.load(ckpt_dir)` | Read manifest checkpoints; bounded reader for manifestless checkpoints |
 | `save_checkpoint(state, ckpt_dir)` / `load_checkpoint(ckpt_dir)` | Stable trainer-facing wrapper API over `CheckpointManager` |
 | `gather_fsdp_state_dict(model)` | Collect full state dict via all-rank FSDP collective |
-| `export_model_artifact(model, metadata, mlflow_run, ...)` | Register policy/SFT artifact with MLflow |
 | `find_best_checkpoint(strategy_config)` | Resolve best/latest symlink to checkpoint path |
 
 Written checkpoints contain `manifest.json` with `layout_version`, checkpoint
@@ -163,9 +163,31 @@ directories are a read-only compatibility boundary: `CheckpointManager.load()`
 can read them best-effort from `trainer_state.json` and `scaler.pt`, while
 checkpoint writes use the manifest layout.
 
+Model record paths preserve file/directory meaning. A file record such as
+`policy/model.safetensors` uses its parent directory as the weight root; a
+`pretrained_dir` record such as `policy` uses that directory itself as the
+weight root. This keeps SFT root checkpoints, RL named slots, and HF
+`save_pretrained()` sharded directories under one loader contract.
+
 Strategies expose `checkpoint_capability`. DDP and FSDP opt in to manager-owned full-state checkpointing; FSDP also declares that save is an all-rank collective. The default strategy capability is unsupported, so DeepSpeed is intentionally fail-fast in the current Trainer/RLTrainer runtime. Its engine owns backward, optimizer step, ZeRO shards, and checkpoint semantics, so DeepSpeed ZeRO checkpoints must not be documented or restored as normal DDP/FSDP checkpoints until a separate engine-contract spec implements that path.
 
-`Trainer` and `RLTrainer` call these via `BaseTrainer._checkpoint_state()` / `_load_checkpoint_state()` hooks — they no longer own save/resume/export logic directly.
+`Trainer` and `RLTrainer` call these via `BaseTrainer._checkpoint_state()` / `_load_checkpoint_state()` hooks — they no longer own checkpoint save/restore logic directly. MLflow model snapshots are not written by `_checkpoint.py`; trainers delegate serving artifact construction to `ServingArtifactManager(mode="mlflow_snapshot")`.
+
+### `artifacts/` — Layout, Loading, and Serving Writers
+
+`mdp.artifacts` is the neutral package shared by training and serving. It keeps
+filesystem layout observation separate from lifecycle-specific policy.
+
+| Module | Purpose |
+|---|---|
+| `mdp.artifacts.layout` | Filename constants, `WeightLayout`, directory layout detection, adapter-name detection |
+| `mdp.artifacts.loading` | Load `WeightLayout` into models, including full-state, safetensors, HF sharded directories, and PEFT adapters |
+| `mdp.artifacts.serving` | `ServingArtifactManager` write modes: `mlflow_snapshot`, `deployment_export`, `custom_export` |
+
+MLflow snapshot and deployment export intentionally have different semantics.
+The snapshot records the training artifact as observed, so adapter runs stay
+adapter-only. Deployment export builds a serving package and may merge adapters
+when the requested model/source supports it.
 
 ### `_progress_log.py` — Progress Logging
 

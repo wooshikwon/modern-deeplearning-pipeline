@@ -176,6 +176,15 @@ checkpoint directories are a bounded read-only compatibility boundary; they are
 read best-effort through `trainer_state.json`, `scaler.pt`, and older filename
 conventions.
 
+Model record paths preserve file/directory meaning. A flat file record such as
+`model.safetensors` or `policy/model.safetensors` uses the parent directory as
+the weight root. A `pretrained_dir` record uses the recorded directory itself as
+the weight root, including HF `save_pretrained()` sharded layouts with index
+files. Layout detection is separate from lifecycle policy: `mdp.artifacts.layout`
+observes the files, `mdp.artifacts.loading` injects weights, and
+`mdp.artifacts.serving` writes MLflow snapshots or deployment exports. Training
+may reuse the neutral loader, but it must not import serving-private helpers.
+
 ## Strategy Capability
 
 Strategies expose checkpoint capability declaratively.

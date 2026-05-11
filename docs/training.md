@@ -69,7 +69,7 @@ helper에 위임한다. 공식 runtime
 
 ### Checkpoint I/O 호출 경로
 
-체크포인트 저장·복원·export의 파일 I/O는 `mdp/training/_checkpoint.py`의 `CheckpointManager`가 담당한다. Trainer/RLTrainer는 저장 시점과 resume 진입점을 소유하고, callback은 manager에 model slot과 trainer state를 넘긴다.
+체크포인트 저장·복원의 파일 I/O는 `mdp/training/_checkpoint.py`의 `CheckpointManager`가 담당한다. Trainer/RLTrainer는 저장 시점과 resume 진입점을 소유하고, callback은 manager에 model slot과 trainer state를 넘긴다.
 
 ```
 # Save
@@ -81,12 +81,12 @@ ModelCheckpoint.save_checkpoint(...)
 trainer._maybe_resume()
   -> CheckpointManager.load(...)
   -> trainer._load_checkpoint_state(...)
-
-# Export
-_checkpoint.export_model_artifact(model, metadata, mlflow_run, ...)
 ```
 
 FSDP 환경에서는 `_checkpoint.gather_fsdp_state_dict(model)`이 all-rank collective로 full state dict를 수집한다.
+학습 종료 후 MLflow `model/` artifact는 checkpoint manager가 아니라
+`ServingArtifactManager(mode="mlflow_snapshot")`가 작성한다. 배포용 package는
+`mdp export` 경로의 `deployment_export` mode가 별도로 담당한다.
 
 ### Feature Extractor 호출 경로
 
