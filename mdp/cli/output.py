@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import datetime
 import json as json_module
+import os
 import sys
 from dataclasses import dataclass
 from enum import Enum
@@ -22,6 +23,8 @@ class OutputFormat(str, Enum):
     json = "json"
 
 
+OUTPUT_FORMAT_ENV = "MDP_OUTPUT_FORMAT"
+
 # 글로벌 출력 포맷 상태. app.callback()에서 설정된다.
 _output_format: OutputFormat = OutputFormat.text
 
@@ -35,6 +38,7 @@ def set_output_format(fmt: OutputFormat) -> None:
     """출력 포맷을 설정한다."""
     global _output_format
     _output_format = fmt
+    os.environ[OUTPUT_FORMAT_ENV] = fmt.value
 
 
 def is_json_mode() -> bool:
@@ -50,6 +54,17 @@ def apply_format_override(fmt: OutputFormat | None) -> None:
     """
     if fmt is not None:
         set_output_format(fmt)
+
+
+def apply_format_env_override() -> None:
+    """Apply parent CLI output format inside subprocess entrypoints."""
+    raw = os.environ.get(OUTPUT_FORMAT_ENV)
+    if raw is None:
+        return
+    try:
+        set_output_format(OutputFormat(raw))
+    except ValueError:
+        return
 
 
 def build_result(

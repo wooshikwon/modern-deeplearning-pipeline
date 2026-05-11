@@ -122,6 +122,7 @@ def test_checkpoint_manager_restores_manifest_and_legacy_contract(
     legacy = CheckpointManager().load(legacy_dir)
 
     assert legacy.legacy is True
+    assert legacy.legacy_policy == "read_only"
     assert legacy.manifest is None
     assert legacy.trainer_state == {"global_step": 9}
 
@@ -270,6 +271,9 @@ def test_artifact_load_plan_classifies_artifact_layouts(
     assert plan.weight_format == weight_format
     assert plan.weights_dir == tmp_path
     assert plan.adapter_policy == adapter_policy
+    assert plan.legacy_policy == (
+        "read_only" if artifact_kind == "legacy_checkpoint" else None
+    )
 
 
 def test_artifact_load_plan_rejects_missing_manifest_role(tmp_path: Path) -> None:

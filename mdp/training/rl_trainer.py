@@ -23,6 +23,7 @@ from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
 
 from mdp.assembly.bundles import RLTrainingBundle, build_rl_training_bundle
+from mdp.artifacts.serving import ServingArtifactManager
 from mdp.settings.distributed import get_strategy_name
 from mdp.settings.resolver import ComponentResolver
 from mdp.settings.schema import Settings
@@ -35,7 +36,6 @@ from mdp.training._common import (
 )
 from mdp.training._base import BaseTrainer
 from mdp.training._checkpoint import (
-    export_model_artifact,
     gather_fsdp_state_dict,
     load_checkpoint,
     ModelSlot,
@@ -289,59 +289,17 @@ class RLTrainer(BaseTrainer):
         return slots
 
     def _load_checkpoint_state(self, state: dict) -> None:
-        """``load_checkpoint``가 반환한 state dict로 학습 상태를 복원한다.
+        """``load_checkpoint``가 반환한 trainer scalar state를 적용한다.
 
-        복원 순서 (순서 민감):
-        1. 모델 weights (adapter → safetensors → pt 우선순위, trainable + frozen 전부)
-        2. optimizer state_dict (per-model, trainable only)
-        3. scheduler state_dict (per-model, trainable only)
-        4. GradScaler state_dict
-        5. trainer scalar state (global_step, epoch_counter)
+        모델, optimizer, scheduler, GradScaler I/O는 ``CheckpointManager``가
+        ``load_checkpoint(..., slots=..., strategy=..., scaler=...)`` 경로에서
+        이미 처리한다. RLTrainer는 loop 재개에 필요한 scalar state만 소비한다.
 
         :param state: ``load_checkpoint(ckpt_dir)``가 반환한 dict.
         """
         ckpt_dir: Path = state["ckpt_dir"]
         logger.info(f"Resumed from {ckpt_dir}")
 
-        # 1. Model weights — trainable + frozen 전부 복원
-        for name, model in {**self.trainable, **self.frozen}.items():
-            model_dir = ckpt_dir / name
-            if not model_dir.exists():
-                logger.warning(f"Resume: {name} 체크포인트 없음, 건너뜀")
-                continue
-
-            unwrapped = getattr(model, "module", model)
-            adapter_path = model_dir / "adapter_model.safetensors"
-            if adapter_path.exists() and hasattr(unwrapped, "load_adapter"):
-                unwrapped.load_adapter(model_dir, adapter_name="default")
-            elif (model_dir / "model.safetensors").exists():
-                from safetensors.torch import load_file
-                unwrapped.load_state_dict(
-                    load_file(model_dir / "model.safetensors"), strict=False
-                )
-            elif (model_dir / "model.pt").exists():
-                unwrapped.load_state_dict(
-                    torch.load(model_dir / "model.pt", map_location="cpu", weights_only=True)
-                )
-
-            # 2. Optimizer
-            if name in self.optimizers and (model_dir / "optimizer.pt").exists():
-                self.optimizers[name].load_state_dict(
-                    torch.load(model_dir / "optimizer.pt", map_location="cpu", weights_only=True)
-                )
-
-            # 3. Scheduler
-            if name in self.schedulers and (model_dir / "scheduler.pt").exists():
-                self.schedulers[name].load_state_dict(
-                    torch.load(model_dir / "scheduler.pt", map_location="cpu", weights_only=True)
-                )
-
-        # 4. GradScaler
-        scaler_sd = state.get("scaler")
-        if scaler_sd is not None and self.scaler.is_enabled():
-            self.scaler.load_state_dict(scaler_sd)
-
-        # 5. Trainer scalar state
         trainer_state = state.get("trainer_state")
         if trainer_state is not None:
             self.global_step = trainer_state.get("global_step", 0)
@@ -537,11 +495,20 @@ class RLTrainer(BaseTrainer):
         # policy adapter를 MLflow artifact로 저장 — FSDP cooperative gather 결과를 사용.
         if self._is_main_process:
             try:
-                export_model_artifact(
-                    self.policy,
-                    self.settings,
-                    policy_state_dict=policy_state_dict,
-                )
+                import tempfile
+
+                import mlflow
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    ServingArtifactManager().write(
+                        self.policy,
+                        self.settings,
+                        Path(tmp),
+                        mode="mlflow_snapshot",
+                        policy_state_dict=policy_state_dict,
+                    )
+                    mlflow.log_artifacts(tmp, "model")
+                logger.info("모델을 MLflow artifact로 등록: model/")
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Policy artifact 등록 실패: {e}")
 

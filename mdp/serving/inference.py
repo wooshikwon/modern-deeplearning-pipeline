@@ -32,6 +32,20 @@ def _detect_device(device: str | torch.device | None) -> torch.device:
 _make_forward_fn = make_forward_fn
 
 
+def _infer_batch_size(outputs: dict[str, Any], batch: Any) -> int:
+    """Infer batch size from non-scalar model outputs, then input batch tensors."""
+    for value in outputs.values():
+        if isinstance(value, torch.Tensor) and value.ndim > 0:
+            return int(value.shape[0])
+    if isinstance(batch, dict):
+        for value in batch.values():
+            if isinstance(value, torch.Tensor) and value.ndim > 0:
+                return int(value.shape[0])
+    if isinstance(batch, torch.Tensor) and batch.ndim > 0:
+        return int(batch.shape[0])
+    raise ValueError("batch size를 추론할 수 없습니다: outputs와 batch에 batched tensor가 없습니다")
+
+
 def run_batch_inference(
     model: torch.nn.Module,
     dataloader: DataLoader,
@@ -138,7 +152,7 @@ def run_batch_inference(
                 outputs = forward_fn(batch)
 
                 # 현재 배치 크기 — metadata 슬라이싱에 사용
-                current_batch_size = next(iter(outputs.values())).shape[0]
+                current_batch_size = _infer_batch_size(outputs, batch)
 
                 # Inference callback — on_batch (metadata 슬라이스 전달)
                 meta_slice = None

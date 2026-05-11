@@ -91,7 +91,7 @@ def test_sft_smollm2_peak_memory(tmp_path, request, smollm2, wikitext_tiny):
     """SmolLM2 SFT CLI/trainer path stays under the selected ceiling."""
     from mdp.cli.train import run_train
 
-    run_dir = e2e_artifact_dir(tmp_path, request.node.name)
+    run_dir = e2e_artifact_dir(tmp_path, request.node.name, clean=True)
 
     def _run_sft() -> None:
         recipe_path, config_path = _make_sft_yaml(run_dir, smollm2, wikitext_tiny, gpus=1)
@@ -119,7 +119,7 @@ def test_dpo_gpt2_peak_memory(tmp_path, request, gpt2, preference_tiny):
     """DPO preference CLI/RLTrainer path stays under the selected ceiling."""
     from mdp.cli.rl_train import run_rl_train
 
-    run_dir = e2e_artifact_dir(tmp_path, request.node.name)
+    run_dir = e2e_artifact_dir(tmp_path, request.node.name, clean=True)
 
     def _run_dpo() -> None:
         recipe_path, config_path = _make_dpo_yaml(run_dir, gpt2, preference_tiny)
@@ -163,7 +163,7 @@ def test_inference_callback_only_gpt2_peak_memory(tmp_path, request, gpt2, promp
             max_length=64,
         )
         loader = DataLoader([dict(encoded)], batch_size=None)
-        run_dir = e2e_artifact_dir(tmp_path, request.node.name)
+        run_dir = e2e_artifact_dir(tmp_path, request.node.name, clean=True)
         result_path, eval_results = run_batch_inference(
             model=model,
             dataloader=loader,
@@ -174,7 +174,7 @@ def test_inference_callback_only_gpt2_peak_memory(tmp_path, request, gpt2, promp
             callbacks=[counter],
             tokenizer=tok,
         )
-        assert result_path is not None and result_path.exists()
+        assert result_path is None
         assert eval_results == {}
 
     peak = _measure_peak_allocated_gb(_run_inference)

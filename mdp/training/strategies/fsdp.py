@@ -194,18 +194,18 @@ class FSDPStrategy(BaseStrategy):
             FullyShardedDataParallel as FSDP,
             StateDictType,
         )
-        from safetensors.torch import save_file
+        from mdp.utils.safetensors import save_module, save_state_dict
 
         if not isinstance(model, FSDP):
             if dist.get_rank() == 0:
-                save_file(self.unwrap(model).state_dict(), path)
+                save_module(self.unwrap(model), path)
             return
 
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
             state_dict = model.state_dict()
             if dist.get_rank() == 0:
-                save_file(state_dict, path)
+                save_state_dict(state_dict, path)
 
     def load_checkpoint(self, model: nn.Module, path: str) -> nn.Module:
         from torch.distributed.fsdp import (
@@ -213,14 +213,16 @@ class FSDPStrategy(BaseStrategy):
             FullyShardedDataParallel as FSDP,
             StateDictType,
         )
-        from safetensors.torch import load_file
+        from mdp.utils.safetensors import load_module
 
         if not isinstance(model, FSDP):
-            self.unwrap(model).load_state_dict(load_file(path), strict=False)
+            load_module(self.unwrap(model), path)
             return model
 
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=False)
         with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, cfg):
+            from safetensors.torch import load_file
+
             state_dict = load_file(path)
             model.load_state_dict(state_dict)
         return model

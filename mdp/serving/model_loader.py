@@ -8,6 +8,21 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
+from mdp.artifacts.layout import (
+    ADAPTER_CONFIG_FILE,
+    ADAPTER_MODEL_BIN_FILE,
+    ADAPTER_MODEL_SAFETENSORS_FILE,
+    EXPORT_INFO_FILE,
+    MODEL_PT_FILE,
+    MODEL_SAFETENSORS_FILE,
+    PYTORCH_MODEL_BIN_FILE,
+    PYTORCH_MODEL_BIN_INDEX_FILE,
+    SAFETENSORS_INDEX_FILE,
+    WeightLayout,
+    detect_weight_layout,
+    get_adapter_name,
+)
+
 logger = logging.getLogger(__name__)
 
 _CHECKPOINT_MANIFEST_FILE = "manifest.json"
@@ -16,6 +31,7 @@ AdapterPolicy = Literal[
     "suppress_recipe_adapter",
     "load_peft_adapter_artifact",
 ]
+LegacyPolicy = Literal["read_only"]
 
 
 @dataclass(frozen=True)
@@ -31,6 +47,7 @@ class ArtifactLoadPlan:
     merge: bool = False
     weights_dir: Path | None = None
     adapter_policy: AdapterPolicy = "preserve_recipe_adapter"
+    legacy_policy: LegacyPolicy | None = None
 
 
 def resolve_artifact_load_plan(
@@ -40,6 +57,7 @@ def resolve_artifact_load_plan(
     merge: bool = False,
 ) -> ArtifactLoadPlan:
     """Classify model source and select the role-specific weight directory."""
+    layout = detect_weight_layout(source)
     manifest_path = source / _CHECKPOINT_MANIFEST_FILE
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
@@ -70,14 +88,8 @@ def resolve_artifact_load_plan(
                 ),
             )
 
-    if (source / "recipe.yaml").exists() and (
-        (source / "export_info.json").exists()
-        or (source / "adapter_config.json").exists()
-        or (source / "adapter_model.safetensors").exists()
-        or (source / "model.safetensors").exists()
-        or (source / "model.pt").exists()
-    ):
-        weight_format = _detect_weight_format(source)
+    if (source / "recipe.yaml").exists() and layout.kind != "missing":
+        weight_format = _weight_format_from_layout(layout)
         return ArtifactLoadPlan(
             source=source,
             artifact_kind="serving_artifact",
@@ -91,7 +103,7 @@ def resolve_artifact_load_plan(
             ),
         )
 
-    weight_format = _detect_weight_format(source)
+    weight_format = _weight_format_from_layout(layout)
     return ArtifactLoadPlan(
         source=source,
         artifact_kind="legacy_checkpoint",
@@ -103,6 +115,7 @@ def resolve_artifact_load_plan(
             "legacy_checkpoint",
             weight_format,
         ),
+        legacy_policy="read_only",
     )
 
 
@@ -125,17 +138,20 @@ def _select_manifest_model(
 
 
 def _detect_weight_format(source: Path) -> str | None:
-    if (source / "export_info.json").exists():
+    return _weight_format_from_layout(detect_weight_layout(source))
+
+
+def _weight_format_from_layout(layout: WeightLayout) -> str | None:
+    if layout.kind == "custom_export":
         return "export"
-    if (
-        (source / "adapter_config.json").exists()
-        or (source / "adapter_model.safetensors").exists()
-    ):
+    if layout.kind == "peft_adapter":
         return "peft_adapter"
-    if (source / "model.safetensors").exists():
+    if layout.kind == "safetensors_module":
         return "safetensors"
-    if (source / "model.pt").exists():
+    if layout.kind == "torch_state_dict":
         return "torch_state_dict"
+    if layout.kind == "hf_pretrained_dir":
+        return "hf_pretrained_dir"
     return None
 
 
@@ -151,7 +167,12 @@ def _adapter_policy_for_artifact(
         return "load_peft_adapter_artifact"
     if (
         artifact_kind == "serving_artifact"
-        and weight_format in {"export", "safetensors", "torch_state_dict"}
+        and weight_format in {
+            "export",
+            "safetensors",
+            "torch_state_dict",
+            "hf_pretrained_dir",
+        }
     ):
         return "suppress_recipe_adapter"
     return "preserve_recipe_adapter"
@@ -177,15 +198,7 @@ def _get_adapter_name(checkpoint_dir: Path) -> str:
     adapter_config.json에 adapter_name 필드가 없으면 (PEFT가 저장하지 않는 경우)
     학습 시 적용된 이름인 "default"로 폴백한다.
     """
-    import json as _json
-    adapter_cfg_path = checkpoint_dir / "adapter_config.json"
-    if adapter_cfg_path.exists():
-        try:
-            with open(adapter_cfg_path) as f:
-                return _json.load(f).get("adapter_name", "default")
-        except Exception:
-            pass
-    return "default"
+    return get_adapter_name(checkpoint_dir)
 
 
 def _load_peft_adapter_artifact(model: Any, checkpoint_dir: Path) -> Any:
@@ -227,11 +240,12 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> Any:
 
     target = getattr(model, "module", model)
 
-    adapter_config_path = checkpoint_dir / "adapter_config.json"
-    adapter_safetensors_path = checkpoint_dir / "adapter_model.safetensors"
-    adapter_bin_path = checkpoint_dir / "adapter_model.bin"
-    safetensors_path = checkpoint_dir / "model.safetensors"
-    model_pt_path = checkpoint_dir / "model.pt"
+    adapter_config_path = checkpoint_dir / ADAPTER_CONFIG_FILE
+    adapter_safetensors_path = checkpoint_dir / ADAPTER_MODEL_SAFETENSORS_FILE
+    adapter_bin_path = checkpoint_dir / ADAPTER_MODEL_BIN_FILE
+    safetensors_path = checkpoint_dir / MODEL_SAFETENSORS_FILE
+    model_pt_path = checkpoint_dir / MODEL_PT_FILE
+    pytorch_model_bin_path = checkpoint_dir / PYTORCH_MODEL_BIN_FILE
 
     if (
         adapter_config_path.exists()
@@ -240,16 +254,24 @@ def load_checkpoint_weights(model: Any, checkpoint_dir: Path) -> Any:
     ):
         return _load_peft_adapter_artifact(model, checkpoint_dir)
     elif safetensors_path.exists():
-        from safetensors.torch import load_file
+        from mdp.utils.safetensors import load_module
 
-        state_dict = load_file(safetensors_path)
-        target.load_state_dict(state_dict)
+        load_module(target, safetensors_path)
         logger.info("모델 가중치 로드: %s", safetensors_path)
         return model
     elif model_pt_path.exists():
         state_dict = torch.load(model_pt_path, map_location="cpu", weights_only=True)
         target.load_state_dict(state_dict)
         logger.info("모델 가중치 로드: %s", model_pt_path)
+        return model
+    elif pytorch_model_bin_path.exists():
+        state_dict = torch.load(
+            pytorch_model_bin_path,
+            map_location="cpu",
+            weights_only=True,
+        )
+        target.load_state_dict(state_dict, strict=False)
+        logger.info("모델 가중치 로드: %s", pytorch_model_bin_path)
         return model
     else:
         logger.warning("체크포인트에 모델 가중치 파일이 없습니다: %s", checkpoint_dir)
@@ -271,12 +293,18 @@ def _resolve_padding_side(model: Any) -> str:
 
 def _find_checkpoint_path(artifact_dir: Path) -> str | None:
     """device_map 로딩에 사용할 체크포인트 경로를 찾는다."""
-    safetensors_path = artifact_dir / "model.safetensors"
-    model_pt_path = artifact_dir / "model.pt"
+    safetensors_path = artifact_dir / MODEL_SAFETENSORS_FILE
+    model_pt_path = artifact_dir / MODEL_PT_FILE
+    safetensors_index_path = artifact_dir / SAFETENSORS_INDEX_FILE
+    pytorch_index_path = artifact_dir / PYTORCH_MODEL_BIN_INDEX_FILE
     if safetensors_path.exists():
         return str(safetensors_path)
     if model_pt_path.exists():
         return str(model_pt_path)
+    if safetensors_index_path.exists():
+        return str(safetensors_index_path)
+    if pytorch_index_path.exists():
+        return str(pytorch_index_path)
     return None
 
 
@@ -371,13 +399,14 @@ def reconstruct_model(
 
     # export_info.json이 있으면 BaseModel.export()가 생성한 커스텀 export artifact
     # (e.g., backbone/ + value_head.pt 분리 저장). BaseModel.load_from_export()에 위임.
-    export_info_path = weights_dir / "export_info.json"
+    export_info_path = weights_dir / EXPORT_INFO_FILE
 
     # adapter_config.json이 있으면 PEFT adapter artifact
-    adapter_config_path = weights_dir / "adapter_config.json"
-    adapter_safetensors = weights_dir / "adapter_model.safetensors"
-    safetensors_path = weights_dir / "model.safetensors"
-    model_pt_path = weights_dir / "model.pt"
+    adapter_config_path = weights_dir / ADAPTER_CONFIG_FILE
+    adapter_safetensors = weights_dir / ADAPTER_MODEL_SAFETENSORS_FILE
+    safetensors_path = weights_dir / MODEL_SAFETENSORS_FILE
+    model_pt_path = weights_dir / MODEL_PT_FILE
+    pytorch_model_bin_path = weights_dir / PYTORCH_MODEL_BIN_FILE
 
     if export_info_path.exists():
         target = getattr(model, "module", model)
@@ -429,7 +458,7 @@ def reconstruct_model(
             )
         else:
             model = _dispatch_model(model, checkpoint, device_map, max_memory)
-    elif safetensors_path.exists() or model_pt_path.exists():
+    elif safetensors_path.exists() or model_pt_path.exists() or pytorch_model_bin_path.exists():
         model = load_checkpoint_weights(model, weights_dir)
     else:
         logger.warning("가중치 파일 없음: %s", weights_dir)

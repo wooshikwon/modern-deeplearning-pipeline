@@ -49,6 +49,25 @@ TINY_MODELS: list[tuple[str, str, str]] = [
     ("vit-tiny",  "WinKawaks/vit-tiny-patch16-224",         "vision"),
 ]
 
+CLI_ARCHITECTURES = {
+    "encoder": "BertForSequenceClassification",
+}
+
+
+def ensure_cli_architecture(target: Path, family: str) -> None:
+    """Make cached fixtures satisfy MDP's direct --pretrained CLI contract."""
+    arch = CLI_ARCHITECTURES.get(family)
+    if arch is None:
+        return
+    config_path = target / "config.json"
+    if not config_path.exists():
+        return
+    config = json.loads(config_path.read_text())
+    if config.get("architectures"):
+        return
+    config["architectures"] = [arch]
+    config_path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+
 
 def cache_models(models_dir: Path) -> dict[str, dict[str, Any]]:
     from huggingface_hub import snapshot_download
@@ -76,6 +95,7 @@ def cache_models(models_dir: Path) -> dict[str, dict[str, Any]]:
                     "preprocessor*",
                 ],
             )
+        ensure_cli_architecture(target, family)
         size_mb = sum(p.stat().st_size for p in target.rglob("*") if p.is_file()) / 1e6
         out[local_name] = {
             "repo_id": repo_id,

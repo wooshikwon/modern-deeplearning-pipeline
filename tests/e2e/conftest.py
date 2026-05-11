@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 
 import yaml
@@ -17,7 +18,7 @@ from mdp.settings.schema import (
 )
 
 
-def e2e_artifact_dir(tmp_path: Path, test_name: str, *parts: str) -> Path:
+def e2e_artifact_dir(tmp_path: Path, test_name: str, *parts: str, clean: bool = False) -> Path:
     """Return per-test artifacts under the cloud artifact root when configured."""
     root = os.environ.get("MDP_TEST_ARTIFACT_DIR")
     if root:
@@ -27,6 +28,8 @@ def e2e_artifact_dir(tmp_path: Path, test_name: str, *parts: str) -> Path:
         path = tmp_path
     for part in parts:
         path = path / part
+    if clean and path.exists():
+        shutil.rmtree(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
 

@@ -21,12 +21,12 @@ import pytest
 import torch
 
 from mdp.settings.components import ComponentSpec
+from mdp.artifacts.serving import ServingArtifactManager
 from mdp.training._checkpoint import (
     find_best_checkpoint,
     gather_fsdp_state_dict,
     load_checkpoint,
     save_checkpoint,
-    _write_serving_model_artifact,
 )
 
 
@@ -176,7 +176,7 @@ def test_save_empty_state_creates_dir_only(tmp_path: Path) -> None:
     assert contents == [], f"예상치 못한 파일: {contents}"
 
 
-def test_write_serving_model_artifact_saves_tokenizer_from_typed_collator(
+def test_serving_artifact_manager_saves_tokenizer_from_typed_collator(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -211,7 +211,12 @@ def test_write_serving_model_artifact_saves_tokenizer_from_typed_collator(
         ),
     )
 
-    _write_serving_model_artifact(torch.nn.Linear(2, 1), settings, tmp_path)
+    ServingArtifactManager().write(
+        torch.nn.Linear(2, 1),
+        settings,
+        tmp_path,
+        mode="mlflow_snapshot",
+    )
 
     assert saved == [tmp_path]
     assert (tmp_path / "tokenizer.json").exists()

@@ -58,6 +58,25 @@ def _validate_data_interface(
         )
 
 
+def _load_data_columns(data_source: str) -> list[str]:
+    """Return raw dataset columns before recipe preprocessing/tokenization."""
+    from datasets import load_dataset
+
+    local_path = Path(data_source)
+    if local_path.exists():
+        if local_path.is_dir():
+            return []
+        ext = local_path.suffix.lower()
+        ext_map = {".jsonl": "json", ".json": "json", ".csv": "csv", ".parquet": "parquet"}
+        fmt = ext_map.get(ext)
+        if fmt is None:
+            return []
+        ds = load_dataset(fmt, data_files=str(local_path), split="train")
+    else:
+        ds = load_dataset(data_source, split="train")
+    return list(getattr(ds, "column_names", []) or [])
+
+
 # ── MLflow artifact 조회 ──
 
 
@@ -403,13 +422,12 @@ def run_inference(
                         override_fields[role] = col
                 inference_ds_config["fields"] = override_fields
 
-            test_ds = resolver.resolve(inference_ds_config)
-
-            # 필드 검증 (가능한 경우)
-            columns = test_ds._ds.column_names if hasattr(test_ds, "_ds") and hasattr(test_ds._ds, "column_names") else []
             inferred_fields = inference_ds_config.get("fields")
             if inferred_fields:
+                columns = _load_data_columns(data_source)
                 _validate_data_interface(inferred_fields, columns)
+
+            test_ds = resolver.resolve(inference_ds_config)
 
             # DataLoader
             dl_config = recipe_data.dataloader.model_dump() if recipe_data.dataloader else {}

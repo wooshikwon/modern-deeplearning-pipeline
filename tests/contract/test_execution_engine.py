@@ -403,6 +403,7 @@ def test_torchrun_main_worker_contract_bootstraps_before_runtime_steps(
 ) -> None:
     import mdp.cli._torchrun_entry as entry_mod
     from mdp.cli import _logging_bootstrap
+    from mdp.cli.output import OutputFormat, get_output_format, set_output_format
 
     run_plan = _sft_plan(_sft_settings(tmp_path))
     run_plan_path = tmp_path / "run_plan.json"
@@ -440,6 +441,8 @@ def test_torchrun_main_worker_contract_bootstraps_before_runtime_steps(
             str(result_path),
         ],
     )
+    set_output_format(OutputFormat.text)
+    monkeypatch.setenv("MDP_OUTPUT_FORMAT", "json")
 
     entry_mod.main()
 
@@ -449,6 +452,7 @@ def test_torchrun_main_worker_contract_bootstraps_before_runtime_steps(
         "dist-init",
         "run-training",
     ]
+    assert get_output_format() == OutputFormat.json
     assert json.loads(result_path.read_text()) == {
         "total_steps": 1,
         "stopped_reason": "completed",

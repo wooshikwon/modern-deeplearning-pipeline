@@ -58,7 +58,10 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    from mdp.cli.output import apply_format_env_override
     from mdp.runtime.payload import RunPlanPayload
+
+    apply_format_env_override()
 
     with open(args.run_plan_path) as f:
         raw = json.load(f)

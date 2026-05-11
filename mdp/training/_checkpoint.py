@@ -7,7 +7,6 @@ compute 레이어(trainer 본체)에서 분리하여 이 I/O 레이어에 단일
 - ``save_checkpoint``: state dict를 ckpt_dir에 직렬화
 - ``load_checkpoint``: ckpt_dir에서 state dict를 복원 (순수 함수, side-effect 없음)
 - ``gather_fsdp_state_dict``: FSDP 모델의 full state dict를 all-rank 협력으로 수집
-- ``export_model_artifact``: policy / SFT 모델을 MLflow artifact로 등록
 - ``find_best_checkpoint``: best/latest symlink로 최적 체크포인트 경로 조회
 
 외부(``mdp/cli/``, ``mdp/serving/``)에서 직접 import하지 않는다 —
@@ -176,12 +175,15 @@ class LoadedCheckpoint:
     scaler: Any | None
     manifest: CheckpointManifest | None = None
     legacy: bool = False
+    legacy_policy: Literal["read_only"] | None = None
 
     def to_legacy_state(self) -> dict[str, Any]:
         return {
             "ckpt_dir": self.ckpt_dir,
             "trainer_state": self.trainer_state,
             "scaler": self.scaler,
+            "legacy": self.legacy,
+            "legacy_policy": self.legacy_policy,
         }
 
 
@@ -330,7 +332,12 @@ class CheckpointManager:
         if not ckpt_dir.exists():
             raise FileNotFoundError(f"체크포인트 경로가 존재하지 않습니다: {ckpt_dir}")
         if not (ckpt_dir / MANIFEST_FILE).exists():
-            return _load_legacy_checkpoint(ckpt_dir)
+            loaded = _load_legacy_checkpoint(ckpt_dir)
+            if slots is not None:
+                _restore_legacy_slots(ckpt_dir, slots, strategy=strategy)
+            if scaler is not None and loaded.scaler is not None:
+                scaler.load_state_dict(loaded.scaler)
+            return loaded
 
         manifest = CheckpointManifest.read(ckpt_dir)
         if slots is not None:
@@ -435,6 +442,68 @@ def _restore_manifest_slots(
             )
 
 
+def _restore_legacy_slots(
+    ckpt_dir: Path,
+    slots: list[ModelSlot],
+    *,
+    strategy: Any | None,
+) -> None:
+    """Restore manifestless checkpoints through the same manager boundary."""
+    for slot in slots:
+        model_dir = ckpt_dir if slot.name == "" else ckpt_dir / slot.name
+        if not model_dir.exists():
+            logger.warning(
+                "Resume: legacy checkpoint에 slot name=%s role=%s 경로 없음, 건너뜀",
+                slot.name,
+                slot.role,
+            )
+            continue
+        _restore_legacy_model(slot.model, model_dir, strategy=strategy)
+        if slot.optimizer is not None and (model_dir / "optimizer.pt").exists():
+            slot.optimizer.load_state_dict(
+                torch.load(model_dir / "optimizer.pt", map_location="cpu", weights_only=True)
+            )
+        if slot.scheduler is not None and (model_dir / "scheduler.pt").exists():
+            slot.scheduler.load_state_dict(
+                torch.load(model_dir / "scheduler.pt", map_location="cpu", weights_only=True)
+            )
+
+
+def _restore_legacy_model(
+    model: "nn.Module",
+    model_dir: Path,
+    *,
+    strategy: Any | None,
+) -> None:
+    target = getattr(model, "module", model)
+    adapter_path = model_dir / "adapter_model.safetensors"
+    safetensors_path = model_dir / "model.safetensors"
+    model_pt_path = model_dir / "model.pt"
+
+    if adapter_path.exists():
+        if hasattr(target, "load_adapter"):
+            from mdp.artifacts.layout import get_adapter_name
+
+            adapter_name = get_adapter_name(model_dir)
+            target.load_adapter(str(model_dir), adapter_name=adapter_name)
+        else:
+            logger.warning(
+                "adapter checkpoint found but model has no load_adapter method: %s",
+                model_dir,
+            )
+    elif safetensors_path.exists():
+        if strategy is not None:
+            strategy.load_checkpoint(model, str(safetensors_path))
+        else:
+            from mdp.utils.safetensors import load_module
+
+            load_module(target, safetensors_path)
+    elif model_pt_path.exists():
+        target.load_state_dict(
+            torch.load(model_pt_path, map_location="cpu", weights_only=True)
+        )
+
+
 def _load_model_record(
     model: "nn.Module",
     model_dir: Path,
@@ -444,9 +513,9 @@ def _load_model_record(
     target = getattr(model, "module", model)
     if record.format == "peft_adapter":
         if hasattr(target, "load_adapter"):
-            from mdp.serving.model_loader import _get_adapter_name
+            from mdp.artifacts.layout import get_adapter_name
 
-            adapter_name = _get_adapter_name(model_dir)
+            adapter_name = get_adapter_name(model_dir)
             target.load_adapter(str(model_dir), adapter_name=adapter_name)
         else:
             logger.warning(
@@ -454,9 +523,9 @@ def _load_model_record(
                 model_dir,
             )
     elif record.format in {"safetensors", "safetensors_full_state_dict"}:
-        from safetensors.torch import load_file
+        from mdp.utils.safetensors import load_module
 
-        target.load_state_dict(load_file(model_path), strict=False)
+        load_module(target, model_path)
     elif record.format == "hf_pretrained":
         target.load_state_dict(
             torch.load(model_path, map_location="cpu", weights_only=True),
@@ -559,8 +628,9 @@ def _save_model_state(model_state: dict, model_dir: Path) -> None:
         pass
 
     if "safetensors" in model_state:
-        from safetensors.torch import save_file
-        save_file(model_state["safetensors"], model_dir / "model.safetensors")
+        from mdp.utils.safetensors import save_state_dict
+
+        save_state_dict(model_state["safetensors"], model_dir / "model.safetensors")
     elif "state_dict_pt" in model_state:
         torch.save(model_state["state_dict_pt"], model_dir / "model.pt")
 
@@ -577,12 +647,12 @@ def load_checkpoint(
 ) -> dict:
     """ckpt_dir에서 학습 상태를 복원하여 dict로 반환한다.
 
-    이 함수는 파일 읽기만 수행하는 순수 함수다. 실제 복원 (모델에 state_dict 주입,
-    global_step 재설정 등)은 caller인 trainer가 ``_load_checkpoint_state(state)``로
-    처리한다.
+    ``slots``가 주어지면 CheckpointManager가 모델, optimizer, scheduler,
+    GradScaler 복원을 소유한다. caller인 trainer는 반환된 ``trainer_state``로
+    global_step 같은 scalar loop state만 적용한다.
 
     반환 dict 구조:
-    - ``"ckpt_dir"``: 체크포인트 디렉토리 경로 (Path) — 모델/optimizer 로드 경로 계산용
+    - ``"ckpt_dir"``: 체크포인트 디렉토리 경로 (Path)
     - ``"trainer_state"``: trainer_state.json 내용 (dict 또는 None)
     - ``"scaler"``: GradScaler state_dict (또는 None)
 
@@ -607,6 +677,7 @@ def _load_legacy_checkpoint(ckpt_dir: Path) -> LoadedCheckpoint:
         scaler=scaler,
         manifest=None,
         legacy=True,
+        legacy_policy="read_only",
     )
 
 
@@ -645,136 +716,6 @@ def gather_fsdp_state_dict(model: "nn.Module", is_main_process: bool) -> "dict |
         # rank0_only=True → result populated on rank 0 only; others get {}.
         state_dict = model.state_dict()
     return state_dict if is_main_process else None
-
-
-# ── Export ──────────────────────────────────────────────────────────────────
-
-
-def export_model_artifact(
-    model: "nn.Module",
-    settings: Any,
-    *,
-    policy_state_dict: "dict | None" = None,
-) -> None:
-    """Policy / SFT 모델을 MLflow artifact로 등록한다.
-
-    LoRA면 adapter만, full finetuning이면 전체 모델을 저장한다.
-    merge는 수행하지 않는다 — merge는 ``mdp export`` / ``mdp serve`` 시점에 on-demand.
-
-    :param model: 등록할 모델 (DDP/FSDP 래퍼 포함 가능).
-    :param settings: Settings 객체 (recipe, tokenizer 정보 추출용).
-    :param policy_state_dict: FSDP cooperative gather로 수집한 full state dict.
-                              제공되면 모델에서 직접 state_dict를 읽지 않는다.
-    """
-    import mlflow
-    import tempfile
-
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp)
-            _write_serving_model_artifact(
-                model,
-                settings,
-                output_dir,
-                policy_state_dict=policy_state_dict,
-            )
-            mlflow.log_artifacts(tmp, "model")
-            logger.info("모델을 MLflow artifact로 등록: model/")
-    except Exception as e:
-        logger.warning(f"모델 artifact 저장 실패: {e}")
-
-
-def export_sft_model_artifact(
-    model: "nn.Module",
-    settings: Any,
-    checkpoint_dir: Path,
-) -> None:
-    """SFT Trainer 전용 모델 artifact 등록.
-
-    LoRA면 adapter만, full finetuning이면 전체 모델을 저장한다.
-    tokenizer와 recipe.yaml도 함께 등록한다.
-
-    :param model: 등록할 모델 (DDP/FSDP 래퍼 포함 가능).
-    :param settings: Settings 객체 (recipe, tokenizer 정보 추출용).
-    :param checkpoint_dir: recipe.yaml 소스 디렉토리.
-    """
-    import shutil
-    import tempfile
-
-    import mlflow
-
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            output_dir = Path(tmp)
-            _write_serving_model_artifact(model, settings, output_dir)
-
-            # recipe.yaml 복사
-            recipe_src = checkpoint_dir / "recipe.yaml"
-            if recipe_src.exists():
-                shutil.copy(recipe_src, output_dir / "recipe.yaml")
-
-            mlflow.log_artifacts(tmp, "model")
-            logger.info("모델 artifact를 MLflow에 등록: model/")
-
-    except Exception as e:
-        logger.warning(f"모델 artifact 등록 실패 (학습 결과는 유효합니다): {e}")
-
-
-def _write_serving_model_artifact(
-    model: "nn.Module",
-    settings: Any,
-    output_dir: Path,
-    *,
-    policy_state_dict: "dict | None" = None,
-) -> None:
-    """Write the flat serving artifact layout consumed by ``reconstruct_model``."""
-    import yaml
-
-    target = getattr(model, "module", model)
-    has_adapter = hasattr(target, "peft_config")
-
-    if policy_state_dict is not None:
-        if has_adapter:
-            from peft import get_peft_model_state_dict
-            from safetensors.torch import save_file
-
-            adapter_names = list(target.peft_config.keys())
-            adapter_name = adapter_names[0] if adapter_names else "default"
-            adapter_sd = get_peft_model_state_dict(
-                target,
-                state_dict=policy_state_dict,
-                adapter_name=adapter_name,
-            )
-            save_file(adapter_sd, str(output_dir / "adapter_model.safetensors"))
-            for _adapter_name, cfg in target.peft_config.items():
-                cfg.save_pretrained(str(output_dir))
-        else:
-            from safetensors.torch import save_file
-
-            save_file(policy_state_dict, str(output_dir / "model.safetensors"))
-    elif has_adapter or hasattr(target, "save_pretrained"):
-        target.save_pretrained(output_dir)
-    else:
-        from safetensors.torch import save_file
-
-        save_file(target.state_dict(), output_dir / "model.safetensors")
-
-    recipe = settings.recipe
-    from mdp.settings.components import component_kwargs
-
-    tokenizer_name = component_kwargs(recipe.data.collator).get("tokenizer")
-    if tokenizer_name:
-        try:
-            from transformers import AutoTokenizer
-
-            AutoTokenizer.from_pretrained(tokenizer_name).save_pretrained(output_dir)
-        except Exception as e:
-            logger.warning(f"토크나이저 저장 실패 (무시): {e}")
-
-    recipe_dict = recipe.model_dump(mode="json")
-    (output_dir / "recipe.yaml").write_text(
-        yaml.dump(recipe_dict, allow_unicode=True)
-    )
 
 
 # ── Find ────────────────────────────────────────────────────────────────────

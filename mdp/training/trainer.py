@@ -29,6 +29,7 @@ from mdp.assembly.bundles import (
     create_sft_optimizer,
     create_sft_scheduler,
 )
+from mdp.artifacts.serving import ServingArtifactManager
 from mdp.models.forward import make_forward_fn
 from mdp.settings.components import ComponentSpec
 from mdp.settings.resolver import ComponentResolver
@@ -42,7 +43,6 @@ from mdp.training._common import (
 )
 from mdp.training._base import BaseTrainer
 from mdp.training._checkpoint import (
-    export_sft_model_artifact,
     find_best_checkpoint,
     load_checkpoint,
     ModelSlot,
@@ -236,70 +236,17 @@ class Trainer(BaseTrainer):
         ]
 
     def _load_checkpoint_state(self, state: dict) -> None:
-        """``load_checkpoint``가 반환한 state dict로 학습 상태를 복원한다.
+        """``load_checkpoint``가 반환한 trainer scalar state를 적용한다.
 
-        복원 순서 (순서 민감):
-        1. 모델 weights (adapter → safetensors → pt 우선순위)
-        2. optimizer state_dict
-        3. scheduler state_dict
-        4. GradScaler state_dict
-        5. trainer scalar state (global_step, start_epoch, _resume_step_in_epoch)
-        6. EP scatter (expert parallel 사용 시)
+        모델, optimizer, scheduler, GradScaler I/O는 ``CheckpointManager``가
+        ``load_checkpoint(..., slots=..., strategy=..., scaler=...)`` 경로에서
+        이미 처리한다. Trainer는 loop 재개에 필요한 scalar state만 소비한다.
 
         :param state: ``load_checkpoint(ckpt_dir)``가 반환한 dict.
         """
         ckpt_path: Path = state["ckpt_dir"]
         logger.info(f"체크포인트에서 재개: {ckpt_path}")
 
-        # 1. Model weights: adapter_model.safetensors → model.safetensors → model.pt
-        adapter_path = ckpt_path / "adapter_model.safetensors"
-        safetensors_path = ckpt_path / "model.safetensors"
-        model_pt_path = ckpt_path / "model.pt"
-
-        target = getattr(self.model, "module", self.model)
-
-        if adapter_path.exists():
-            # LoRA / PEFT adapter
-            if hasattr(target, "load_adapter"):
-                from mdp.serving.model_loader import _get_adapter_name
-                adapter_name = _get_adapter_name(ckpt_path)
-                target.load_adapter(str(ckpt_path), adapter_name=adapter_name)
-                logger.info("LoRA adapter loaded from %s (adapter_name=%s)", ckpt_path, adapter_name)
-            else:
-                logger.warning(
-                    "adapter_model.safetensors found but model has no load_adapter method"
-                )
-        elif safetensors_path.exists():
-            try:
-                from safetensors.torch import load_file
-                target.load_state_dict(load_file(safetensors_path))
-            except ImportError:
-                logger.warning("safetensors not installed, cannot load model.safetensors")
-        elif model_pt_path.exists():
-            target.load_state_dict(
-                torch.load(model_pt_path, map_location="cpu", weights_only=True)
-            )
-
-        # 2. Optimizer
-        opt_path = ckpt_path / "optimizer.pt"
-        if opt_path.exists():
-            self.optimizer.load_state_dict(
-                torch.load(opt_path, map_location="cpu", weights_only=True)
-            )
-
-        # 3. Scheduler
-        sched_path = ckpt_path / "scheduler.pt"
-        if sched_path.exists() and self.scheduler is not None:
-            self.scheduler.load_state_dict(
-                torch.load(sched_path, map_location="cpu", weights_only=True)
-            )
-
-        # 4. GradScaler
-        scaler_sd = state.get("scaler")
-        if scaler_sd is not None and self.scaler.is_enabled():
-            self.scaler.load_state_dict(scaler_sd)
-
-        # 5. Trainer scalar state
         trainer_state = state.get("trainer_state")
         if trainer_state is not None:
             saved_epoch = trainer_state.get("epoch", 0)
@@ -312,7 +259,7 @@ class Trainer(BaseTrainer):
             else:
                 self.start_epoch = saved_epoch
 
-        # 6. EP scatter (checkpoint에서 전체 expert를 로드한 후, 비담당 expert를 다시 분배)
+        # CheckpointManager가 전체 expert를 로드한 후 비담당 expert를 다시 분배한다.
         if self.expert_parallel is not None:
             self.expert_parallel.scatter_experts(self.model, self.device)
 
@@ -1097,7 +1044,20 @@ class Trainer(BaseTrainer):
         # ``artifact_dirs``로 일반화하기 부적합하다.)
         if best_ckpt:
             try:
-                export_sft_model_artifact(self.model, self.settings, best_ckpt)
+                import tempfile
+
+                import mlflow
+
+                with tempfile.TemporaryDirectory() as tmp:
+                    ServingArtifactManager().write(
+                        self.model,
+                        self.settings,
+                        Path(tmp),
+                        mode="mlflow_snapshot",
+                        recipe_source_dir=best_ckpt,
+                    )
+                    mlflow.log_artifacts(tmp, "model")
+                logger.info("모델 artifact를 MLflow에 등록: model/")
             except Exception as e:
                 logger.warning(f"모델 export 실패 (학습 결과는 유효합니다): {e}")
 

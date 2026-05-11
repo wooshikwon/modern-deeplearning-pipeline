@@ -178,6 +178,52 @@ def test_checkpoint_manager_restore_uses_manifest_record_paths(tmp_path: Path) -
     assert torch.allclose(target.weight, source.weight)
 
 
+def test_checkpoint_manager_restore_owns_manifestless_legacy_slots(tmp_path: Path) -> None:
+    source = torch.nn.Linear(2, 1)
+    target = torch.nn.Linear(2, 1)
+    for param in target.parameters():
+        param.data.zero_()
+
+    optimizer = torch.optim.SGD(target.parameters(), lr=0.5)
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1)
+    scaler_state = {"scale": 128.0}
+    ckpt_dir = tmp_path / "legacy"
+    ckpt_dir.mkdir()
+    torch.save(source.state_dict(), ckpt_dir / "model.pt")
+    torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
+    torch.save(scheduler.state_dict(), ckpt_dir / "scheduler.pt")
+    torch.save(scaler_state, ckpt_dir / "scaler.pt")
+    (ckpt_dir / "trainer_state.json").write_text(json.dumps({"global_step": 2}))
+
+    class _Scaler:
+        def __init__(self) -> None:
+            self.loaded = None
+
+        def load_state_dict(self, state):
+            self.loaded = state
+
+    scaler = _Scaler()
+
+    loaded = CheckpointManager().restore(
+        ckpt_dir,
+        [
+            ModelSlot(
+                name="",
+                role="policy",
+                model=target,
+                trainable=True,
+                optimizer=optimizer,
+                scheduler=scheduler,
+            )
+        ],
+        scaler=scaler,
+    )
+
+    assert loaded.legacy is True
+    assert torch.allclose(target.weight, source.weight)
+    assert scaler.loaded == scaler_state
+
+
 def test_checkpoint_manager_restore_hf_pretrained_bin_record(tmp_path: Path) -> None:
     source = torch.nn.Linear(2, 1)
     target = torch.nn.Linear(2, 1)
@@ -305,4 +351,6 @@ def test_checkpoint_manager_reads_manifestless_legacy_checkpoint(tmp_path: Path)
         "ckpt_dir": ckpt_dir,
         "trainer_state": {"global_step": 2},
         "scaler": {"scale": 128.0},
+        "legacy": True,
+        "legacy_policy": "read_only",
     }

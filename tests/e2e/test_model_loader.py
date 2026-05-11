@@ -378,6 +378,88 @@ def test_reconstruct_model_device_map_requires_weights(tmp_path: Path) -> None:
         reconstruct_model(tmp_path, device_map="auto")
 
 
+def test_reconstruct_model_adapter_device_map_uses_current_computed_map_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Adapter reconstruction preserves the current computed-map behavior."""
+    from mdp.serving.model_loader import reconstruct_model
+
+    (tmp_path / "adapter_config.json").write_text(
+        json.dumps({"adapter_name": "trained"})
+    )
+    (tmp_path / "adapter_model.safetensors").touch()
+    _write_tiny_recipe(
+        tmp_path,
+        name="adapter-device-map-current-policy-test",
+        adapter={"_component_": "LoRA", "r": 4, "alpha": 8},
+    )
+
+    class FakePeftModel:
+        @staticmethod
+        def from_pretrained(
+            model: Any,
+            checkpoint_dir: str,
+            *,
+            adapter_name: str,
+        ) -> Any:
+            assert checkpoint_dir == str(tmp_path)
+            assert adapter_name == "trained"
+            return model
+
+    inferred: list[dict[str, Any]] = []
+    dispatched: list[dict[str, Any]] = []
+
+    def infer_auto_device_map(
+        model: Any,
+        *,
+        no_split_module_classes: Any = None,
+        **kwargs: Any,
+    ) -> dict[str, str]:
+        inferred.append({
+            "no_split_module_classes": no_split_module_classes,
+            "kwargs": kwargs,
+        })
+        return {"": "cpu"}
+
+    def dispatch_model(model: Any, device_map: dict[str, str]) -> Any:
+        dispatched.append({"device_map": device_map})
+        model.hf_device_map = device_map
+        return model
+
+    monkeypatch.setitem(
+        sys.modules,
+        "peft",
+        type("FakePeftModule", (), {"PeftModel": FakePeftModel}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "accelerate",
+        type(
+            "FakeAccelerateModule",
+            (),
+            {
+                "infer_auto_device_map": infer_auto_device_map,
+                "dispatch_model": dispatch_model,
+            },
+        ),
+    )
+
+    loaded, _settings = reconstruct_model(
+        tmp_path,
+        merge=True,
+        device_map="balanced",
+        max_memory={"cpu": "4GiB"},
+    )
+
+    assert inferred == [{
+        "no_split_module_classes": None,
+        "kwargs": {"max_memory": {"cpu": "4GiB"}},
+    }]
+    assert dispatched == [{"device_map": {"": "cpu"}}]
+    assert loaded.hf_device_map == {"": "cpu"}
+
+
 def test_serving_config_device_map_fields() -> None:
     """ServingConfig에 device_map, max_memory 필드가 존재한다."""
     from mdp.settings.schema import ServingConfig

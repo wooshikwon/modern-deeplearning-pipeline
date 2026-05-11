@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 
 import typer
 
 from mdp.cli.output import build_error, build_result, emit_result, is_json_mode, resolve_model_source
-from mdp.settings.components import component_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -48,37 +46,21 @@ def run_export(
 
         # 모델 재구성 + merge
         model, settings = reconstruct_model(source_dir, merge=True)
-        recipe = settings.recipe
         target = getattr(model, "module", model)
 
         # 출력 디렉토리 생성
         output_dir = Path(output)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 모델 저장
-        # BaseModel.export()가 있으면 우선 위임 (backbone+head 분리 저장 등 커스텀 구조 지원).
-        # 순수 HF 모델(save_pretrained)과 generic fallback은 이후 처리.
-        if hasattr(target, "export"):
-            target.export(output_dir)
-        elif hasattr(target, "save_pretrained"):
-            target.save_pretrained(output_dir)
-        else:
-            from safetensors.torch import save_file
-            save_file(target.state_dict(), output_dir / "model.safetensors")
+        from mdp.artifacts.serving import ServingArtifactManager
 
-        # tokenizer 저장 — collator _component_의 init_args에서 추출
-        tokenizer_name = component_kwargs(recipe.data.collator).get("tokenizer")
-        if tokenizer_name:
-            try:
-                from transformers import AutoTokenizer
-                AutoTokenizer.from_pretrained(tokenizer_name).save_pretrained(output_dir)
-            except Exception as e:
-                logger.warning(f"토크나이저 저장 실패 (무시): {e}")
-
-        # recipe.yaml 복사
-        recipe_src = source_dir / "recipe.yaml"
-        if recipe_src.exists():
-            shutil.copy(recipe_src, output_dir / "recipe.yaml")
+        ServingArtifactManager().write(
+            model,
+            settings,
+            output_dir,
+            mode="deployment_export",
+            recipe_source_dir=source_dir,
+        )
 
         if not is_json_mode():
             typer.echo(f"내보내기 완료: {output_dir}")

@@ -18,7 +18,12 @@ import yaml
 
 from mdp.settings.schema import Config, Recipe
 from mdp.settings.loader import SettingsLoader
-from scripts.prepare_test_fixtures import DATASETS, TINY_MODELS, cache_dataset_slice
+from scripts.prepare_test_fixtures import (
+    DATASETS,
+    TINY_MODELS,
+    cache_dataset_slice,
+    ensure_cli_architecture,
+)
 
 
 DATASET_FIXTURE_NAMES = {
@@ -134,6 +139,11 @@ def test_marker_skip_reasons_preserve_hardware_boundaries() -> None:
         (["--suite", "gpu", "--dry-run"], "-m gpu and fixtures and not distributed and not memory"),
         (["--suite", "distributed", "--dry-run"], "-m distributed and fixtures"),
         (["--suite", "memory", "--memory-profile", "cuda_24gb", "--dry-run"], "-m memory"),
+        (
+            ["--suite", "acceptance", "--memory-profile", "cuda_24gb", "--dry-run"],
+            "tests/e2e/test_gpu_cli_matrix.py tests/e2e/test_gpu_distributed_cli_matrix.py "
+            "tests/e2e/test_gpu_memory_budget.py",
+        ),
     ],
 )
 def test_cloud_test_suite_dry_run_preserves_pytest_selection(args: list[str], expected: str) -> None:
@@ -151,11 +161,39 @@ def test_cloud_test_suite_dry_run_preserves_pytest_selection(args: list[str], ex
     assert expected in result.stdout
 
 
+def test_cloud_test_acceptance_requires_memory_profile() -> None:
+    """acceptance is a paid-GPU completion gate and must include memory ceilings."""
+    result = subprocess.run(
+        ["bash", str(CLOUD_TEST_SCRIPT), "--suite", "acceptance", "--dry-run"],
+        cwd=CLOUD_TEST_SCRIPT.parents[1],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
+
+    assert result.returncode != 0
+    assert "acceptance suite requires --memory-profile" in result.stdout
+
+
 def test_tiny_model_families_are_supported_by_verify_models() -> None:
     """Fixture script should only declare families with local verify paths."""
     families = {family for _local_name, _repo, family in TINY_MODELS}
 
     assert families <= {"causal-lm", "encoder", "vision"}
+
+
+def test_encoder_fixture_config_declares_cli_architecture(tmp_path: Path) -> None:
+    """Direct --pretrained CLI fixtures must satisfy config.architectures contract."""
+    model_dir = tmp_path / "bert-tiny"
+    model_dir.mkdir()
+    config_path = model_dir / "config.json"
+    config_path.write_text(json.dumps({"model_type": "bert"}))
+
+    ensure_cli_architecture(model_dir, "encoder")
+
+    config = json.loads(config_path.read_text())
+    assert config["architectures"] == ["BertForSequenceClassification"]
 
 
 def test_memory_budget_profiles_have_required_keys() -> None:

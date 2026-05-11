@@ -97,6 +97,49 @@ def test_batch_inference_hf_style_forward(tmp_path: Path) -> None:
     assert inspector.shapes == [(2, 2)]
 
 
+def test_batch_inference_ignores_scalar_outputs_for_batch_size(tmp_path: Path) -> None:
+    """HF causal LM outputs may include scalar loss before batched logits."""
+
+    class _LMWithLoss(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.embed = nn.Embedding(8, 4)
+            self.proj = nn.Linear(4, 8)
+
+        def forward(self, input_ids=None, labels=None):
+            hidden = self.embed(input_ids)
+            logits = self.proj(hidden)
+            return {"loss": logits.mean(), "logits": logits}
+
+    class _Inspector(BaseInferenceCallback):
+        def __init__(self) -> None:
+            self.metadata_lengths: list[int] = []
+
+        def on_batch(self, batch_idx: int, batch: dict, outputs: dict, **kwargs) -> None:
+            self.metadata_lengths.append(len(kwargs["metadata"]))
+
+    inspector = _Inspector()
+    loader = ListDataLoader([
+        {
+            "input_ids": torch.randint(0, 8, (2, 4)),
+            "labels": torch.randint(0, 8, (2, 4)),
+        }
+    ])
+
+    run_batch_inference(
+        model=_LMWithLoss(),
+        dataloader=loader,
+        output_path=tmp_path / "preds",
+        output_format="jsonl",
+        task="text_generation",
+        device="cpu",
+        callbacks=[inspector],
+        metadata=[{"id": 0}, {"id": 1}],
+    )
+
+    assert inspector.metadata_lengths == [2]
+
+
 def test_batch_inference_tensor_batch_single_arg_model(tmp_path: Path) -> None:
     """Tensor dataloader batches are passed directly to ``forward(x)`` models."""
 
