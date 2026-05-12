@@ -49,6 +49,12 @@ mdp = "mdp.__main__:app"
 [tool.setuptools.packages.find]
 include = ["mdp*"]
 
+[tool.setuptools.package-data]
+mdp = [
+    "templates/project/AGENT.md",
+    "templates/project/docs/*.md",
+]
+
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"

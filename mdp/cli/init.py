@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import sys
 from copy import deepcopy
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from textwrap import dedent
 from typing import Any
@@ -12,6 +14,24 @@ import typer
 import yaml
 
 from mdp.cli.output import build_error, build_result, emit_result, is_json_mode
+
+
+def _copy_template_tree(source: Traversable, destination: Path) -> None:
+    """Package resource tree를 새 프로젝트로 복사한다."""
+    if source.is_dir():
+        destination.mkdir(parents=True, exist_ok=True)
+        for child in source.iterdir():
+            _copy_template_tree(child, destination / child.name)
+        return
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source.read_bytes())
+
+
+def _copy_project_templates(root: Path) -> None:
+    """AGENT.md와 docs/ 템플릿을 scaffold에 동봉한다."""
+    template_root = files("mdp").joinpath("templates", "project")
+    _copy_template_tree(template_root, root)
 
 
 def _find_catalog_entry(model_name: str) -> dict[str, Any] | None:
@@ -484,6 +504,8 @@ def init_project(
         ├── recipes/example.yaml
         ├── data/
         ├── checkpoints/
+        ├── docs/
+        ├── AGENT.md
         └── .gitignore
     """
     root = Path(project_name)
@@ -552,11 +574,14 @@ def init_project(
 
         (root / "recipes" / "example.yaml").write_text(recipe_content)
         (root / ".gitignore").write_text(_gitignore_content())
+        _copy_project_templates(root)
 
         if not is_json_mode():
             typer.echo(f"MDP 프로젝트 '{project_name}' 생성 완료:")
             for d in dirs:
                 typer.echo(f"  {d}/")
+            typer.echo(f"  {root / 'docs'}/")
+            typer.echo(f"  {root / 'AGENT.md'}")
             typer.echo(f"  {root / '.gitignore'}")
 
         if is_json_mode():

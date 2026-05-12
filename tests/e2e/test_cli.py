@@ -68,13 +68,21 @@ def test_init_project(tmp_path: Path, monkeypatch) -> None:
     assert (root / "recipes").is_dir()
     assert (root / "data").is_dir()
     assert (root / "checkpoints").is_dir()
+    assert (root / "docs").is_dir()
     assert (root / "configs" / "local.yaml").is_file()
     assert (root / "recipes" / "example.yaml").is_file()
+    assert (root / "AGENT.md").is_file()
+    assert (root / "docs" / "getting-started.md").is_file()
+    assert (root / "docs" / "cli-reference.md").is_file()
+    assert (root / "docs" / "configuration.md").is_file()
     assert (root / ".gitignore").is_file()
 
     # Verify file content is non-empty
     assert (root / "configs" / "local.yaml").stat().st_size > 0
     assert (root / "recipes" / "example.yaml").stat().st_size > 0
+    agent_text = (root / "AGENT.md").read_text()
+    assert "docs/getting-started.md" in agent_text
+    assert "docs/configuration.md" in agent_text
 
     settings = SettingsLoader().load_estimation_settings(str(root / "recipes" / "example.yaml"))
     assert settings.recipe.name
@@ -99,6 +107,8 @@ def test_cli_entry_init_json_creates_project(tmp_path: Path) -> None:
     assert payload["task"] == "image_classification"
     assert payload["model"] == "resnet18"
     assert (tmp_path / "entry-project" / "recipes" / "example.yaml").is_file()
+    assert (tmp_path / "entry-project" / "AGENT.md").is_file()
+    assert (tmp_path / "entry-project" / "docs" / "getting-started.md").is_file()
 
 
 @pytest.mark.parametrize(
